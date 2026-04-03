@@ -111,6 +111,9 @@ nnoremap Y y$
 " Don't lose register contents on visual paste
 vnoremap p "_dP
 
+" Preview markdown with glow (renders tables with box-drawing chars)
+nnoremap <leader>m :!glow %<CR>
+
 " Quick open terminal
 nnoremap <leader>t :terminal<CR>
 
