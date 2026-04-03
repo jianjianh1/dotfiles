@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="jianjianh1/server-configs"
-DIR="$HOME/.server-configs"
-
-# Clone the repo (requires gh auth login)
-if [ -d "$DIR" ]; then
-    echo "Updating $DIR..."
-    git -C "$DIR" pull --ff-only
-else
-    echo "Cloning $REPO..."
-    gh repo clone "$REPO" "$DIR"
-fi
+DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Symlink configs (back up existing files)
 backup_and_link() {
