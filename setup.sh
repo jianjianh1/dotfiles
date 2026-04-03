@@ -57,5 +57,14 @@ else
     echo "glow already installed: $(glow --version)"
 fi
 
+# Install Claude Code if not present
+if ! command -v claude &>/dev/null; then
+    echo "Installing Claude Code..."
+    curl -fsSL https://claude.ai/install.sh | sh
+    echo "  Run 'claude' to authenticate and get started."
+else
+    echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
+fi
+
 echo ""
 echo "Done! Start a new tmux session or run: tmux source ~/.tmux.conf"
