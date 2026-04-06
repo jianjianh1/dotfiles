@@ -50,11 +50,13 @@ fi
 # Install Claude Code if not present
 if ! command -v claude &>/dev/null; then
     echo "Installing Claude Code..."
-    curl -fsSL https://claude.ai/install.sh | sh
+    curl -fsSL https://claude.ai/install.sh | bash
     echo "  Run 'claude' to authenticate and get started."
 else
     echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
 fi
+
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 
 echo ""
 echo "Done! Start a new tmux session or run: tmux source ~/.tmux.conf"
