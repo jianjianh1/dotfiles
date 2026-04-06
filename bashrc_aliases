@@ -1,0 +1,47 @@
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# ls
+alias ll='ls -alFh --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+
+# grep
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+# Git
+alias gs='git status'
+alias ga='git add'
+alias gc='git commit'
+alias gp='git push'
+alias gl='git log --oneline --graph --decorate -20'
+alias gd='git diff'
+alias gco='git checkout'
+alias gb='git branch'
+
+# Safety nets
+alias rm='rm -i'
+alias mv='mv -i'
+alias cp='cp -i'
+
+# Disk usage
+alias df='df -h'
+alias du='du -h'
+alias dud='du -d 1 -h | sort -hr'
+
+# Misc
+alias h='history'
+alias j='jobs -l'
+alias cls='clear'
+alias path='echo -e ${PATH//:/\\n}'
+alias now='date +"%Y-%m-%d %H:%M:%S"'
+
+# tmux
+alias ta='tmux attach -t'
+alias tn='tmux new -s'
+alias tl='tmux list-sessions'
+alias tk='tmux kill-session -t'

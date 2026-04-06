@@ -70,8 +70,12 @@ else
 fi
 
 backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports"
+backup_and_link "$DIR/bashrc_aliases" "$HOME/.bashrc_aliases"
 if ! grep -qF 'source ~/.bashrc_exports' ~/.bashrc 2>/dev/null; then
     echo 'source ~/.bashrc_exports' >> ~/.bashrc
+fi
+if ! grep -qF 'source ~/.bashrc_aliases' ~/.bashrc 2>/dev/null; then
+    echo 'source ~/.bashrc_aliases' >> ~/.bashrc
 fi
 source ~/.bashrc
 
