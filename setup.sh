@@ -56,7 +56,24 @@ else
     echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
 fi
 
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+# Install OpenAI Codex CLI if not present
+if ! command -v codex &>/dev/null; then
+    if command -v npm &>/dev/null; then
+        echo "Installing Codex CLI..."
+        npm install -g @openai/codex
+        echo "  Run 'codex' to get started."
+    else
+        echo "Skipping Codex CLI (npm not found — install Node.js first)"
+    fi
+else
+    echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
+fi
+
+backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports"
+if ! grep -qF 'source ~/.bashrc_exports' ~/.bashrc 2>/dev/null; then
+    echo 'source ~/.bashrc_exports' >> ~/.bashrc
+fi
+source ~/.bashrc
 
 echo ""
 echo "Done! Start a new tmux session or run: tmux source ~/.tmux.conf"

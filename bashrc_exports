@@ -1,0 +1,27 @@
+# PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# Prompt — report current directory via OSC 1337 for terminal integrations
+export PS1="$PS1\[\e]1337;CurrentDir=$(pwd)\a\]"
+
+# Default editor (matches vimrc config in this repo)
+export EDITOR=vim
+export VISUAL=vim
+
+# History
+export HISTSIZE=50000
+export HISTFILESIZE=100000
+export HISTCONTROL=ignoreboth:erasedups
+export HISTIGNORE="ls:cd:cd -:pwd:exit:clear"
+export HISTTIMEFORMAT="%F %T  "
+
+# Colored output
+export CLICOLOR=1
+export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# Less — case-insensitive search, raw colors, no bell
+export LESS='-iRQ'
+
+# Locale
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
