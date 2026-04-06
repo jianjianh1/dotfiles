@@ -1,0 +1,23 @@
+# Codex CLI configuration
+# Symlinked to ~/.codex/config.toml by setup.sh
+
+# Reasoning
+model_reasoning_effort = "high"
+
+# Bypass approvals and sandbox (equivalent to --dangerously-bypass-approvals-and-sandbox)
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+# Shell — inherit all env vars so tools like gh, npm, etc. work
+[shell_environment_policy]
+inherit = "all"
+
+# History — persist sessions, cap at 50MB
+[history]
+persistence = "save-all"
+max_bytes = 52428800
+
+# Notifications on completion
+[tui]
+notifications = true
+animations = true

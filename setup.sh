@@ -71,6 +71,10 @@ fi
 
 backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports"
 backup_and_link "$DIR/bashrc_aliases" "$HOME/.bashrc_aliases"
+mkdir -p "$HOME/.claude"
+backup_and_link "$DIR/claude_settings.json" "$HOME/.claude/settings.json"
+mkdir -p "$HOME/.codex"
+backup_and_link "$DIR/codex_config.toml" "$HOME/.codex/config.toml"
 if ! grep -qF 'source ~/.bashrc_exports' ~/.bashrc 2>/dev/null; then
     echo 'source ~/.bashrc_exports' >> ~/.bashrc
 fi
@@ -78,6 +82,9 @@ if ! grep -qF 'source ~/.bashrc_aliases' ~/.bashrc 2>/dev/null; then
     echo 'source ~/.bashrc_aliases' >> ~/.bashrc
 fi
 source ~/.bashrc
+
+# Install Claude Code MCP plugins
+"$DIR/install_claude_plugins.sh"
 
 echo ""
 echo "Done! Start a new tmux session or run: tmux source ~/.tmux.conf"
