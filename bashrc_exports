@@ -1,6 +1,11 @@
 # PATH
 export PATH="$HOME/.local/bin:$PATH"
 
+# nvm
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+
 # Prompt — report current directory via OSC 1337 for terminal integrations
 export PS1="$PS1\[\e]1337;CurrentDir=$(pwd)\a\]"
 
@@ -25,3 +30,15 @@ export LESS='-iRQ'
 # Locale
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
+
+# fzf
+export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
+export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+export FZF_ALT_C_COMMAND='fd --type d --hidden --exclude .git'
+export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border'
+
+# bat
+export BAT_THEME="ansi"
+
+# dircolors
+[ -f ~/.dircolors ] && eval "$(dircolors -b ~/.dircolors)"

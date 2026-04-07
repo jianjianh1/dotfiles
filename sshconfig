@@ -1,0 +1,13 @@
+# Shared connection multiplexing — reuse existing SSH connections
+Host *
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+
+    # Keep connections alive
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+    # Speed up connections
+    AddKeysToAgent yes
+    IdentitiesOnly yes

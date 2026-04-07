@@ -45,3 +45,14 @@ alias ta='tmux attach -t'
 alias tn='tmux new -s'
 alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
+
+# bat (cat replacement)
+command -v bat &>/dev/null && alias cat='bat --paging=never'
+
+# fd (find replacement)
+command -v fd &>/dev/null && alias find='fd'
+
+# Modern tool integrations
+command -v rg &>/dev/null && alias grep='rg'
+command -v zoxide &>/dev/null && eval "$(zoxide init bash)"
+command -v fzf &>/dev/null && eval "$(fzf --bash 2>/dev/null)"

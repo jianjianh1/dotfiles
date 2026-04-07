@@ -1,0 +1,34 @@
+# Case-insensitive tab completion
+set completion-ignore-case on
+
+# Treat hyphens and underscores as equivalent for completion
+set completion-map-case on
+
+# Show all completions on first tab (no double-tab)
+set show-all-if-ambiguous on
+
+# Show common prefix then cycle through completions
+set menu-complete-display-prefix on
+
+# Color completions by file type (like ls)
+set colored-stats on
+
+# Color the common prefix in completions
+set colored-completion-prefix on
+
+# Don't ring bell on completion
+set bell-style none
+
+# Append / to symlinked directories on completion
+set mark-symlinked-directories on
+
+# Show file type indicator in completions (like ls -F)
+set visible-stats on
+
+# Arrow keys search history by prefix
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+
+# Ctrl+Left/Right to move by word
+"\e[1;5C": forward-word
+"\e[1;5D": backward-word

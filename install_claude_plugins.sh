@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # Install MCP servers (plugins) for Claude Code.
 # Requires: claude CLI, npx (node), and optionally a GITHUB_PERSONAL_ACCESS_TOKEN.
@@ -43,14 +43,56 @@ claude mcp add --scope user --transport stdio memory \
 
 # --- Fetch ---
 echo "  Adding Fetch MCP server..."
-claude mcp add --scope user --transport stdio fetch \
-    -- npx -y @modelcontextprotocol/server-fetch
+if command -v uvx &>/dev/null; then
+    claude mcp add --scope user --transport stdio fetch \
+        -- uvx mcp-server-fetch
+else
+    echo "    Skipping Fetch (uvx not found — install uv first)"
+fi
 
 # --- Git ---
 echo "  Adding Git MCP server..."
-claude mcp add --scope user --transport stdio git \
-    -- npx -y @modelcontextprotocol/server-git
+if command -v uvx &>/dev/null; then
+    claude mcp add --scope user --transport stdio git \
+        -- uvx mcp-server-git
+else
+    echo "    Skipping Git (uvx not found — install uv first)"
+fi
 
 echo ""
 echo "Done! Installed MCP servers:"
 claude mcp list
+
+# ===== Marketplace Plugins =====
+echo ""
+echo "Installing Claude Code marketplace plugins..."
+
+# Integrations
+claude plugin install github@claude-plugins-official 2>/dev/null || true
+claude plugin install linear@claude-plugins-official 2>/dev/null || true
+claude plugin install sentry@claude-plugins-official 2>/dev/null || true
+claude plugin install notion@claude-plugins-official 2>/dev/null || true
+claude plugin install slack@claude-plugins-official 2>/dev/null || true
+
+# Codex (OpenAI) — add marketplace then install
+claude plugin marketplace add openai/codex-plugin-cc 2>/dev/null || true
+claude plugin install codex@openai-codex 2>/dev/null || true
+
+# Development workflows
+claude plugin install commit-commands@claude-plugins-official 2>/dev/null || true
+claude plugin install pr-review-toolkit@claude-plugins-official 2>/dev/null || true
+
+# Development tools
+claude plugin install agent-sdk-dev@claude-plugins-official 2>/dev/null || true
+
+# Code intelligence (LSPs)
+claude plugin install clangd-lsp@claude-plugins-official 2>/dev/null || true
+claude plugin install pyright-lsp@claude-plugins-official 2>/dev/null || true
+claude plugin install typescript-lsp@claude-plugins-official 2>/dev/null || true
+claude plugin install gopls-lsp@claude-plugins-official 2>/dev/null || true
+claude plugin install rust-analyzer-lsp@claude-plugins-official 2>/dev/null || true
+
+# Output styles
+claude plugin install explanatory-output-style@claude-plugins-official 2>/dev/null || true
+
+echo "Done! Installed marketplace plugins."
