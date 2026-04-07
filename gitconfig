@@ -1,0 +1,50 @@
+[user]
+	name = Jianjian Huang
+	email = jianjian.huang@utah.edu
+
+[init]
+	defaultBranch = main
+
+[core]
+	editor = vim
+	autocrlf = input
+	pager = less -FRX
+
+[pull]
+	rebase = true
+
+[push]
+	default = current
+	autoSetupRemote = true
+
+[fetch]
+	prune = true
+
+[merge]
+	conflictstyle = zdiff3
+
+[diff]
+	colorMoved = default
+
+[rebase]
+	autoStash = true
+
+[rerere]
+	enabled = true
+
+[alias]
+	s = status
+	co = checkout
+	br = branch
+	ci = commit
+	d = diff
+	ds = diff --staged
+	lg = log --oneline --graph --decorate -20
+	la = log --oneline --graph --decorate --all -30
+	undo = reset --soft HEAD~1
+	amend = commit --amend --no-edit
+	stash-all = stash save --include-untracked
+	wip = !git add -A && git commit -m 'WIP'
+
+[color]
+	ui = auto

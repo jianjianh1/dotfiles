@@ -17,6 +17,7 @@ backup_and_link() {
 echo "Linking config files..."
 backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
 backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
+backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig"
 
 # Create vim undo directory
 mkdir -p "$HOME/.vim/undodir"
