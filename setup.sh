@@ -18,6 +18,9 @@ echo "Linking config files..."
 backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
 backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
 backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig"
+if command -v gh &>/dev/null; then
+    gh auth setup-git 2>/dev/null || true
+fi
 backup_and_link "$DIR/inputrc"   "$HOME/.inputrc"
 backup_and_link "$DIR/dircolors" "$HOME/.dircolors"
 mkdir -p "$HOME/.ssh/sockets"
@@ -29,7 +32,7 @@ mkdir -p "$HOME/.vim/undodir"
 # Install glow (markdown renderer) if not present
 if ! command -v glow &>/dev/null; then
     echo "Installing glow..."
-    GLOW_VERSION="2.0.0"
+    GLOW_VERSION="$(gh_latest charmbracelet/glow)"
     ARCH="$(uname -m)"
     case "$ARCH" in
         x86_64)  GLOW_ARCH="x86_64" ;;
@@ -46,7 +49,7 @@ if ! command -v glow &>/dev/null; then
             sudo mv "$TMP/glow" /usr/local/bin/glow
         fi
         rm -rf "$TMP"
-        echo "  glow installed to /usr/local/bin/glow"
+        echo "  glow $GLOW_VERSION installed to /usr/local/bin/glow"
     fi
 else
     echo "glow already installed: $(glow --version)"
@@ -94,6 +97,12 @@ if command -v apt-get &>/dev/null; then
         fi
     fi
 fi
+
+# Helper: get latest release version from GitHub (strips leading 'v')
+gh_latest() {
+    curl -sI "https://github.com/$1/releases/latest" \
+        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|'
+}
 
 # Helper: install a binary from a GitHub release tarball
 install_gh_binary() {
@@ -153,38 +162,46 @@ esac
 
 if [ -n "$GH_ARCH" ]; then
     # fzf
+    V="$(gh_latest junegunn/fzf)"
     install_gh_binary fzf \
-        "https://github.com/junegunn/fzf/releases/download/v0.62.0/fzf-0.62.0-linux_${DEB_ARCH}.tar.gz"
+        "https://github.com/junegunn/fzf/releases/download/v${V}/fzf-${V}-linux_${DEB_ARCH}.tar.gz"
 
     # ripgrep
+    V="$(gh_latest BurntSushi/ripgrep)"
     install_gh_binary ripgrep \
-        "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${GH_ARCH}-unknown-linux-musl.tar.gz" rg
+        "https://github.com/BurntSushi/ripgrep/releases/download/${V}/ripgrep-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" rg
 
     # fd
+    V="$(gh_latest sharkdp/fd)"
     install_gh_binary fd \
-        "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-${GH_ARCH}-unknown-linux-musl.tar.gz"
+        "https://github.com/sharkdp/fd/releases/download/v${V}/fd-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
 
     # bat
+    V="$(gh_latest sharkdp/bat)"
     install_gh_deb bat \
-        "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat_0.25.0_${DEB_ARCH}.deb"
+        "https://github.com/sharkdp/bat/releases/download/v${V}/bat_${V}_${DEB_ARCH}.deb"
 
     # delta
+    V="$(gh_latest dandavison/delta)"
     install_gh_deb delta \
-        "https://github.com/dandavison/delta/releases/download/0.18.2/git-delta_0.18.2_${DEB_ARCH}.deb"
+        "https://github.com/dandavison/delta/releases/download/${V}/git-delta_${V}_${DEB_ARCH}.deb"
 
     # zoxide
+    V="$(gh_latest ajeetdsouza/zoxide)"
     install_gh_binary zoxide \
-        "https://github.com/ajeetdsouza/zoxide/releases/download/v0.9.6/zoxide-0.9.6-${GH_ARCH}-unknown-linux-musl.tar.gz"
+        "https://github.com/ajeetdsouza/zoxide/releases/download/v${V}/zoxide-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
 
     # lazygit
     LAZYGIT_ARCH="$GH_ARCH"
     [ "$LAZYGIT_ARCH" = "aarch64" ] && LAZYGIT_ARCH="arm64"
+    V="$(gh_latest jesseduffield/lazygit)"
     install_gh_binary lazygit \
-        "https://github.com/jesseduffield/lazygit/releases/download/v0.44.1/lazygit_0.44.1_Linux_${LAZYGIT_ARCH}.tar.gz"
+        "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
 
     # btop
+    V="$(gh_latest aristocratos/btop)"
     install_gh_binary btop \
-        "https://github.com/aristocratos/btop/releases/download/v1.4.0/btop-${GH_ARCH}-linux-musl.tbz" btop
+        "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-linux-musl.tbz" btop
 else
     echo "Skipping binary installs (unsupported arch: $ARCH)"
 fi
