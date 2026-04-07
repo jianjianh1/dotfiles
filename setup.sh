@@ -43,13 +43,9 @@ if ! command -v glow &>/dev/null; then
         TMP="$(mktemp -d)"
         curl -sL "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz" \
             | tar xz -C "$TMP" --strip-components=1
-        if [ -w /usr/local/bin ]; then
-            mv "$TMP/glow" /usr/local/bin/glow
-        else
-            sudo mv "$TMP/glow" /usr/local/bin/glow
-        fi
+        install_to "$TMP/glow" "$BIN_DIR/glow"
         rm -rf "$TMP"
-        echo "  glow $GLOW_VERSION installed to /usr/local/bin/glow"
+        echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
     fi
 else
     echo "glow already installed: $(glow --version)"
@@ -83,19 +79,47 @@ else
     echo "uv already installed: $(uv --version)"
 fi
 
-# Install CLI tools via apt (if available)
-if command -v apt-get &>/dev/null; then
+# Determine install directories based on write access
+NEED_SUDO=""
+if [ -w /usr/local/bin ]; then
+    BIN_DIR="/usr/local/bin"
+    LIB_DIR="/usr/local/lib"
+elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+    BIN_DIR="/usr/local/bin"
+    LIB_DIR="/usr/local/lib"
+    NEED_SUDO=1
+else
+    BIN_DIR="$HOME/.local/bin"
+    LIB_DIR="$HOME/.local/lib"
+    mkdir -p "$BIN_DIR" "$LIB_DIR"
+fi
+
+# Wrapper: move/copy files respecting sudo needs
+install_to() {
+    local src="$1" dst="$2"
+    if [ -n "$NEED_SUDO" ]; then
+        sudo mv "$src" "$dst"
+    else
+        mv "$src" "$dst"
+    fi
+}
+
+# Install CLI tools via apt (if available and we have access)
+if command -v apt-get &>/dev/null && { [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; }; then
     PKGS=()
     command -v jq    &>/dev/null || PKGS+=(jq)
     command -v htop  &>/dev/null || PKGS+=(htop)
     if [ ${#PKGS[@]} -gt 0 ]; then
         echo "Installing apt packages: ${PKGS[*]}..."
-        if [ -w /usr/bin ]; then
-            apt-get update -qq && apt-get install -y -qq "${PKGS[@]}"
-        else
+        if [ -n "$NEED_SUDO" ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq "${PKGS[@]}"
+        else
+            apt-get update -qq && apt-get install -y -qq "${PKGS[@]}"
         fi
     fi
+else
+    command -v jq   &>/dev/null || echo "Skipping jq (no apt/sudo — install manually)"
+    command -v htop &>/dev/null || echo "Skipping htop (no apt/sudo — install manually)"
 fi
 
 # Helper: get latest release version from GitHub (strips leading 'v')
@@ -125,16 +149,12 @@ install_gh_binary() {
         return
     fi
     chmod +x "$bin"
-    if [ -w /usr/local/bin ]; then
-        mv "$bin" /usr/local/bin/
-    else
-        sudo mv "$bin" /usr/local/bin/
-    fi
+    install_to "$bin" "$BIN_DIR/$bin_name"
     rm -rf "$TMP"
-    echo "  $name installed to /usr/local/bin/$bin_name"
+    echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
-# Helper: install a .deb from a GitHub release
+# Helper: install a .deb from a GitHub release (extracts binary if no dpkg/sudo)
 install_gh_deb() {
     local name="$1" url="$2"
     if command -v "$name" &>/dev/null; then
@@ -144,10 +164,26 @@ install_gh_deb() {
     echo "Installing $name..."
     TMP="$(mktemp -d)"
     curl -sL -o "$TMP/$name.deb" "$url"
-    if [ -w /usr/bin ]; then
-        dpkg -i "$TMP/$name.deb"
+    if [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; then
+        if [ -n "$NEED_SUDO" ]; then
+            sudo dpkg -i "$TMP/$name.deb"
+        else
+            dpkg -i "$TMP/$name.deb"
+        fi
     else
-        sudo dpkg -i "$TMP/$name.deb"
+        # No sudo — extract binary from .deb manually
+        cd "$TMP"
+        ar x "$name.deb"
+        tar xf data.tar.* 2>/dev/null
+        local bin
+        bin="$(find "$TMP" -type f -name "$name" -path '*/bin/*' | head -1)"
+        if [ -n "$bin" ]; then
+            chmod +x "$bin"
+            mv "$bin" "$BIN_DIR/$name"
+        else
+            echo "  Warning: $name binary not found in .deb, skipping"
+        fi
+        cd - >/dev/null
     fi
     rm -rf "$TMP"
     echo "  $name installed"
@@ -202,6 +238,37 @@ if [ -n "$GH_ARCH" ]; then
     V="$(gh_latest aristocratos/btop)"
     install_gh_binary btop \
         "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-linux-musl.tbz" btop
+
+    # carbonyl (Chromium-based TUI browser)
+    if [ ! -d "$LIB_DIR/carbonyl" ]; then
+        echo "Installing carbonyl..."
+        V="$(gh_latest fathyb/carbonyl)"
+        TMP="$(mktemp -d)"
+        curl -sL -o "$TMP/carbonyl.zip" \
+            "https://github.com/fathyb/carbonyl/releases/download/v${V}/carbonyl.linux-${DEB_ARCH}.zip"
+        unzip -q "$TMP/carbonyl.zip" -d "$TMP"
+        CARBONYL_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'carbonyl-*' | head -1)"
+        if [ -n "$NEED_SUDO" ]; then
+            sudo rm -rf "$LIB_DIR/carbonyl"
+            sudo mv "$CARBONYL_DIR" "$LIB_DIR/carbonyl"
+        else
+            rm -rf "$LIB_DIR/carbonyl"
+            mv "$CARBONYL_DIR" "$LIB_DIR/carbonyl"
+        fi
+        # Wrapper script that sets LD_LIBRARY_PATH
+        WRAPPER="#!/bin/sh\nLD_LIBRARY_PATH=$LIB_DIR/carbonyl exec $LIB_DIR/carbonyl/carbonyl \"\$@\""
+        if [ -n "$NEED_SUDO" ]; then
+            printf '%b\n' "$WRAPPER" | sudo tee "$BIN_DIR/carbonyl" >/dev/null
+            sudo chmod +x "$BIN_DIR/carbonyl"
+        else
+            printf '%b\n' "$WRAPPER" > "$BIN_DIR/carbonyl"
+            chmod +x "$BIN_DIR/carbonyl"
+        fi
+        rm -rf "$TMP"
+        echo "  carbonyl $V installed"
+    else
+        echo "carbonyl already installed"
+    fi
 else
     echo "Skipping binary installs (unsupported arch: $ARCH)"
 fi
