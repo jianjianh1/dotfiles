@@ -29,6 +29,35 @@ backup_and_link "$DIR/sshconfig" "$HOME/.ssh/config"
 # Create vim undo directory
 mkdir -p "$HOME/.vim/undodir"
 
+# Determine install directories based on write access
+NEED_SUDO=""
+if [ -w /usr/local/bin ]; then
+    BIN_DIR="/usr/local/bin"
+elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+    BIN_DIR="/usr/local/bin"
+    NEED_SUDO=1
+else
+    BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$BIN_DIR"
+fi
+
+# Wrapper: move/copy files respecting sudo needs
+install_to() {
+    local src="$1" dst="$2"
+    if [ -n "$NEED_SUDO" ]; then
+        sudo mv "$src" "$dst"
+    else
+        mv "$src" "$dst"
+    fi
+}
+
+# Helper: get latest release version from GitHub (strips leading 'v')
+gh_latest() {
+    curl -sI "https://github.com/$1/releases/latest" \
+        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|'
+}
+
+
 # Install glow (markdown renderer) if not present
 if ! command -v glow &>/dev/null; then
     echo "Installing glow..."
@@ -79,31 +108,6 @@ else
     echo "uv already installed: $(uv --version)"
 fi
 
-# Determine install directories based on write access
-NEED_SUDO=""
-if [ -w /usr/local/bin ]; then
-    BIN_DIR="/usr/local/bin"
-    LIB_DIR="/usr/local/lib"
-elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
-    BIN_DIR="/usr/local/bin"
-    LIB_DIR="/usr/local/lib"
-    NEED_SUDO=1
-else
-    BIN_DIR="$HOME/.local/bin"
-    LIB_DIR="$HOME/.local/lib"
-    mkdir -p "$BIN_DIR" "$LIB_DIR"
-fi
-
-# Wrapper: move/copy files respecting sudo needs
-install_to() {
-    local src="$1" dst="$2"
-    if [ -n "$NEED_SUDO" ]; then
-        sudo mv "$src" "$dst"
-    else
-        mv "$src" "$dst"
-    fi
-}
-
 # Install CLI tools via apt (if available and we have access)
 if command -v apt-get &>/dev/null && { [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; }; then
     PKGS=()
@@ -121,12 +125,6 @@ else
     command -v jq   &>/dev/null || echo "Skipping jq (no apt/sudo — install manually)"
     command -v htop &>/dev/null || echo "Skipping htop (no apt/sudo — install manually)"
 fi
-
-# Helper: get latest release version from GitHub (strips leading 'v')
-gh_latest() {
-    curl -sI "https://github.com/$1/releases/latest" \
-        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|'
-}
 
 # Helper: install a binary from a GitHub release tarball
 install_gh_binary() {
@@ -237,38 +235,7 @@ if [ -n "$GH_ARCH" ]; then
     # btop
     V="$(gh_latest aristocratos/btop)"
     install_gh_binary btop \
-        "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-linux-musl.tbz" btop
-
-    # carbonyl (Chromium-based TUI browser)
-    if [ ! -d "$LIB_DIR/carbonyl" ]; then
-        echo "Installing carbonyl..."
-        V="$(gh_latest fathyb/carbonyl)"
-        TMP="$(mktemp -d)"
-        curl -sL -o "$TMP/carbonyl.zip" \
-            "https://github.com/fathyb/carbonyl/releases/download/v${V}/carbonyl.linux-${DEB_ARCH}.zip"
-        unzip -q "$TMP/carbonyl.zip" -d "$TMP"
-        CARBONYL_DIR="$(find "$TMP" -maxdepth 1 -type d -name 'carbonyl-*' | head -1)"
-        if [ -n "$NEED_SUDO" ]; then
-            sudo rm -rf "$LIB_DIR/carbonyl"
-            sudo mv "$CARBONYL_DIR" "$LIB_DIR/carbonyl"
-        else
-            rm -rf "$LIB_DIR/carbonyl"
-            mv "$CARBONYL_DIR" "$LIB_DIR/carbonyl"
-        fi
-        # Wrapper script that sets LD_LIBRARY_PATH
-        WRAPPER="#!/bin/sh\nLD_LIBRARY_PATH=$LIB_DIR/carbonyl exec $LIB_DIR/carbonyl/carbonyl \"\$@\""
-        if [ -n "$NEED_SUDO" ]; then
-            printf '%b\n' "$WRAPPER" | sudo tee "$BIN_DIR/carbonyl" >/dev/null
-            sudo chmod +x "$BIN_DIR/carbonyl"
-        else
-            printf '%b\n' "$WRAPPER" > "$BIN_DIR/carbonyl"
-            chmod +x "$BIN_DIR/carbonyl"
-        fi
-        rm -rf "$TMP"
-        echo "  carbonyl $V installed"
-    else
-        echo "carbonyl already installed"
-    fi
+        "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
 else
     echo "Skipping binary installs (unsupported arch: $ARCH)"
 fi
@@ -286,7 +253,13 @@ fi
 if ! command -v codex &>/dev/null; then
     if command -v npm &>/dev/null; then
         echo "Installing Codex CLI..."
-        npm install -g @openai/codex
+        if [ -n "$NEED_SUDO" ]; then
+            sudo npm install -g @openai/codex
+        elif [ -w "$(npm prefix -g)" ]; then
+            npm install -g @openai/codex
+        else
+            npm install -g --prefix "$HOME/.local" @openai/codex
+        fi
         echo "  Run 'codex' to get started."
     else
         echo "Skipping Codex CLI (npm not found — install Node.js first)"
