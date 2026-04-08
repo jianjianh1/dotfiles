@@ -28,10 +28,6 @@
 
 [fetch]
 	prune = true
-
-[merge]
-	conflictstyle = zdiff3
-
 [diff]
 	colorMoved = default
 
