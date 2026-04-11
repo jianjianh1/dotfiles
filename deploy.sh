@@ -126,6 +126,14 @@ echo "  5) SSH config alias (Host entry in ~/.ssh/config)"
 echo ""
 read -rp "Auth method [1-5, default=2]: " AUTH_METHOD
 AUTH_METHOD="${AUTH_METHOD:-2}"
+# Normalize text input to number (case-insensitive)
+case "${AUTH_METHOD,,}" in
+    password)       AUTH_METHOD=1 ;;
+    key|ssh)        AUTH_METHOD=2 ;;
+    custom)         AUTH_METHOD=3 ;;
+    2fa|duo|mfa)    AUTH_METHOD=4 ;;
+    alias|config)   AUTH_METHOD=5 ;;
+esac
 
 SSH_PORT="22"
 IDENTITY_FILE=""
@@ -318,13 +326,13 @@ if [ "$AUTO_YES" = false ]; then
         if [ -z "$selection" ]; then
             break
         fi
-        case "$selection" in
-            a|A)
+        case "${selection,,}" in
+            a|all)
                 for i in "${!STEPS[@]}"; do
                     [ "${STEPS_AVAILABLE[$i]}" = "yes" ] && STEPS_SELECTED[$i]="on"
                 done
                 ;;
-            n|N)
+            n|none)
                 for i in "${!STEPS[@]}"; do
                     STEPS_SELECTED[$i]="off"
                 done
