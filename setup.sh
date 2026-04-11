@@ -83,7 +83,7 @@ install_gh_binary() {
     echo "Installing $name..."
     local TMP
     TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' RETURN
+    trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive" "$url"; then
         echo "  Warning: failed to download $name"
         return 1
@@ -113,7 +113,7 @@ install_gh_deb() {
     echo "Installing $name..."
     local TMP
     TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' RETURN
+    trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/$name.deb" "$url"; then
         echo "  Warning: failed to download $name"
         return 1
@@ -128,8 +128,13 @@ install_gh_deb() {
         # No sudo — extract binary from .deb manually
         (
             cd "$TMP"
-            ar x "$name.deb"
-            tar xf data.tar.* 2>/dev/null
+            if command -v dpkg-deb &>/dev/null; then
+                dpkg-deb -x "$name.deb" .
+            else
+                ar x "$name.deb"
+                # Handle gz/xz/zst compression (tar may not support zst)
+                tar xf data.tar.* 2>/dev/null || true
+            fi
         )
         local bin
         bin="$(find "$TMP" -type f -name "$name" -path '*/bin/*' | head -1)"
@@ -163,7 +168,7 @@ install_glow() {
     esac
     local TMP
     TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' RETURN
+    trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz"; then
         echo "  Warning: failed to download glow"
         return 1
@@ -204,7 +209,7 @@ install_node() {
     fi
     local TMP
     TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' RETURN
+    trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive.tar.xz" "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; then
         echo "  Warning: failed to download Node.js"
         return 1
@@ -233,7 +238,7 @@ install_uv() {
     local UV_ARCH TMP
     UV_ARCH="$(uname -m)"
     TMP="$(mktemp -d)"
-    trap 'rm -rf "$TMP"' RETURN
+    trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz"; then
         echo "  Warning: failed to download uv"
         return 1
