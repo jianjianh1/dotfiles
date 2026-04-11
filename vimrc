@@ -168,7 +168,7 @@ augroup custom
     autocmd BufWritePre * :%s/\s\+$//e
 
     " Highlight yanked text briefly
-    autocmd TextYankPost * silent! lua vim.highlight.on_yank() 2>/dev/null
+    autocmd TextYankPost * silent! lua vim.highlight.on_yank()
 augroup END
 
 " Disable expensive features for large files (>1MB)

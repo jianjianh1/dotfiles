@@ -219,17 +219,26 @@ else
     error "Cannot connect to $REMOTE_HOST"
     echo ""
     echo "  Troubleshooting:"
-    echo "    • Can you SSH manually?  ssh -p $SSH_PORT $REMOTE_HOST"
+    if [ "$AUTH_METHOD" = "5" ]; then
+        echo "    • Can you SSH manually?  ssh $REMOTE_HOST"
+    else
+        echo "    • Can you SSH manually?  ssh -p $SSH_PORT $REMOTE_HOST"
+    fi
     echo "    • Is the hostname/port correct?"
     case "$AUTH_METHOD" in
         4) echo "    • Did you approve the DUO/2FA push in time? (timeout: ${CONNECT_TIMEOUT}s)" ;;
         1) echo "    • Is the password correct?" ;;
         2|3) echo "    • Is your SSH key authorized on the server?" ;;
+        5) echo "    • Is your SSH config (~/.ssh/config) correct for this host?" ;;
     esac
     echo "    • Are you on the right network/VPN?"
     [ -n "$JUMP_HOST" ] && echo "    • Is the jump host ($JUMP_HOST) reachable?"
     echo ""
-    echo "  To debug: ssh -v -p $SSH_PORT $REMOTE_HOST"
+    if [ "$AUTH_METHOD" = "5" ]; then
+        echo "  To debug: ssh -v $REMOTE_HOST"
+    else
+        echo "  To debug: ssh -v -p $SSH_PORT $REMOTE_HOST"
+    fi
     exit 1
 fi
 

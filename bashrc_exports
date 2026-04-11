@@ -1,3 +1,6 @@
+# Only run in interactive shells
+[[ $- == *i* ]] || return
+
 # PATH
 export PATH="$HOME/.local/bin:$PATH"
 

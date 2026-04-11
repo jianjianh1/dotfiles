@@ -20,7 +20,7 @@ FAILURES=()
 
 install_plugin() {
     local name="$1"; shift
-    if ! "$@" 2>/dev/null; then
+    if ! "$@"; then
         FAILURES+=("$name")
     fi
 }

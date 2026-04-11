@@ -8,10 +8,10 @@
 [core]
 	editor = vim
 	autocrlf = input
-	pager = delta
+	pager = "delta 2>/dev/null || less"
 
 [interactive]
-	diffFilter = delta --color-only
+	diffFilter = "delta --color-only 2>/dev/null || cat"
 
 [delta]
 	navigate = true
@@ -43,11 +43,11 @@
 
 [credential "https://github.com"]
 	helper =
-	helper = !/usr/bin/gh auth git-credential
+	helper = !gh auth git-credential
 
 [credential "https://gist.github.com"]
 	helper =
-	helper = !/usr/bin/gh auth git-credential
+	helper = !gh auth git-credential
 
 [alias]
 	s = status

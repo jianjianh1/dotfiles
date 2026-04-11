@@ -16,7 +16,7 @@ This symlinks `vimrc` → `~/.vimrc` and `tmux.conf` → `~/.tmux.conf` (backing
 
 ## Key Details
 
-- **setup.sh** uses `set -euo pipefail` and derives its own directory via `$(cd "$(dirname "$0")" && pwd)` — keep paths relative to `$DIR`, not hardcoded.
+- **setup.sh** uses `set -uo pipefail` (no `-e`; failures are tracked per-step via `run_step`) and derives its own directory via `$(cd "$(dirname "$0")" && pwd)` — keep paths relative to `$DIR`, not hardcoded.
 - **vimrc** is plugin-free (uses only built-in vim features + netrw). Don't add plugin manager or plugin dependencies.
 - **tmux prefix** is `Ctrl-a` (not the default `Ctrl-b`).
 - **Indentation**: vimrc defaults to 4-space tabs; web filetypes (html/css/js/ts/json/yaml) use 2-space via autocmd.

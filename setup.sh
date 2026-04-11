@@ -61,8 +61,7 @@ install_gh_binary() {
     echo "Installing $name..."
     local TMP
     TMP="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$TMP'" RETURN
+    trap 'rm -rf "$TMP"' RETURN
     case "$url" in
         *.tbz|*.tar.bz2) curl -sfL "$url" | tar xj -C "$TMP" ;;
         *)                curl -sfL "$url" | tar xz -C "$TMP" ;;
@@ -88,8 +87,7 @@ install_gh_deb() {
     echo "Installing $name..."
     local TMP
     TMP="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$TMP'" RETURN
+    trap 'rm -rf "$TMP"' RETURN
     curl -sfL -o "$TMP/$name.deb" "$url"
     if [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; then
         if [ -n "$NEED_SUDO" ]; then
@@ -136,8 +134,7 @@ install_glow() {
     esac
     local TMP
     TMP="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$TMP'" RETURN
+    trap 'rm -rf "$TMP"' RETURN
     curl -sfL "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz" \
         | tar xz -C "$TMP" --strip-components=1
     install_to "$TMP/glow" "$BIN_DIR/glow"
@@ -162,7 +159,10 @@ install_node() {
     NODE_VERSION="$(curl -sfL https://nodejs.org/dist/index.json \
         | if command -v jq &>/dev/null; then
             jq -r '[.[] | select(.lts != false)] | .[0].version'
+        elif command -v python3 &>/dev/null; then
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(next(e['version'] for e in d if e.get('lts')))"
         else
+            # Compact JSON: each entry on one line (fragile if format changes)
             grep -o '"version":"v[0-9.]*".*"lts":"[^f][^"]*"' | head -1 \
             | grep -o '"version":"v[^"]*"' | cut -d'"' -f4
         fi)"
@@ -172,8 +172,7 @@ install_node() {
     fi
     local TMP
     TMP="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$TMP'" RETURN
+    trap 'rm -rf "$TMP"' RETURN
     curl -sfL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
         | tar xJ -C "$TMP" --strip-components=1
     mkdir -p "$HOME/.local"
@@ -199,8 +198,7 @@ install_uv() {
     local UV_ARCH TMP
     UV_ARCH="$(uname -m)"
     TMP="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$TMP'" RETURN
+    trap 'rm -rf "$TMP"' RETURN
     curl -sfL "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz" \
         | tar xz -C "$TMP"
     local uv_dir
@@ -331,9 +329,6 @@ echo "Linking config files..."
 backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
 backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
 backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig"
-if command -v gh &>/dev/null; then
-    gh auth setup-git 2>/dev/null || true
-fi
 backup_and_link "$DIR/inputrc"   "$HOME/.inputrc"
 backup_and_link "$DIR/dircolors" "$HOME/.dircolors"
 mkdir -p "$HOME/.ssh/sockets"

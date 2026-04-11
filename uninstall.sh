@@ -36,6 +36,18 @@ remove_bin() {
         rm "$HOME/.local/bin/$bin"
         echo "  Removed ~/.local/bin/$bin"
     fi
+    if [ -e "/usr/local/bin/$bin" ]; then
+        if [ -w /usr/local/bin ] || { command -v sudo &>/dev/null && sudo -n true 2>/dev/null; }; then
+            if [ -w /usr/local/bin ]; then
+                rm "/usr/local/bin/$bin"
+            else
+                sudo rm "/usr/local/bin/$bin"
+            fi
+            echo "  Removed /usr/local/bin/$bin"
+        else
+            echo "  Found /usr/local/bin/$bin but need sudo to remove"
+        fi
+    fi
 }
 
 # --- Uninstall steps ---
@@ -64,7 +76,7 @@ remove_bashrc_lines() {
 }
 
 remove_tools() {
-    echo "Removing CLI tools from ~/.local/bin..."
+    echo "Removing CLI tools..."
     for bin in glow fzf rg fd bat delta zoxide lazygit btop uv uvx node npm npx; do
         remove_bin "$bin"
     done
