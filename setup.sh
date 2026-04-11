@@ -41,8 +41,14 @@ install_to() {
 
 # Get latest release version from GitHub (strips leading 'v')
 gh_latest() {
-    curl -sI "https://github.com/$1/releases/latest" \
-        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|'
+    local version
+    version="$(curl -sfI "https://github.com/$1/releases/latest" \
+        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')"
+    if [ -z "$version" ]; then
+        echo "  Warning: could not determine latest version for $1" >&2
+        return 1
+    fi
+    echo "$version"
 }
 
 # Install a binary from a GitHub release tarball
@@ -53,21 +59,22 @@ install_gh_binary() {
         return 0
     fi
     echo "Installing $name..."
+    local TMP
     TMP="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$TMP'" RETURN
     case "$url" in
-        *.tbz|*.tar.bz2) curl -sL "$url" | tar xj -C "$TMP" ;;
-        *)                curl -sL "$url" | tar xz -C "$TMP" ;;
+        *.tbz|*.tar.bz2) curl -sfL "$url" | tar xj -C "$TMP" ;;
+        *)                curl -sfL "$url" | tar xz -C "$TMP" ;;
     esac
     local bin
     bin="$(find "$TMP" -type f -name "$bin_name" | head -1)"
     if [ -z "$bin" ]; then
         echo "  Warning: $bin_name binary not found in archive"
-        rm -rf "$TMP"
         return 1
     fi
     chmod +x "$bin"
     install_to "$bin" "$BIN_DIR/$bin_name"
-    rm -rf "$TMP"
     echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
@@ -79,8 +86,11 @@ install_gh_deb() {
         return 0
     fi
     echo "Installing $name..."
+    local TMP
     TMP="$(mktemp -d)"
-    curl -sL -o "$TMP/$name.deb" "$url"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$TMP'" RETURN
+    curl -sfL -o "$TMP/$name.deb" "$url"
     if [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; then
         if [ -n "$NEED_SUDO" ]; then
             sudo dpkg -i "$TMP/$name.deb"
@@ -89,9 +99,11 @@ install_gh_deb() {
         fi
     else
         # No sudo — extract binary from .deb manually
-        cd "$TMP"
-        ar x "$name.deb"
-        tar xf data.tar.* 2>/dev/null
+        (
+            cd "$TMP"
+            ar x "$name.deb"
+            tar xf data.tar.* 2>/dev/null
+        )
         local bin
         bin="$(find "$TMP" -type f -name "$name" -path '*/bin/*' | head -1)"
         if [ -n "$bin" ]; then
@@ -99,13 +111,9 @@ install_gh_deb() {
             mv "$bin" "$BIN_DIR/$name"
         else
             echo "  Warning: $name binary not found in .deb"
-            cd - >/dev/null
-            rm -rf "$TMP"
             return 1
         fi
-        cd - >/dev/null
     fi
-    rm -rf "$TMP"
     echo "  $name installed"
 }
 
@@ -117,18 +125,22 @@ install_glow() {
         return 0
     fi
     echo "Installing glow..."
-    GLOW_VERSION="$(gh_latest charmbracelet/glow)"
+    local GLOW_VERSION
+    GLOW_VERSION="$(gh_latest charmbracelet/glow)" || return 1
+    local ARCH GLOW_ARCH
     ARCH="$(uname -m)"
     case "$ARCH" in
         x86_64)  GLOW_ARCH="x86_64" ;;
         aarch64) GLOW_ARCH="arm64"  ;;
         *)       echo "  Skipping glow (unsupported arch: $ARCH)"; return 1 ;;
     esac
+    local TMP
     TMP="$(mktemp -d)"
-    curl -sL "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz" \
+    # shellcheck disable=SC2064
+    trap "rm -rf '$TMP'" RETURN
+    curl -sfL "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz" \
         | tar xz -C "$TMP" --strip-components=1
     install_to "$TMP/glow" "$BIN_DIR/glow"
-    rm -rf "$TMP"
     echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
 }
 
@@ -138,27 +150,37 @@ install_node() {
         return 0
     fi
     echo "Installing Node.js..."
+    local ARCH NODE_ARCH
     ARCH="$(uname -m)"
     case "$ARCH" in
         x86_64)  NODE_ARCH="x64" ;;
         aarch64) NODE_ARCH="arm64" ;;
         *)       echo "  Skipping Node.js (unsupported arch: $ARCH)"; return 1 ;;
     esac
-    # Get latest LTS version
-    NODE_VERSION="$(curl -sL https://nodejs.org/dist/index.json | grep -o '"version":"v[0-9.]*","date":"[^"]*","files":\[[^]]*\],"npm":"[^"]*","v8":"[^"]*","uv":"[^"]*","zlib":"[^"]*","openssl":"[^"]*","modules":"[^"]*","lts":"[^"f][^"]*"' | head -1 | grep -o '"version":"v[^"]*"' | cut -d'"' -f4)"
+    # Get latest LTS version (prefer jq, fall back to regex)
+    local NODE_VERSION
+    NODE_VERSION="$(curl -sfL https://nodejs.org/dist/index.json \
+        | if command -v jq &>/dev/null; then
+            jq -r '[.[] | select(.lts != false)] | .[0].version'
+        else
+            grep -o '"version":"v[0-9.]*".*"lts":"[^f][^"]*"' | head -1 \
+            | grep -o '"version":"v[^"]*"' | cut -d'"' -f4
+        fi)"
     if [ -z "$NODE_VERSION" ]; then
         echo "  Failed to determine latest LTS version"
         return 1
     fi
+    local TMP
     TMP="$(mktemp -d)"
-    curl -sL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+    # shellcheck disable=SC2064
+    trap "rm -rf '$TMP'" RETURN
+    curl -sfL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
         | tar xJ -C "$TMP" --strip-components=1
     mkdir -p "$HOME/.local"
     # Remove stale symlinks (e.g. from old nvm-based installs) before copying
     rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx" "$HOME/.local/bin/corepack"
     # Install node tree into ~/.local (bin/, lib/, include/, share/)
     cp -r "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
-    rm -rf "$TMP"
     # Clear bash's command hash so it finds the newly installed binaries
     hash -r
     if ! "$HOME/.local/bin/node" --version &>/dev/null; then
@@ -174,13 +196,21 @@ install_uv() {
         return 0
     fi
     echo "Installing uv..."
+    local UV_ARCH TMP
     UV_ARCH="$(uname -m)"
     TMP="$(mktemp -d)"
-    curl -sL "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz" \
+    # shellcheck disable=SC2064
+    trap "rm -rf '$TMP'" RETURN
+    curl -sfL "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz" \
         | tar xz -C "$TMP"
+    local uv_dir
+    uv_dir="$(find "$TMP" -maxdepth 1 -type d -name 'uv-*' | head -1)"
+    if [ -z "$uv_dir" ]; then
+        echo "  Warning: uv archive had unexpected layout"
+        return 1
+    fi
     mkdir -p "$HOME/.local/bin"
-    mv "$TMP"/uv-*/uv "$TMP"/uv-*/uvx "$HOME/.local/bin/"
-    rm -rf "$TMP"
+    mv "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"
     echo "  uv $(uv --version) installed"
 }
 
@@ -204,6 +234,7 @@ install_apt_packages() {
 }
 
 install_gh_tools() {
+    local ARCH DEB_ARCH GH_ARCH
     ARCH="$(uname -m)"
     case "$ARCH" in
         x86_64)  DEB_ARCH="amd64"; GH_ARCH="x86_64" ;;
@@ -213,39 +244,47 @@ install_gh_tools() {
 
     local V
 
-    V="$(gh_latest junegunn/fzf)"
-    run_step "fzf" install_gh_binary fzf \
-        "https://github.com/junegunn/fzf/releases/download/v${V}/fzf-${V}-linux_${DEB_ARCH}.tar.gz"
+    if V="$(gh_latest junegunn/fzf)"; then
+        run_step "fzf" install_gh_binary fzf \
+            "https://github.com/junegunn/fzf/releases/download/v${V}/fzf-${V}-linux_${DEB_ARCH}.tar.gz"
+    else FAILURES+=("fzf"); fi
 
-    V="$(gh_latest BurntSushi/ripgrep)"
-    run_step "ripgrep" install_gh_binary ripgrep \
-        "https://github.com/BurntSushi/ripgrep/releases/download/${V}/ripgrep-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" rg
+    if V="$(gh_latest BurntSushi/ripgrep)"; then
+        run_step "ripgrep" install_gh_binary ripgrep \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${V}/ripgrep-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" rg
+    else FAILURES+=("ripgrep"); fi
 
-    V="$(gh_latest sharkdp/fd)"
-    run_step "fd" install_gh_binary fd \
-        "https://github.com/sharkdp/fd/releases/download/v${V}/fd-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    if V="$(gh_latest sharkdp/fd)"; then
+        run_step "fd" install_gh_binary fd \
+            "https://github.com/sharkdp/fd/releases/download/v${V}/fd-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    else FAILURES+=("fd"); fi
 
-    V="$(gh_latest sharkdp/bat)"
-    run_step "bat" install_gh_deb bat \
-        "https://github.com/sharkdp/bat/releases/download/v${V}/bat_${V}_${DEB_ARCH}.deb"
+    if V="$(gh_latest sharkdp/bat)"; then
+        run_step "bat" install_gh_deb bat \
+            "https://github.com/sharkdp/bat/releases/download/v${V}/bat_${V}_${DEB_ARCH}.deb"
+    else FAILURES+=("bat"); fi
 
-    V="$(gh_latest dandavison/delta)"
-    run_step "delta" install_gh_deb delta \
-        "https://github.com/dandavison/delta/releases/download/${V}/git-delta_${V}_${DEB_ARCH}.deb"
+    if V="$(gh_latest dandavison/delta)"; then
+        run_step "delta" install_gh_deb delta \
+            "https://github.com/dandavison/delta/releases/download/${V}/git-delta_${V}_${DEB_ARCH}.deb"
+    else FAILURES+=("delta"); fi
 
-    V="$(gh_latest ajeetdsouza/zoxide)"
-    run_step "zoxide" install_gh_binary zoxide \
-        "https://github.com/ajeetdsouza/zoxide/releases/download/v${V}/zoxide-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    if V="$(gh_latest ajeetdsouza/zoxide)"; then
+        run_step "zoxide" install_gh_binary zoxide \
+            "https://github.com/ajeetdsouza/zoxide/releases/download/v${V}/zoxide-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    else FAILURES+=("zoxide"); fi
 
-    LAZYGIT_ARCH="$GH_ARCH"
+    local LAZYGIT_ARCH="$GH_ARCH"
     [ "$LAZYGIT_ARCH" = "aarch64" ] && LAZYGIT_ARCH="arm64"
-    V="$(gh_latest jesseduffield/lazygit)"
-    run_step "lazygit" install_gh_binary lazygit \
-        "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
+    if V="$(gh_latest jesseduffield/lazygit)"; then
+        run_step "lazygit" install_gh_binary lazygit \
+            "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
+    else FAILURES+=("lazygit"); fi
 
-    V="$(gh_latest aristocratos/btop)"
-    run_step "btop" install_gh_binary btop \
-        "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
+    if V="$(gh_latest aristocratos/btop)"; then
+        run_step "btop" install_gh_binary btop \
+            "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
+    else FAILURES+=("btop"); fi
 }
 
 install_claude() {
@@ -337,7 +376,8 @@ fi
 if ! grep -qF 'source ~/.bashrc_aliases' ~/.bashrc 2>/dev/null; then
     echo 'source ~/.bashrc_aliases' >> ~/.bashrc
 fi
-source ~/.bashrc
+# Source bashrc only in interactive shells; non-interactive may lack shopt etc.
+[[ $- == *i* ]] && source ~/.bashrc || true
 
 run_step "mcp plugins" install_plugins
 
