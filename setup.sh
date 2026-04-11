@@ -146,6 +146,8 @@ install_node() {
     fi
     # Symlink node/npm/npx into ~/.local/bin so they're accessible outside nvm shells
     # (e.g. scripts with #!/usr/bin/env node shebangs)
+    # Remove old symlinks first so command -v resolves the real binary, not our own link
+    rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx"
     if command -v node &>/dev/null; then
         mkdir -p "$HOME/.local/bin"
         ln -sf "$(command -v node)" "$HOME/.local/bin/node"
