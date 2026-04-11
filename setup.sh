@@ -154,6 +154,8 @@ install_node() {
     curl -sL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
         | tar xJ -C "$TMP" --strip-components=1
     mkdir -p "$HOME/.local"
+    # Remove stale symlinks (e.g. from old nvm-based installs) before copying
+    rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx" "$HOME/.local/bin/corepack"
     # Install node tree into ~/.local (bin/, lib/, include/, share/)
     cp -r "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
     rm -rf "$TMP"
