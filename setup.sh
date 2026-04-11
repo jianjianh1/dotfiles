@@ -3,6 +3,9 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Ensure ~/.local/bin is in PATH (node symlinks, uv, etc. live here)
+export PATH="$HOME/.local/bin:$PATH"
+
 # --- Error tracking ---
 FAILURES=()
 
@@ -164,7 +167,6 @@ install_uv() {
     mkdir -p "$HOME/.local/bin"
     mv "$TMP"/uv-*/uv "$TMP"/uv-*/uvx "$HOME/.local/bin/"
     rm -rf "$TMP"
-    export PATH="$HOME/.local/bin:$PATH"
     echo "  uv $(uv --version) installed"
 }
 
@@ -259,7 +261,11 @@ install_codex() {
     else
         npm install -g --prefix "$HOME/.local" @openai/codex
     fi
-    echo "  Run 'codex' to get started."
+    if ! command -v codex &>/dev/null; then
+        echo "  Codex CLI install failed"
+        return 1
+    fi
+    echo "  Codex CLI installed"
 }
 
 install_plugins() {
