@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+YES=false
+[[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && YES=true
+
+# --- Helpers ---
+
+confirm() {
+    if $YES; then return 0; fi
+    read -rp "$1 [y/N] " ans
+    [[ "$ans" =~ ^[Yy] ]]
+}
+
+# Remove a symlink only if it points into this repo, then restore .bak if present
+unlink_config() {
+    local dst="$1"
+    if [ -L "$dst" ] && [[ "$(readlink -f "$dst")" == "$DIR"/* ]]; then
+        rm "$dst"
+        echo "  Removed $dst"
+        if [ -e "${dst}.bak" ]; then
+            mv "${dst}.bak" "$dst"
+            echo "  Restored ${dst}.bak -> $dst"
+        fi
+    elif [ -L "$dst" ]; then
+        echo "  Skipped $dst (symlink points elsewhere)"
+    else
+        echo "  Skipped $dst (not a symlink to this repo)"
+    fi
+}
+
+remove_bin() {
+    local bin="$1"
+    if [ -e "$HOME/.local/bin/$bin" ]; then
+        rm "$HOME/.local/bin/$bin"
+        echo "  Removed ~/.local/bin/$bin"
+    fi
+}
+
+# --- Uninstall steps ---
+
+remove_symlinks() {
+    echo "Removing config symlinks..."
+    unlink_config "$HOME/.vimrc"
+    unlink_config "$HOME/.tmux.conf"
+    unlink_config "$HOME/.gitconfig"
+    unlink_config "$HOME/.inputrc"
+    unlink_config "$HOME/.dircolors"
+    unlink_config "$HOME/.ssh/config"
+    unlink_config "$HOME/.bashrc_exports"
+    unlink_config "$HOME/.bashrc_aliases"
+    unlink_config "$HOME/.claude/settings.json"
+    unlink_config "$HOME/.codex/config.toml"
+}
+
+remove_bashrc_lines() {
+    echo "Removing source lines from ~/.bashrc..."
+    if [ -f "$HOME/.bashrc" ]; then
+        sed -i '/^source ~\/.bashrc_exports$/d' "$HOME/.bashrc"
+        sed -i '/^source ~\/.bashrc_aliases$/d' "$HOME/.bashrc"
+        echo "  Cleaned ~/.bashrc"
+    fi
+}
+
+remove_tools() {
+    echo "Removing CLI tools from ~/.local/bin..."
+    for bin in glow fzf rg fd bat delta zoxide lazygit btop uv uvx node npm npx; do
+        remove_bin "$bin"
+    done
+}
+
+remove_claude() {
+    if command -v claude &>/dev/null; then
+        echo "Uninstalling Claude Code..."
+        claude --uninstall 2>/dev/null || npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || true
+        echo "  Claude Code removed"
+    else
+        echo "  Claude Code not installed, skipping"
+    fi
+}
+
+remove_codex() {
+    if command -v codex &>/dev/null; then
+        echo "Uninstalling Codex CLI..."
+        npm uninstall -g @openai/codex 2>/dev/null || true
+        echo "  Codex CLI removed"
+    else
+        echo "  Codex CLI not installed, skipping"
+    fi
+}
+
+remove_nvm() {
+    if [ -d "$HOME/.nvm" ]; then
+        echo "Removing nvm and Node.js..."
+        rm -rf "$HOME/.nvm"
+        echo "  Removed ~/.nvm"
+    else
+        echo "  nvm not installed, skipping"
+    fi
+}
+
+remove_dirs() {
+    echo "Cleaning up directories..."
+    rmdir "$HOME/.vim/undodir" 2>/dev/null && echo "  Removed ~/.vim/undodir" || true
+    rmdir "$HOME/.vim" 2>/dev/null && echo "  Removed ~/.vim" || true
+    if [ -d "$HOME/.codex" ] && [ -z "$(ls -A "$HOME/.codex")" ]; then
+        rmdir "$HOME/.codex"
+        echo "  Removed ~/.codex"
+    fi
+}
+
+# ============================================================
+# Main
+# ============================================================
+
+echo "server-configs uninstaller"
+echo "========================="
+echo ""
+
+confirm "Remove config symlinks?" && remove_symlinks
+echo ""
+confirm "Remove source lines from ~/.bashrc?" && remove_bashrc_lines
+echo ""
+confirm "Uninstall Claude Code?" && remove_claude
+echo ""
+confirm "Uninstall Codex CLI?" && remove_codex
+echo ""
+confirm "Remove nvm and Node.js?" && remove_nvm
+echo ""
+confirm "Remove CLI tools from ~/.local/bin?" && remove_tools
+echo ""
+confirm "Clean up empty directories?" && remove_dirs
+
+echo ""
+echo "Uninstall complete. Open a new shell to pick up changes."
