@@ -135,25 +135,29 @@ install_glow() {
 install_node() {
     if command -v node &>/dev/null; then
         echo "Node.js already installed: $(node --version)"
-    else
-        echo "Installing Node.js via nvm..."
-        export NVM_DIR="$HOME/.nvm"
-        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-        # shellcheck source=/dev/null
-        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-        nvm install --lts
-        echo "  Node $(node --version) installed"
+        return 0
     fi
-    # Symlink node/npm/npx into ~/.local/bin so they're accessible outside nvm shells
-    # (e.g. scripts with #!/usr/bin/env node shebangs)
-    # Remove old symlinks first so command -v resolves the real binary, not our own link
-    rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx"
-    if command -v node &>/dev/null; then
-        mkdir -p "$HOME/.local/bin"
-        ln -sf "$(command -v node)" "$HOME/.local/bin/node"
-        ln -sf "$(command -v npm)"  "$HOME/.local/bin/npm"
-        ln -sf "$(command -v npx)"  "$HOME/.local/bin/npx"
+    echo "Installing Node.js..."
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64)  NODE_ARCH="x64" ;;
+        aarch64) NODE_ARCH="arm64" ;;
+        *)       echo "  Skipping Node.js (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    # Get latest LTS version
+    NODE_VERSION="$(curl -sL https://nodejs.org/dist/index.json | grep -o '"version":"v[0-9.]*","date":"[^"]*","files":\[[^]]*\],"npm":"[^"]*","v8":"[^"]*","uv":"[^"]*","zlib":"[^"]*","openssl":"[^"]*","modules":"[^"]*","lts":"[^"f][^"]*"' | head -1 | grep -o '"version":"v[^"]*"' | cut -d'"' -f4)"
+    if [ -z "$NODE_VERSION" ]; then
+        echo "  Failed to determine latest LTS version"
+        return 1
     fi
+    TMP="$(mktemp -d)"
+    curl -sL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+        | tar xJ -C "$TMP" --strip-components=1
+    mkdir -p "$HOME/.local"
+    # Install node tree into ~/.local (bin/, lib/, include/, share/)
+    cp -r "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
+    rm -rf "$TMP"
+    echo "  Node.js $NODE_VERSION installed to ~/.local"
 }
 
 install_uv() {

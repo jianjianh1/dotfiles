@@ -90,13 +90,23 @@ remove_codex() {
     fi
 }
 
-remove_nvm() {
+remove_node() {
+    # Remove node/npm/npx installed to ~/.local by setup.sh
+    for bin in node npm npx corepack; do
+        remove_bin "$bin"
+    done
+    if [ -d "$HOME/.local/lib/node_modules" ]; then
+        rm -rf "$HOME/.local/lib/node_modules"
+        echo "  Removed ~/.local/lib/node_modules"
+    fi
+    if [ -d "$HOME/.local/include/node" ]; then
+        rm -rf "$HOME/.local/include/node"
+        echo "  Removed ~/.local/include/node"
+    fi
+    # Also clean up nvm if present from an older install
     if [ -d "$HOME/.nvm" ]; then
-        echo "Removing nvm and Node.js..."
         rm -rf "$HOME/.nvm"
         echo "  Removed ~/.nvm"
-    else
-        echo "  nvm not installed, skipping"
     fi
 }
 
@@ -126,7 +136,7 @@ confirm "Uninstall Claude Code?" && remove_claude
 echo ""
 confirm "Uninstall Codex CLI?" && remove_codex
 echo ""
-confirm "Remove nvm and Node.js?" && remove_nvm
+confirm "Remove Node.js?" && remove_node
 echo ""
 confirm "Remove CLI tools from ~/.local/bin?" && remove_tools
 echo ""
