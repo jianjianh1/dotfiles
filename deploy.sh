@@ -251,7 +251,7 @@ HAS_GH_AUTH=false
 
 # Claude Code
 HAS_CLAUDE_AUTH=false
-{ [ -f ~/.claude/credentials.json ] || [ -f ~/.claude/.credentials ]; } && HAS_CLAUDE_AUTH=true
+{ [ -f ~/.claude/credentials.json ] || [ -f ~/.claude/.credentials ] || [ -f ~/.claude/.credentials.json ]; } && HAS_CLAUDE_AUTH=true
 
 # Codex
 HAS_CODEX_AUTH=false
@@ -450,12 +450,11 @@ step_claude_auth() {
     section "Claude Code Auth"
     remote_exec "mkdir -p ~/.claude"
     local copied=false
-    if [ -f ~/.claude/credentials.json ]; then
-        remote_copy ~/.claude/credentials.json "$REMOTE_HOST:~/.claude/" && copied=true
-    fi
-    if [ -f ~/.claude/.credentials ]; then
-        remote_copy ~/.claude/.credentials "$REMOTE_HOST:~/.claude/" && copied=true
-    fi
+    for cred_file in credentials.json .credentials .credentials.json; do
+        if [ -f ~/.claude/"$cred_file" ]; then
+            remote_copy ~/.claude/"$cred_file" "$REMOTE_HOST:~/.claude/" && copied=true
+        fi
+    done
     if [ "$copied" = true ]; then
         success "Claude Code credentials copied"
     else
