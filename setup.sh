@@ -103,50 +103,24 @@ install_gh_binary() {
     echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
-# Install a .deb from a GitHub release (extracts binary if no dpkg/sudo)
-install_gh_deb() {
-    local name="$1" url="$2"
-    if command -v "$name" &>/dev/null && ! $FORCE; then
-        echo "$name already installed"
+# Install a bare binary (no archive) from a GitHub release
+install_gh_bare_binary() {
+    local name="$1" url="$2" bin_name="${3:-$1}"
+    if command -v "$bin_name" &>/dev/null && ! $FORCE; then
+        echo "$bin_name already installed"
         return 0
     fi
     echo "Installing $name..."
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
-    if ! retry curl -sfL -o "$TMP/$name.deb" "$url"; then
+    if ! retry curl -sfL -o "$TMP/$bin_name" "$url"; then
         echo "  Warning: failed to download $name"
         return 1
     fi
-    if [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; then
-        if [ -n "$NEED_SUDO" ]; then
-            sudo dpkg -i "$TMP/$name.deb"
-        else
-            dpkg -i "$TMP/$name.deb"
-        fi
-    else
-        # No sudo — extract binary from .deb manually
-        (
-            cd "$TMP"
-            if command -v dpkg-deb &>/dev/null; then
-                dpkg-deb -x "$name.deb" .
-            else
-                ar x "$name.deb"
-                # Handle gz/xz/zst compression (tar may not support zst)
-                tar xf data.tar.* 2>/dev/null || true
-            fi
-        )
-        local bin
-        bin="$(find "$TMP" -type f -name "$name" -path '*/bin/*' | head -1)"
-        if [ -n "$bin" ]; then
-            chmod +x "$bin"
-            mv "$bin" "$BIN_DIR/$name"
-        else
-            echo "  Warning: $name binary not found in .deb"
-            return 1
-        fi
-    fi
-    echo "  $name installed"
+    chmod +x "$TMP/$bin_name"
+    install_to "$TMP/$bin_name" "$BIN_DIR/$bin_name"
+    echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
 # --- Install functions ---
@@ -292,25 +266,6 @@ install_uv() {
     echo "  uv $(uv --version) installed"
 }
 
-install_apt_packages() {
-    if ! command -v apt-get &>/dev/null || { ! [ -w /usr/bin ] && [ -z "$NEED_SUDO" ]; }; then
-        command -v jq   &>/dev/null || echo "Skipping jq (no apt/sudo — install manually)"
-        command -v htop &>/dev/null || echo "Skipping htop (no apt/sudo — install manually)"
-        return 0
-    fi
-    PKGS=()
-    command -v jq    &>/dev/null || PKGS+=(jq)
-    command -v htop  &>/dev/null || PKGS+=(htop)
-    if [ ${#PKGS[@]} -gt 0 ]; then
-        echo "Installing apt packages: ${PKGS[*]}..."
-        if [ -n "$NEED_SUDO" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq "${PKGS[@]}"
-        else
-            apt-get update -qq && apt-get install -y -qq "${PKGS[@]}"
-        fi
-    fi
-}
-
 install_gh_tools() {
     local ARCH DEB_ARCH GH_ARCH
     ARCH="$(uname -m)"
@@ -338,13 +293,15 @@ install_gh_tools() {
     else FAILURES+=("fd"); fi
 
     if V="$(gh_latest sharkdp/bat)"; then
-        run_step "bat" install_gh_deb bat \
-            "https://github.com/sharkdp/bat/releases/download/v${V}/bat_${V}_${DEB_ARCH}.deb"
+        run_step "bat" install_gh_binary bat \
+            "https://github.com/sharkdp/bat/releases/download/v${V}/bat-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
     else FAILURES+=("bat"); fi
 
     if V="$(gh_latest dandavison/delta)"; then
-        run_step "delta" install_gh_deb delta \
-            "https://github.com/dandavison/delta/releases/download/${V}/git-delta_${V}_${DEB_ARCH}.deb"
+        local DELTA_LIBC="musl"
+        [ "$GH_ARCH" = "aarch64" ] && DELTA_LIBC="gnu"
+        run_step "delta" install_gh_binary delta \
+            "https://github.com/dandavison/delta/releases/download/${V}/delta-${V}-${GH_ARCH}-unknown-linux-${DELTA_LIBC}.tar.gz"
     else FAILURES+=("delta"); fi
 
     if V="$(gh_latest ajeetdsouza/zoxide)"; then
@@ -363,6 +320,11 @@ install_gh_tools() {
         run_step "btop" install_gh_binary btop \
             "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
     else FAILURES+=("btop"); fi
+
+    if V="$(gh_latest jqlang/jq)"; then
+        run_step "jq" install_gh_bare_binary jq \
+            "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}"
+    else FAILURES+=("jq"); fi
 }
 
 install_claude() {
@@ -434,7 +396,6 @@ run_step "gh"           install_gh_cli
 run_step "glow"         install_glow
 run_step "node"         install_node
 run_step "uv"           install_uv
-run_step "apt packages" install_apt_packages
 install_gh_tools
 run_step "claude"       install_claude
 run_step "codex"        install_codex
