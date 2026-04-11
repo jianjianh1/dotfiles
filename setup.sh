@@ -151,6 +151,43 @@ install_gh_deb() {
 
 # --- Install functions ---
 
+install_gh_cli() {
+    if command -v gh &>/dev/null && ! $FORCE; then
+        echo "gh already installed: $(gh --version | head -1)"
+        return 0
+    fi
+    echo "Installing GitHub CLI..."
+    local GH_VERSION
+    GH_VERSION="$(gh_latest cli/cli)" || return 1
+    local ARCH GH_ARCH
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64)  GH_ARCH="amd64" ;;
+        aarch64) GH_ARCH="arm64" ;;
+        *)       echo "  Skipping gh (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz"; then
+        echo "  Warning: failed to download gh"
+        return 1
+    fi
+    tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
+    local bin
+    bin="$(find "$TMP" -type f -name "gh" -path '*/bin/*' | head -1)"
+    if [ -z "$bin" ]; then
+        echo "  Warning: gh binary not found in archive"
+        return 1
+    fi
+    chmod +x "$bin"
+    install_to "$bin" "$BIN_DIR/gh"
+    echo "  gh $GH_VERSION installed to $BIN_DIR/gh"
+    if ! gh auth status &>/dev/null; then
+        echo "  Run 'gh auth login' to authenticate with GitHub."
+    fi
+}
+
 install_glow() {
     if command -v glow &>/dev/null && ! $FORCE; then
         echo "glow already installed: $(glow --version)"
@@ -393,6 +430,7 @@ else
 fi
 
 # Install tools (each step continues on failure)
+run_step "gh"           install_gh_cli
 run_step "glow"         install_glow
 run_step "node"         install_node
 run_step "uv"           install_uv

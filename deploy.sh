@@ -292,8 +292,8 @@ add_step() {
     STEPS_SELECTED+=("$3")      # "on" or "off"
 }
 
-add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "on"
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
+add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
 add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
@@ -509,16 +509,14 @@ step_api_keys() {
 step_clone_setup() {
     section "Clone Repo & Run Setup"
 
-    # Ensure github.com host key is in remote known_hosts
-    echo "  Adding github.com to remote known_hosts..."
-    remote_exec "mkdir -p ~/.ssh && ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null && sort -u -o ~/.ssh/known_hosts ~/.ssh/known_hosts"
-
-    # Derive git URL from local remote (SSH form for key-based auth)
-    local REPO_URL
-    REPO_URL="$(git -C "$DIR" remote get-url origin 2>/dev/null | sed 's|https://github.com/|git@github.com:|')"
+    # Derive repo slug and HTTPS URL from local remote
+    local REPO_URL REPO_SLUG
+    REPO_URL="$(git -C "$DIR" remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|')"
     if [ -z "$REPO_URL" ]; then
-        REPO_URL="git@github.com:jianjianh1/server-configs.git"
+        REPO_URL="https://github.com/jianjianh1/server-configs.git"
     fi
+    # Extract owner/repo slug (e.g. "jianjianh1/server-configs")
+    REPO_SLUG="$(echo "$REPO_URL" | sed 's|.*github\.com/||; s|\.git$||')"
 
     local REMOTE_DIR="\$HOME/repos/server-configs"
 
@@ -526,10 +524,19 @@ step_clone_setup() {
         echo "  Repo exists — pulling latest..."
         remote_exec "cd $REMOTE_DIR && git pull"
     else
-        echo "  Cloning $REPO_URL..."
-        if ! remote_exec "mkdir -p \$HOME/repos && git clone $REPO_URL $REMOTE_DIR"; then
-            error "git clone failed — verify SSH key has repo access"
-            return 1
+        echo "  Cloning $REPO_SLUG..."
+        if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
+            # Prefer gh repo clone (uses gh's own auth)
+            if ! remote_exec "mkdir -p \$HOME/repos && cd \$HOME/repos && gh repo clone $REPO_SLUG"; then
+                error "gh repo clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
+                return 1
+            fi
+        else
+            # Fallback to git clone over HTTPS
+            if ! remote_exec "mkdir -p \$HOME/repos && git clone $REPO_URL $REMOTE_DIR"; then
+                error "git clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
+                return 1
+            fi
         fi
     fi
 
@@ -548,8 +555,8 @@ step_clone_setup() {
 
 echo ""
 
-[ "${STEPS_SELECTED[0]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
-[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
+[ "${STEPS_SELECTED[0]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
+[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
 [ "${STEPS_SELECTED[2]}" = "on" ] && run_step "Claude Code auth" step_claude_auth
 [ "${STEPS_SELECTED[3]}" = "on" ] && run_step "Codex auth"       step_codex_auth
 [ "${STEPS_SELECTED[4]}" = "on" ] && run_step "API keys"         step_api_keys
