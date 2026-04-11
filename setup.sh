@@ -159,6 +159,12 @@ install_node() {
     # Install node tree into ~/.local (bin/, lib/, include/, share/)
     cp -r "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
     rm -rf "$TMP"
+    # Clear bash's command hash so it finds the newly installed binaries
+    hash -r
+    if ! "$HOME/.local/bin/node" --version &>/dev/null; then
+        echo "  Node.js install failed — binary not working"
+        return 1
+    fi
     echo "  Node.js $NODE_VERSION installed to ~/.local"
 }
 
@@ -257,18 +263,22 @@ install_codex() {
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
-    if ! command -v npm &>/dev/null; then
+    # Use our npm explicitly to avoid picking up a stale system npm
+    local npm_bin="$HOME/.local/bin/npm"
+    if [ ! -x "$npm_bin" ] && ! command -v npm &>/dev/null; then
         echo "Skipping Codex CLI (npm not found — install Node.js first)"
         return 1
     fi
+    [ -x "$npm_bin" ] || npm_bin="$(command -v npm)"
     echo "Installing Codex CLI..."
     if [ -n "$NEED_SUDO" ]; then
-        sudo "$(command -v npm)" install -g @openai/codex
-    elif [ -w "$(npm prefix -g)" ]; then
-        npm install -g @openai/codex
+        sudo "$npm_bin" install -g @openai/codex
+    elif [ -w "$("$npm_bin" prefix -g)" ]; then
+        "$npm_bin" install -g @openai/codex
     else
-        npm install -g --prefix "$HOME/.local" @openai/codex
+        "$npm_bin" install -g --prefix "$HOME/.local" @openai/codex
     fi
+    hash -r
     if ! command -v codex &>/dev/null; then
         echo "  Codex CLI install failed"
         return 1
