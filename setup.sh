@@ -100,6 +100,7 @@ if ! command -v uv &>/dev/null; then
     TMP="$(mktemp -d)"
     curl -sL "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz" \
         | tar xz -C "$TMP"
+    mkdir -p "$HOME/.local/bin"
     mv "$TMP"/uv-*/uv "$TMP"/uv-*/uvx "$HOME/.local/bin/"
     rm -rf "$TMP"
     export PATH="$HOME/.local/bin:$PATH"
@@ -254,7 +255,7 @@ if ! command -v codex &>/dev/null; then
     if command -v npm &>/dev/null; then
         echo "Installing Codex CLI..."
         if [ -n "$NEED_SUDO" ]; then
-            sudo npm install -g @openai/codex
+            sudo "$(command -v npm)" install -g @openai/codex
         elif [ -w "$(npm prefix -g)" ]; then
             npm install -g @openai/codex
         else
