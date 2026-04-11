@@ -88,6 +88,12 @@ if ! command -v node &>/dev/null; then
     # shellcheck source=/dev/null
     [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
     nvm install --lts
+    # Symlink node/npm/npx into ~/.local/bin so they're accessible outside nvm shells
+    # (e.g. scripts with #!/usr/bin/env node shebangs)
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$(command -v node)" "$HOME/.local/bin/node"
+    ln -sf "$(command -v npm)"  "$HOME/.local/bin/npm"
+    ln -sf "$(command -v npx)"  "$HOME/.local/bin/npx"
     echo "  Node $(node --version) installed"
 else
     echo "Node.js already installed: $(node --version)"
