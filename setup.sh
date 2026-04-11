@@ -132,21 +132,23 @@ install_glow() {
 install_node() {
     if command -v node &>/dev/null; then
         echo "Node.js already installed: $(node --version)"
-        return 0
+    else
+        echo "Installing Node.js via nvm..."
+        export NVM_DIR="$HOME/.nvm"
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+        # shellcheck source=/dev/null
+        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+        nvm install --lts
+        echo "  Node $(node --version) installed"
     fi
-    echo "Installing Node.js via nvm..."
-    export NVM_DIR="$HOME/.nvm"
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-    # shellcheck source=/dev/null
-    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-    nvm install --lts
     # Symlink node/npm/npx into ~/.local/bin so they're accessible outside nvm shells
     # (e.g. scripts with #!/usr/bin/env node shebangs)
-    mkdir -p "$HOME/.local/bin"
-    ln -sf "$(command -v node)" "$HOME/.local/bin/node"
-    ln -sf "$(command -v npm)"  "$HOME/.local/bin/npm"
-    ln -sf "$(command -v npx)"  "$HOME/.local/bin/npx"
-    echo "  Node $(node --version) installed"
+    if command -v node &>/dev/null; then
+        mkdir -p "$HOME/.local/bin"
+        ln -sf "$(command -v node)" "$HOME/.local/bin/node"
+        ln -sf "$(command -v npm)"  "$HOME/.local/bin/npm"
+        ln -sf "$(command -v npx)"  "$HOME/.local/bin/npx"
+    fi
 }
 
 install_uv() {
