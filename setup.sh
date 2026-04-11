@@ -6,6 +6,14 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # Ensure ~/.local/bin is in PATH (node symlinks, uv, etc. live here)
 export PATH="$HOME/.local/bin:$PATH"
 
+# --- Flags ---
+FORCE=false
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) FORCE=true ;;
+    esac
+done
+
 # --- Error tracking ---
 FAILURES=()
 
@@ -18,12 +26,15 @@ run_step() {
 
 # --- Helpers ---
 
-# Symlink configs (back up existing files)
+# Symlink configs (back up existing real files/dirs; overwrite existing symlinks)
 backup_and_link() {
     local src="$1" dst="$2"
-    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+    if [ -L "$dst" ]; then
+        rm -f "$dst"
+    elif [ -e "$dst" ]; then
+        rm -rf "${dst}.bak" 2>/dev/null || true
         echo "  Backing up $dst -> ${dst}.bak"
-        mv "$dst" "${dst}.bak"
+        mv -f "$dst" "${dst}.bak"
     fi
     ln -sf "$src" "$dst"
     echo "  $src -> $dst"
@@ -33,16 +44,27 @@ backup_and_link() {
 install_to() {
     local src="$1" dst="$2"
     if [ -n "$NEED_SUDO" ]; then
-        sudo mv "$src" "$dst"
+        sudo mv -f "$src" "$dst"
     else
-        mv "$src" "$dst"
+        mv -f "$src" "$dst"
     fi
+}
+
+# Retry a command up to 3 times with a 2-second delay
+retry() {
+    local attempts=3 delay=2 n=0
+    while ! "$@"; do
+        n=$((n + 1))
+        if [ "$n" -ge "$attempts" ]; then return 1; fi
+        echo "  Retrying ($n/$attempts)..."
+        sleep "$delay"
+    done
 }
 
 # Get latest release version from GitHub (strips leading 'v')
 gh_latest() {
     local version
-    version="$(curl -sfI "https://github.com/$1/releases/latest" \
+    version="$(retry curl -sfI "https://github.com/$1/releases/latest" \
         | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')"
     if [ -z "$version" ]; then
         echo "  Warning: could not determine latest version for $1" >&2
@@ -54,7 +76,7 @@ gh_latest() {
 # Install a binary from a GitHub release tarball
 install_gh_binary() {
     local name="$1" url="$2" bin_name="${3:-$1}"
-    if command -v "$bin_name" &>/dev/null; then
+    if command -v "$bin_name" &>/dev/null && ! $FORCE; then
         echo "$bin_name already installed"
         return 0
     fi
@@ -62,9 +84,13 @@ install_gh_binary() {
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' RETURN
+    if ! retry curl -sfL -o "$TMP/archive" "$url"; then
+        echo "  Warning: failed to download $name"
+        return 1
+    fi
     case "$url" in
-        *.tbz|*.tar.bz2) curl -sfL "$url" | tar xj -C "$TMP" ;;
-        *)                curl -sfL "$url" | tar xz -C "$TMP" ;;
+        *.tbz|*.tar.bz2) tar xj -C "$TMP" -f "$TMP/archive" ;;
+        *)                tar xz -C "$TMP" -f "$TMP/archive" ;;
     esac
     local bin
     bin="$(find "$TMP" -type f -name "$bin_name" | head -1)"
@@ -80,7 +106,7 @@ install_gh_binary() {
 # Install a .deb from a GitHub release (extracts binary if no dpkg/sudo)
 install_gh_deb() {
     local name="$1" url="$2"
-    if command -v "$name" &>/dev/null; then
+    if command -v "$name" &>/dev/null && ! $FORCE; then
         echo "$name already installed"
         return 0
     fi
@@ -88,7 +114,10 @@ install_gh_deb() {
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' RETURN
-    curl -sfL -o "$TMP/$name.deb" "$url"
+    if ! retry curl -sfL -o "$TMP/$name.deb" "$url"; then
+        echo "  Warning: failed to download $name"
+        return 1
+    fi
     if [ -w /usr/bin ] || [ -n "$NEED_SUDO" ]; then
         if [ -n "$NEED_SUDO" ]; then
             sudo dpkg -i "$TMP/$name.deb"
@@ -118,7 +147,7 @@ install_gh_deb() {
 # --- Install functions ---
 
 install_glow() {
-    if command -v glow &>/dev/null; then
+    if command -v glow &>/dev/null && ! $FORCE; then
         echo "glow already installed: $(glow --version)"
         return 0
     fi
@@ -135,14 +164,17 @@ install_glow() {
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' RETURN
-    curl -sfL "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz" \
-        | tar xz -C "$TMP" --strip-components=1
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${GLOW_ARCH}.tar.gz"; then
+        echo "  Warning: failed to download glow"
+        return 1
+    fi
+    tar xz -C "$TMP" --strip-components=1 -f "$TMP/archive.tar.gz"
     install_to "$TMP/glow" "$BIN_DIR/glow"
     echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
 }
 
 install_node() {
-    if command -v node &>/dev/null; then
+    if command -v node &>/dev/null && ! $FORCE; then
         echo "Node.js already installed: $(node --version)"
         return 0
     fi
@@ -156,7 +188,7 @@ install_node() {
     esac
     # Get latest LTS version (prefer jq, fall back to regex)
     local NODE_VERSION
-    NODE_VERSION="$(curl -sfL https://nodejs.org/dist/index.json \
+    NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
         | if command -v jq &>/dev/null; then
             jq -r '[.[] | select(.lts != false)] | .[0].version'
         elif command -v python3 &>/dev/null; then
@@ -173,13 +205,16 @@ install_node() {
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' RETURN
-    curl -sfL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
-        | tar xJ -C "$TMP" --strip-components=1
+    if ! retry curl -sfL -o "$TMP/archive.tar.xz" "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; then
+        echo "  Warning: failed to download Node.js"
+        return 1
+    fi
+    tar xJ -C "$TMP" --strip-components=1 -f "$TMP/archive.tar.xz"
     mkdir -p "$HOME/.local"
     # Remove stale symlinks (e.g. from old nvm-based installs) before copying
     rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx" "$HOME/.local/bin/corepack"
     # Install node tree into ~/.local (bin/, lib/, include/, share/)
-    cp -r "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
+    cp -rf "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
     # Clear bash's command hash so it finds the newly installed binaries
     hash -r
     if ! "$HOME/.local/bin/node" --version &>/dev/null; then
@@ -190,7 +225,7 @@ install_node() {
 }
 
 install_uv() {
-    if command -v uv &>/dev/null; then
+    if command -v uv &>/dev/null && ! $FORCE; then
         echo "uv already installed: $(uv --version)"
         return 0
     fi
@@ -199,8 +234,11 @@ install_uv() {
     UV_ARCH="$(uname -m)"
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' RETURN
-    curl -sfL "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz" \
-        | tar xz -C "$TMP"
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz"; then
+        echo "  Warning: failed to download uv"
+        return 1
+    fi
+    tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
     local uv_dir
     uv_dir="$(find "$TMP" -maxdepth 1 -type d -name 'uv-*' | head -1)"
     if [ -z "$uv_dir" ]; then
@@ -208,7 +246,7 @@ install_uv() {
         return 1
     fi
     mkdir -p "$HOME/.local/bin"
-    mv "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"
+    mv -f "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"
     echo "  uv $(uv --version) installed"
 }
 
@@ -286,7 +324,7 @@ install_gh_tools() {
 }
 
 install_claude() {
-    if command -v claude &>/dev/null; then
+    if command -v claude &>/dev/null && ! $FORCE; then
         echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
         return 0
     fi
@@ -296,7 +334,7 @@ install_claude() {
 }
 
 install_codex() {
-    if command -v codex &>/dev/null; then
+    if command -v codex &>/dev/null && ! $FORCE; then
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi

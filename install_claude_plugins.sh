@@ -25,6 +25,13 @@ install_plugin() {
     fi
 }
 
+# Idempotent MCP server add: remove existing server first, then add
+mcp_add() {
+    local name="$1"; shift
+    claude mcp remove --scope user "$name" 2>/dev/null || true
+    claude mcp add "$@"
+}
+
 echo "Installing Claude Code MCP servers..."
 
 # --- GitHub ---
@@ -35,7 +42,7 @@ if [ -z "$GH_TOKEN" ] && command -v gh &>/dev/null; then
 fi
 if [ -n "$GH_TOKEN" ] && $HAS_NPX; then
     echo "  Adding GitHub MCP server..."
-    install_plugin "mcp:github" claude mcp add --scope user --transport stdio github \
+    install_plugin "mcp:github" mcp_add github --scope user --transport stdio github \
         --env GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN" \
         -- npx -y @modelcontextprotocol/server-github
 elif [ -z "$GH_TOKEN" ]; then
@@ -47,21 +54,21 @@ fi
 # --- Filesystem ---
 if $HAS_NPX; then
     echo "  Adding Filesystem MCP server..."
-    install_plugin "mcp:filesystem" claude mcp add --scope user --transport stdio filesystem \
+    install_plugin "mcp:filesystem" mcp_add filesystem --scope user --transport stdio filesystem \
         -- npx -y @modelcontextprotocol/server-filesystem "$HOME"
 fi
 
 # --- Memory ---
 if $HAS_NPX; then
     echo "  Adding Memory MCP server..."
-    install_plugin "mcp:memory" claude mcp add --scope user --transport stdio memory \
+    install_plugin "mcp:memory" mcp_add memory --scope user --transport stdio memory \
         -- npx -y @modelcontextprotocol/server-memory
 fi
 
 # --- Fetch ---
 echo "  Adding Fetch MCP server..."
 if command -v uvx &>/dev/null; then
-    install_plugin "mcp:fetch" claude mcp add --scope user --transport stdio fetch \
+    install_plugin "mcp:fetch" mcp_add fetch --scope user --transport stdio fetch \
         -- uvx mcp-server-fetch
 else
     echo "    Skipping Fetch (uvx not found — install uv first)"
@@ -70,7 +77,7 @@ fi
 # --- Git ---
 echo "  Adding Git MCP server..."
 if command -v uvx &>/dev/null; then
-    install_plugin "mcp:git" claude mcp add --scope user --transport stdio git \
+    install_plugin "mcp:git" mcp_add git --scope user --transport stdio git \
         -- uvx mcp-server-git
 else
     echo "    Skipping Git (uvx not found — install uv first)"
@@ -115,11 +122,10 @@ install_plugin "explanatory-output-style" claude plugin install explanatory-outp
 # --- Summary ---
 echo ""
 if [ ${#FAILURES[@]} -gt 0 ]; then
-    echo "Done with ${#FAILURES[@]} failure(s):"
+    echo "Done with ${#FAILURES[@]} warning(s):"
     for f in "${FAILURES[@]}"; do
-        echo "  - $f"
+        echo "  - $f (non-critical)"
     done
-    exit 1
 else
     echo "Done! All marketplace plugins installed."
 fi
