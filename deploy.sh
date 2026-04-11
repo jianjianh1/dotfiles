@@ -144,13 +144,13 @@ case "$AUTH_METHOD" in
         # Password auth
         read -rp "SSH port [22]: " SSH_PORT
         SSH_PORT="${SSH_PORT:-22}"
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -p "$SSH_PORT")
+        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT")
         ;;
     2)
         # Default key auth
         read -rp "SSH port [22]: " SSH_PORT
         SSH_PORT="${SSH_PORT:-22}"
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -p "$SSH_PORT")
+        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT")
         ;;
     3)
         # Custom key path
@@ -160,14 +160,14 @@ case "$AUTH_METHOD" in
         fi
         read -rp "SSH port [22]: " SSH_PORT
         SSH_PORT="${SSH_PORT:-22}"
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -p "$SSH_PORT" -i "$IDENTITY_FILE")
+        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT" -i "$IDENTITY_FILE")
         ;;
     4)
         # Password + 2FA/DUO — keyboard-interactive, longer timeout
         read -rp "SSH port [22]: " SSH_PORT
         SSH_PORT="${SSH_PORT:-22}"
         CONNECT_TIMEOUT=90
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o PreferredAuthentications=keyboard-interactive,password -o NumberOfPasswordPrompts=3 -p "$SSH_PORT")
+        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o PreferredAuthentications=keyboard-interactive,password -o NumberOfPasswordPrompts=3 -o Port="$SSH_PORT")
         echo ""
         warn "2FA/DUO mode: you will be prompted for password + 2FA approval."
         echo "    Approve the push when prompted. Timeout: ${CONNECT_TIMEOUT}s."
@@ -340,7 +340,7 @@ if [ "$AUTO_YES" = false ]; then
             *)
                 for num in $selection; do
                     if [[ "$num" =~ ^[0-9]+$ ]]; then
-                        local idx=$((num - 1))
+                        idx=$((num - 1))
                         if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#STEPS[@]} ] && [ "${STEPS_AVAILABLE[$idx]}" = "yes" ]; then
                             if [ "${STEPS_SELECTED[$idx]}" = "on" ]; then
                                 STEPS_SELECTED[$idx]="off"

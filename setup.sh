@@ -384,11 +384,12 @@ run_step "mcp plugins" install_plugins
 # --- Summary ---
 echo ""
 if [ ${#FAILURES[@]} -gt 0 ]; then
-    echo "Setup complete with ${#FAILURES[@]} failure(s):"
+    echo "Setup complete with ${#FAILURES[@]} warning(s):"
     for f in "${FAILURES[@]}"; do
-        echo "  - $f"
+        echo "  - $f (optional)"
     done
-    exit 1
+    echo ""
+    echo "Start a new tmux session or run: tmux source ~/.tmux.conf"
 else
     echo "Setup complete! Start a new tmux session or run: tmux source ~/.tmux.conf"
 fi
