@@ -9,6 +9,9 @@ set history=1000
 set undolevels=1000
 set clipboard=unnamedplus       " Use system clipboard
 set mouse=a                     " Enable mouse in all modes
+set timeout
+set timeoutlen=300
+set ttimeout
 set ttimeoutlen=10              " Fast escape key
 
 " === UI ===
@@ -16,16 +19,24 @@ set number                      " Line numbers
 set relativenumber              " Relative line numbers
 set cursorline                  " Highlight current line
 set showmatch                   " Highlight matching brackets
+set matchtime=1
 set laststatus=2                " Always show status line
 set showcmd                     " Show partial commands
 set wildmenu                    " Command-line completion menu
 set wildmode=longest:full,full
+set wildignore+=*/.git/*,*/.hg/*,*/.svn/*,*/node_modules/*,*/build/*,*/dist/*,*/.cache/*
 set scrolloff=8                 " Keep 8 lines above/below cursor
 set sidescrolloff=8
-set signcolumn=number           " Show signs in the number column
-set splitbelow splitright        " Intuitive split directions
+set signcolumn=yes              " Avoid text shifting
+set splitbelow splitright       " Intuitive split directions
 set noerrorbells
 set novisualbell
+set colorcolumn=100             " Guide for long lines
+set wrap                        " Wrap long lines on screen
+set linebreak                   " Wrap at word boundaries
+set breakindent                 " Keep wrapped text visually aligned
+set list                        " Show whitespace
+set listchars=tab:>>·,trail:·,extends:›,precedes:‹,nbsp:␣
 
 " === Search ===
 set incsearch                   " Incremental search
@@ -45,7 +56,7 @@ filetype plugin indent on
 " === Performance ===
 set lazyredraw                  " Don't redraw during macros
 set ttyfast
-set synmaxcol=300               " Don't highlight super-long lines
+set synmaxcol=240               " Don't highlight super-long lines
 syntax enable
 
 " === Files ===
@@ -54,6 +65,15 @@ set nowritebackup
 set noswapfile
 set undofile                    " Persistent undo
 set undodir=~/.vim/undodir
+
+" === Folding ===
+set foldmethod=manual
+set foldlevel=99                " Start unfolded
+set foldnestmax=5
+set foldminlines=2
+
+" === Tags (built-in, no plugins) ===
+set tags=./tags;,tags;
 
 " === Status line (no plugins needed) ===
 set statusline=
@@ -94,7 +114,18 @@ vnoremap K :m '<-2<CR>gv=gv
 nnoremap <C-d> <C-d>zz
 nnoremap <C-u> <C-u>zz
 nnoremap n nzzzv
-nnoremap k kzzzv
+nnoremap N Nzzzv
+
+" Search for word under cursor without jumping
+nnoremap * *N
+nnoremap # #N
+
+" Fold toggles
+nnoremap za za
+nnoremap zO zR
+nnoremap zC zM
+nnoremap <leader>fi :setlocal foldmethod=indent<CR>zx
+nnoremap <leader>fm :setlocal foldmethod=manual<CR>
 
 " Buffer navigation
 nnoremap <leader>bn :bnext<CR>
@@ -117,6 +148,13 @@ nnoremap <leader>m :!glow %<CR>
 " Quick open terminal
 nnoremap <leader>t :terminal<CR>
 
+" === fzf integration (if installed) ===
+if isdirectory(expand('~/.fzf'))
+    set rtp+=~/.fzf
+    nnoremap <leader>f :FZF<CR>
+    nnoremap <leader>b :buffers<CR>:buffer<Space>
+endif
+
 " === Autocmds ===
 augroup custom
     autocmd!
@@ -131,6 +169,12 @@ augroup custom
 
     " Highlight yanked text briefly
     autocmd TextYankPost * silent! lua vim.highlight.on_yank() 2>/dev/null
+augroup END
+
+" Disable expensive features for large files (>1MB)
+augroup LargeFileTuning
+    autocmd!
+    autocmd BufReadPost * if getfsize(expand('%:p')) > 1024 * 1024 | setlocal foldmethod=manual nocursorline norelativenumber nolist | endif
 augroup END
 
 " === netrw (built-in file explorer) ===
@@ -202,6 +246,7 @@ hi WarningMsg      guifg=#fac863 ctermfg=221
 hi VertSplit       guifg=#3d566e guibg=NONE   ctermfg=239  ctermbg=NONE
 hi SignColumn      guibg=#1b2b34 ctermbg=234
 hi Folded          guifg=#65737e guibg=#243040 ctermfg=243  ctermbg=236
+hi ColorColumn     guibg=#243040 ctermbg=236
 hi DiffAdd         guifg=#99c794 guibg=#2d4a3e ctermfg=114  ctermbg=23
 hi DiffDelete      guifg=#ec5f67 guibg=#4a2d34 ctermfg=203  ctermbg=52
 hi DiffChange      guifg=#fac863 guibg=#4a4a2d ctermfg=221  ctermbg=58

@@ -1,20 +1,9 @@
 # PATH
 export PATH="$HOME/.local/bin:$PATH"
 
-# nvm
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
-
-# Prompt — report current directory via OSC 1337 for terminal integrations
-export PS1="$PS1\[\e]1337;CurrentDir=$(pwd)\a\]"
-
-# Default editor (matches vimrc config in this repo)
+# Default editor
 export EDITOR=vim
 export VISUAL=vim
-
-# Default browser (carbonyl — Chromium in the terminal)
-export BROWSER=carbonyl
 
 # History
 export HISTSIZE=50000
@@ -22,6 +11,14 @@ export HISTFILESIZE=100000
 export HISTCONTROL=ignoreboth:erasedups
 export HISTIGNORE="ls:cd:cd -:pwd:exit:clear"
 export HISTTIMEFORMAT="%F %T  "
+shopt -s histappend
+
+# Shell options
+shopt -s checkwinsize
+shopt -s globstar
+shopt -s cdspell        # autocorrect minor cd typos
+shopt -s dirspell       # autocorrect directory name typos in completion
+shopt -s autocd         # type a directory name to cd into it
 
 # Colored output
 export CLICOLOR=1
@@ -34,14 +31,57 @@ export LESS='-iRQ'
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
+# make less more friendly for non-text input files
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# nvm
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+
 # fzf
-export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
-export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-export FZF_ALT_C_COMMAND='fd --type d --hidden --exclude .git'
 export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border'
+command -v fd &>/dev/null && export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
+command -v fd &>/dev/null && export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+command -v fd &>/dev/null && export FZF_ALT_C_COMMAND='fd --type d --hidden --exclude .git'
 
 # bat
-export BAT_THEME="ansi"
+export BAT_THEME="TwoDark"
 
 # dircolors
 [ -f ~/.dircolors ] && eval "$(dircolors -b ~/.dircolors)"
+
+# Git branch for prompt
+__git_branch() {
+    local b
+    b="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)"
+    [ -n "$b" ] && printf " (%s)" "$b"
+}
+
+# Git-aware prompt:  user:~/dir (branch)$
+PS1='\[\033[01;32m\]\u\[\033[00m\]:\[\033[01;34m\]\w\[\033[33m\]$(__git_branch)\[\033[00m\]\$ '
+
+# Set terminal title
+case "$TERM" in
+xterm*|rxvt*) PS1="\[\e]0;\u: \w\a\]$PS1" ;;
+esac
+
+# Current directory reporting for terminal integrations
+__report_current_dir() {
+    printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
+    if [ -n "$TMUX" ]; then
+        printf '\ePtmux;\e\e]1337;CurrentDir=%s\a\e\\' "$PWD"
+    else
+        printf '\e]1337;CurrentDir=%s\a' "$PWD"
+    fi
+}
+PROMPT_COMMAND="__report_current_dir${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+
+# Bash completion
+if ! shopt -oq posix; then
+    if [ -f /usr/share/bash-completion/bash_completion ]; then
+        . /usr/share/bash-completion/bash_completion
+    elif [ -f /etc/bash_completion ]; then
+        . /etc/bash_completion
+    fi
+fi

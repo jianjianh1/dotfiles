@@ -1,7 +1,27 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "cleanupPeriodDays": 60,
+  "model": "opus",
+  "cleanupPeriodDays": 30,
   "enableAllProjectMcpServers": true,
+  "permissions": {
+    "allow": [],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.kube/config)",
+      "Read(~/.netrc)",
+      "Read(~/.docker/config.json)",
+      "Read(~/.config/gcloud/**)"
+    ]
+  },
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "1800000",
+    "BASH_MAX_TIMEOUT_MS": "7200000"
+  },
   "enabledPlugins": {
     "github@claude-plugins-official": true,
     "linear@claude-plugins-official": true,
@@ -27,12 +47,34 @@
       }
     }
   },
+  "sandbox": {
+    "enabled": false,
+    "failIfUnavailable": false,
+    "autoAllowBashIfSandboxed": true
+  },
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
   "skipDangerousModePermissionPrompt": true,
   "autoConnectIde": true,
+  "autoUpdatesChannel": "stable",
   "editorMode": "vim",
   "showTurnDuration": true,
   "terminalProgressBarEnabled": true,
-  "defaultMode": "bypassPermissions"
+  "spinnerTipsEnabled": true,
+  "respectGitignore": false,
+  "includeGitInstructions": true,
+  "defaultMode": "bypassPermissions",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '\\a'"
+          }
+        ]
+      }
+    ]
+  }
 }
