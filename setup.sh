@@ -263,21 +263,15 @@ install_codex() {
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
-    # Use our npm explicitly to avoid picking up a stale system npm
-    local npm_bin="$HOME/.local/bin/npm"
-    if [ ! -x "$npm_bin" ] && ! command -v npm &>/dev/null; then
-        echo "Skipping Codex CLI (npm not found — install Node.js first)"
+    # Run node + npm-cli.js directly to bypass #!/usr/bin/env node shebang issues
+    local node_bin="$HOME/.local/bin/node"
+    local npm_cli="$HOME/.local/lib/node_modules/npm/bin/npm-cli.js"
+    if [ ! -x "$node_bin" ] || [ ! -f "$npm_cli" ]; then
+        echo "Skipping Codex CLI (Node.js not found — install Node.js first)"
         return 1
     fi
-    [ -x "$npm_bin" ] || npm_bin="$(command -v npm)"
     echo "Installing Codex CLI..."
-    if [ -n "$NEED_SUDO" ]; then
-        sudo "$npm_bin" install -g @openai/codex
-    elif [ -w "$("$npm_bin" prefix -g)" ]; then
-        "$npm_bin" install -g @openai/codex
-    else
-        "$npm_bin" install -g --prefix "$HOME/.local" @openai/codex
-    fi
+    "$node_bin" "$npm_cli" install -g @openai/codex
     hash -r
     if ! command -v codex &>/dev/null; then
         echo "  Codex CLI install failed"
