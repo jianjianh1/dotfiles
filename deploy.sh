@@ -495,13 +495,7 @@ step_claude_auth() {
     if remote_exec "command -v jq &>/dev/null"; then
         remote_exec "jq '.hasCompletedOnboarding = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json"
     else
-        remote_exec "python3 -c \"
-import json, pathlib
-p = pathlib.Path.home() / '.claude.json'
-d = json.loads(p.read_text()) if p.exists() else {}
-d['hasCompletedOnboarding'] = True
-p.write_text(json.dumps(d))
-\""
+        remote_exec "python3 -c 'import json,pathlib;p=pathlib.Path.home()/\".claude.json\";d=json.loads(p.read_text()) if p.exists() else {};d[\"hasCompletedOnboarding\"]=True;p.write_text(json.dumps(d))'"
     fi
 
     # Verify auth works
