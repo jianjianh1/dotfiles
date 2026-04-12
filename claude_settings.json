@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '\\a'"
+            "command": "printf '\\a' > /dev/tty"
           }
         ]
       }
