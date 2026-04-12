@@ -258,9 +258,9 @@ done
 HAS_GH_AUTH=false
 [ -f ~/.config/gh/hosts.yml ] && HAS_GH_AUTH=true
 
-# Claude Code
+# Claude Code (setup-token OAuth token or ANTHROPIC_API_KEY)
 HAS_CLAUDE_AUTH=false
-{ [ -f ~/.claude/credentials.json ] || [ -f ~/.claude/.credentials ] || [ -f ~/.claude/.credentials.json ]; } && HAS_CLAUDE_AUTH=true
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && HAS_CLAUDE_AUTH=true
 
 # Codex
 HAS_CODEX_AUTH=false
@@ -273,7 +273,7 @@ HAS_API_KEYS=false
 # Print scan results
 [ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && success "${#LOCAL_SSH_KEYS[@]} SSH key pair(s) found" || warn "No SSH keys found"
 [ "$HAS_GH_AUTH" = true ]      && success "GitHub CLI authenticated" || printf "  ${DIM}- GitHub CLI: not found${RESET}\n"
-[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code credentials found" || printf "  ${DIM}- Claude Code: not found${RESET}\n"
+[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code OAuth token found (CLAUDE_CODE_OAUTH_TOKEN)" || printf "  ${DIM}- Claude Code: CLAUDE_CODE_OAUTH_TOKEN not set (run 'claude setup-token' to generate)${RESET}\n"
 [ "$HAS_CODEX_AUTH" = true ]   && success "Codex auth found" || printf "  ${DIM}- Codex auth: not found${RESET}\n"
 [ "$HAS_API_KEYS" = true ]     && success "API keys detected in env" || printf "  ${DIM}- API keys: not set${RESET}\n"
 
@@ -457,26 +457,27 @@ step_gh_auth() {
 
 step_claude_auth() {
     section "Claude Code Auth"
-    remote_exec "mkdir -p ~/.claude"
-    local copied=false
-    for cred_file in credentials.json .credentials .credentials.json; do
-        if [ -f ~/.claude/"$cred_file" ]; then
-            remote_copy ~/.claude/"$cred_file" "$REMOTE_HOST:~/.claude/" && copied=true
-        fi
-    done
-    if [ "$copied" = false ]; then
-        error "Failed to copy Claude Code credentials"
+
+    # Write CLAUDE_CODE_OAUTH_TOKEN to ~/.env_keys on remote (alongside any API keys)
+    local token_export="export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}'"
+    if printf "%s\n" "$token_export" | base64 | remote_exec "
+        base64 -d >> ~/.env_keys && chmod 600 ~/.env_keys
+    "; then
+        remote_exec "grep -qF '.env_keys' ~/.bashrc 2>/dev/null || echo '[ -f ~/.env_keys ] && source ~/.env_keys' >> ~/.bashrc"
+        success "Claude Code OAuth token written to ~/.env_keys"
+    else
+        error "Failed to write Claude Code OAuth token"
         return 1
     fi
-    success "Claude Code credentials copied"
-    if remote_exec "command -v claude &>/dev/null" && remote_exec "claude auth status --json 2>/dev/null | grep -q '\"loggedIn\": *true'"; then
+
+    # Skip onboarding prompt
+    remote_exec "mkdir -p ~/.claude && [ -f ~/.claude.json ] || echo '{\"hasCompletedOnboarding\":true}' > ~/.claude.json"
+
+    # Verify auth works
+    if remote_exec "CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}' claude auth status --json 2>/dev/null | grep -q '\"loggedIn\": *true'"; then
         success "Claude Code authenticated on remote"
     else
-        warn "Credentials copied but auth not verified"
-        if confirm "Open interactive SSH session to run 'claude auth login'?" "y"; then
-            echo "  Run 'claude auth login' in the remote shell, then 'exit' to continue deploy."
-            ssh -o "ControlPath=$SSH_SOCKET" -o BatchMode=no -t "$REMOTE_HOST" || true
-        fi
+        warn "Token written but auth not verified — check 'claude auth status' on the remote"
     fi
 }
 
