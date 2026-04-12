@@ -95,6 +95,8 @@ remove_claude() {
 remove_codex() {
     if command -v codex &>/dev/null; then
         echo "Uninstalling Codex CLI..."
+        remove_bin codex
+        # Clean up legacy npm install if present
         npm uninstall -g @openai/codex 2>/dev/null || true
         echo "  Codex CLI removed"
     else

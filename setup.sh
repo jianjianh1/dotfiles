@@ -342,21 +342,32 @@ install_codex() {
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
-    # Run node + npm-cli.js directly to bypass #!/usr/bin/env node shebang issues
-    local node_bin="$HOME/.local/bin/node"
-    local npm_cli="$HOME/.local/lib/node_modules/npm/bin/npm-cli.js"
-    if [ ! -x "$node_bin" ] || [ ! -f "$npm_cli" ]; then
-        echo "Skipping Codex CLI (Node.js not found — install Node.js first)"
-        return 1
-    fi
     echo "Installing Codex CLI..."
-    "$node_bin" "$npm_cli" install -g @openai/codex
-    hash -r
-    if ! command -v codex &>/dev/null; then
-        echo "  Codex CLI install failed"
+    # gh_latest returns the full tag (e.g. "rust-v0.120.0") since the tag isn't a plain "v*"
+    local CODEX_TAG
+    CODEX_TAG="$(gh_latest openai/codex)" || return 1
+    local ARCH
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|aarch64) ;;
+        *) echo "  Skipping Codex CLI (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" \
+        "https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-unknown-linux-musl.tar.gz"; then
+        echo "  Warning: failed to download Codex CLI"
         return 1
     fi
-    echo "  Codex CLI installed"
+    tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
+    chmod +x "$TMP/codex-${ARCH}-unknown-linux-musl"
+    install_to "$TMP/codex-${ARCH}-unknown-linux-musl" "$BIN_DIR/codex"
+    if ! codex --version &>/dev/null; then
+        echo "  Codex CLI install failed — binary not working"
+        return 1
+    fi
+    echo "  Codex CLI $(codex --version 2>&1 | head -1) installed to $BIN_DIR"
 }
 
 install_plugins() {
