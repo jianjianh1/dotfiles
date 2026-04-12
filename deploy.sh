@@ -465,9 +465,9 @@ step_claude_auth() {
         if [ "$HAS_CLAUDE_CLI" = true ]; then
             echo "  Run this in another terminal and paste the token here:"
             echo ""
-            printf "    ${BOLD}claude setup-token${RESET}\n"
+            printf "    ${BOLD}claude auth setup-token${RESET}\n"
         else
-            echo "  Run 'claude setup-token' on a machine with a browser,"
+            echo "  Run 'claude auth setup-token' on a machine with a browser,"
             echo "  then paste the token here."
         fi
         echo ""
