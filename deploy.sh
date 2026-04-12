@@ -472,7 +472,11 @@ step_claude_auth() {
     if remote_exec "command -v claude &>/dev/null" && remote_exec "claude auth status --json 2>/dev/null | grep -q '\"loggedIn\": *true'"; then
         success "Claude Code authenticated on remote"
     else
-        warn "Credentials copied but auth not verified — you may need to run 'claude auth login' on the remote"
+        warn "Credentials copied but auth not verified"
+        if confirm "Open interactive SSH session to run 'claude auth login'?" "y"; then
+            echo "  Run 'claude auth login' in the remote shell, then 'exit' to continue deploy."
+            ssh -o "ControlPath=$SSH_SOCKET" -o BatchMode=no -t "$REMOTE_HOST" || true
+        fi
     fi
 }
 
