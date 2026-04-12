@@ -494,10 +494,10 @@ step_claude_auth() {
     remote_exec "mkdir -p ~/.claude && [ -f ~/.claude.json ] || echo '{\"hasCompletedOnboarding\":true}' > ~/.claude.json"
 
     # Verify auth works
-    if remote_exec "CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}' claude auth status --json 2>/dev/null | grep -q '\"loggedIn\": *true'"; then
+    if remote_exec "source ~/.env_keys && claude -p 'ping' >/dev/null 2>&1"; then
         success "Claude Code authenticated on remote"
     else
-        warn "Token written but auth not verified — check 'claude auth status' on the remote"
+        warn "Token written but auth not verified — check 'claude -p hello' on the remote"
     fi
 }
 
