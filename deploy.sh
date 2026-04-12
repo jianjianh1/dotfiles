@@ -490,8 +490,19 @@ step_claude_auth() {
         return 1
     fi
 
-    # Skip onboarding prompt
-    remote_exec "mkdir -p ~/.claude && [ -f ~/.claude.json ] || echo '{\"hasCompletedOnboarding\":true}' > ~/.claude.json"
+    # Skip onboarding/login prompt
+    remote_exec "mkdir -p ~/.claude"
+    if remote_exec "command -v jq &>/dev/null"; then
+        remote_exec "jq '.hasCompletedOnboarding = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json"
+    else
+        remote_exec "python3 -c \"
+import json, pathlib
+p = pathlib.Path.home() / '.claude.json'
+d = json.loads(p.read_text()) if p.exists() else {}
+d['hasCompletedOnboarding'] = True
+p.write_text(json.dumps(d))
+\""
+    fi
 
     # Verify auth works
     if remote_exec "source ~/.env_keys && claude -p 'ping' >/dev/null 2>&1"; then
