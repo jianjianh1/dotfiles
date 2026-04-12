@@ -292,12 +292,12 @@ add_step() {
     STEPS_SELECTED+=("$3")      # "on" or "off"
 }
 
-add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
+add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
+add_step "Clone repo & setup.sh" "yes"                                                      "on"
 add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
-add_step "Clone repo & setup.sh" "yes"                                                      "on"
 
 # Auto-deselect unavailable items
 for i in "${!STEPS[@]}"; do
@@ -464,11 +464,15 @@ step_claude_auth() {
             remote_copy ~/.claude/"$cred_file" "$REMOTE_HOST:~/.claude/" && copied=true
         fi
     done
-    if [ "$copied" = true ]; then
-        success "Claude Code credentials copied"
-    else
+    if [ "$copied" = false ]; then
         error "Failed to copy Claude Code credentials"
         return 1
+    fi
+    success "Claude Code credentials copied"
+    if remote_exec "command -v claude &>/dev/null" && remote_exec "claude auth status --json 2>/dev/null | grep -q '\"loggedIn\": *true'"; then
+        success "Claude Code authenticated on remote"
+    else
+        warn "Credentials copied but auth not verified — you may need to run 'claude auth login' on the remote"
     fi
 }
 
@@ -555,12 +559,12 @@ step_clone_setup() {
 
 echo ""
 
-[ "${STEPS_SELECTED[0]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
-[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
-[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "Claude Code auth" step_claude_auth
-[ "${STEPS_SELECTED[3]}" = "on" ] && run_step "Codex auth"       step_codex_auth
-[ "${STEPS_SELECTED[4]}" = "on" ] && run_step "API keys"         step_api_keys
-[ "${STEPS_SELECTED[5]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
+[ "${STEPS_SELECTED[0]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
+[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
+[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
+[ "${STEPS_SELECTED[3]}" = "on" ] && run_step "Claude Code auth" step_claude_auth
+[ "${STEPS_SELECTED[4]}" = "on" ] && run_step "Codex auth"       step_codex_auth
+[ "${STEPS_SELECTED[5]}" = "on" ] && run_step "API keys"         step_api_keys
 
 # ============================================================
 # Summary
