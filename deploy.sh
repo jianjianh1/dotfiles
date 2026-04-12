@@ -258,9 +258,10 @@ done
 HAS_GH_AUTH=false
 [ -f ~/.config/gh/hosts.yml ] && HAS_GH_AUTH=true
 
-# Claude Code (setup-token OAuth token or ANTHROPIC_API_KEY)
+# Claude Code
 HAS_CLAUDE_AUTH=false
 [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && HAS_CLAUDE_AUTH=true
+command -v claude &>/dev/null && HAS_CLAUDE_CLI=true || HAS_CLAUDE_CLI=false
 
 # Codex
 HAS_CODEX_AUTH=false
@@ -273,7 +274,7 @@ HAS_API_KEYS=false
 # Print scan results
 [ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && success "${#LOCAL_SSH_KEYS[@]} SSH key pair(s) found" || warn "No SSH keys found"
 [ "$HAS_GH_AUTH" = true ]      && success "GitHub CLI authenticated" || printf "  ${DIM}- GitHub CLI: not found${RESET}\n"
-[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code OAuth token found (CLAUDE_CODE_OAUTH_TOKEN)" || printf "  ${DIM}- Claude Code: CLAUDE_CODE_OAUTH_TOKEN not set (run 'claude setup-token' to generate)${RESET}\n"
+[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code OAuth token found" || warn "Claude Code: CLAUDE_CODE_OAUTH_TOKEN not set (will prompt during deploy)"
 [ "$HAS_CODEX_AUTH" = true ]   && success "Codex auth found" || printf "  ${DIM}- Codex auth: not found${RESET}\n"
 [ "$HAS_API_KEYS" = true ]     && success "API keys detected in env" || printf "  ${DIM}- API keys: not set${RESET}\n"
 
@@ -295,7 +296,7 @@ add_step() {
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Clone repo & setup.sh" "yes"                                                      "on"
-add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
+add_step "Claude Code auth"      "yes"                                                      "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
 
@@ -457,6 +458,25 @@ step_gh_auth() {
 
 step_claude_auth() {
     section "Claude Code Auth"
+
+    # Prompt for token if not already set
+    if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        echo "  A long-lived OAuth token is needed for headless auth."
+        if [ "$HAS_CLAUDE_CLI" = true ]; then
+            echo "  Run this in another terminal and paste the token here:"
+            echo ""
+            printf "    ${BOLD}claude setup-token${RESET}\n"
+        else
+            echo "  Run 'claude setup-token' on a machine with a browser,"
+            echo "  then paste the token here."
+        fi
+        echo ""
+        read -rp "  CLAUDE_CODE_OAUTH_TOKEN: " CLAUDE_CODE_OAUTH_TOKEN
+        if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            error "No token provided"
+            return 1
+        fi
+    fi
 
     # Write CLAUDE_CODE_OAUTH_TOKEN to ~/.env_keys on remote (alongside any API keys)
     local token_export="export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}'"
