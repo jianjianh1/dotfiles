@@ -140,7 +140,9 @@ remote_exec() {
         error "SSH connection dropped. Try re-running the script."
         return 1
     fi
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "$@"
+    local cmd="$1" quoted_cmd
+    printf -v quoted_cmd '%q' "$cmd"
+    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
 }
 
 remote_copy() {
