@@ -106,6 +106,35 @@ PY
     return 1
 }
 
+ensure_remote_env_keys_loader() {
+    remote_exec "
+        touch ~/.env_keys && chmod 600 ~/.env_keys
+        grep -qF '[ -f ~/.env_keys ] && . ~/.env_keys' ~/.bashrc 2>/dev/null || echo '[ -f ~/.env_keys ] && . ~/.env_keys' >> ~/.bashrc
+        grep -qF '[ -f ~/.env_keys ] && . ~/.env_keys' ~/.profile 2>/dev/null || echo '[ -f ~/.env_keys ] && . ~/.env_keys' >> ~/.profile
+    "
+}
+
+remote_upsert_env_exports() {
+    printf "%s" "$1" | base64 | remote_exec '
+        tmp_in=$(mktemp)
+        tmp_out=$(mktemp)
+        base64 -d > "$tmp_in"
+        touch ~/.env_keys
+        cp ~/.env_keys "$tmp_out"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            var=${line#export }
+            var=${var%%=*}
+            grep -v "^export ${var}=" "$tmp_out" > "${tmp_out}.next" || true
+            mv "${tmp_out}.next" "$tmp_out"
+            printf "%s\n" "$line" >> "$tmp_out"
+        done < "$tmp_in"
+        mv "$tmp_out" ~/.env_keys
+        chmod 600 ~/.env_keys
+        rm -f "$tmp_in"
+    '
+}
+
 # --- Retry wrapper for network operations ---
 retry() {
     local attempts=3 delay=2 n=0
@@ -298,7 +327,9 @@ done
 
 # GitHub CLI
 HAS_GH_AUTH=false
-[ -f ~/.config/gh/hosts.yml ] && HAS_GH_AUTH=true
+if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+    HAS_GH_AUTH=true
+fi
 
 # Claude Code
 HAS_CLAUDE_AUTH=false
@@ -461,42 +492,46 @@ step_ssh_keys() {
     echo "  Authorizing local public key on remote..."
     ssh-copy-id "${SSH_OPTS[@]}" "$REMOTE_HOST" 2>&1 | grep -v "^$" || warn "ssh-copy-id failed (key may already be authorized)"
 
-    # Confirm before copying private keys
-    if ! confirm "Copy private SSH keys to remote?" "n"; then
-        success "Public key authorized (private keys not copied)"
-        return 0
-    fi
-
-    # Copy key pairs to remote
-    remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-
-    local copied=0
-    for priv in "${LOCAL_SSH_KEYS[@]}"; do
-        local pub="${priv}.pub"
-        echo "  Copying $(basename "$priv")..."
-        if remote_copy "$priv" "$pub" "$REMOTE_HOST:~/.ssh/"; then
-            remote_exec "chmod 600 ~/.ssh/$(basename "$priv") && chmod 644 ~/.ssh/$(basename "$pub")"
-            copied=$((copied + 1))
-        else
-            error "Failed to copy $(basename "$priv")"
-        fi
-    done
-
     # Copy known_hosts so remote trusts github.com etc.
     if [ -f ~/.ssh/known_hosts ]; then
-        remote_copy ~/.ssh/known_hosts "$REMOTE_HOST:~/.ssh/known_hosts"
+        remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+        if remote_copy ~/.ssh/known_hosts "$REMOTE_HOST:~/.ssh/known_hosts"; then
+            remote_exec "chmod 644 ~/.ssh/known_hosts"
+        else
+            warn "Failed to copy known_hosts"
+        fi
     fi
 
-    success "$copied key pair(s) copied"
+    echo "  Private SSH key copying is intentionally disabled."
+    echo "    Use agent forwarding or generate a dedicated key on the remote if needed."
+    success "Public key authorized"
 }
 
 step_gh_auth() {
     section "GitHub CLI Auth"
-    remote_exec "mkdir -p ~/.config/gh"
+    if [ ! -f "$HOME/.config/gh/hosts.yml" ]; then
+        error "Local gh credentials file not found"
+        return 1
+    fi
+
+    if ! remote_exec "command -v gh &>/dev/null"; then
+        error "GitHub CLI not found on remote"
+        echo "    Run the clone/setup step before GitHub CLI auth."
+        return 1
+    fi
+
+    remote_exec "mkdir -p ~/.config/gh && chmod 700 ~/.config ~/.config/gh"
     if remote_copy ~/.config/gh/hosts.yml "$REMOTE_HOST:~/.config/gh/"; then
-        success "GitHub CLI credentials copied"
+        remote_exec "chmod 600 ~/.config/gh/hosts.yml"
     else
         error "Failed to copy GitHub CLI auth"
+        return 1
+    fi
+
+    if remote_exec "gh auth status >/dev/null 2>&1"; then
+        success "GitHub CLI credentials copied and verified"
+    else
+        error "GitHub CLI credentials copied but auth did not verify"
         return 1
     fi
 }
@@ -516,7 +551,8 @@ step_claude_auth() {
             echo "  then paste the token here."
         fi
         echo ""
-        read -rp "  CLAUDE_CODE_OAUTH_TOKEN: " CLAUDE_CODE_OAUTH_TOKEN
+        read -rsp "  CLAUDE_CODE_OAUTH_TOKEN: " CLAUDE_CODE_OAUTH_TOKEN
+        echo ""
         if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
             error "No token provided"
             return 1
@@ -525,10 +561,8 @@ step_claude_auth() {
 
     # Write CLAUDE_CODE_OAUTH_TOKEN to ~/.env_keys on remote (alongside any API keys)
     local token_export="export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}'"
-    if printf "%s\n" "$token_export" | base64 | remote_exec "
-        base64 -d >> ~/.env_keys && chmod 600 ~/.env_keys
-    "; then
-        remote_exec "grep -qF '.env_keys' ~/.bashrc 2>/dev/null || echo '[ -f ~/.env_keys ] && source ~/.env_keys' >> ~/.bashrc"
+    if remote_upsert_env_exports "$token_export"$'\n'; then
+        ensure_remote_env_keys_loader
         success "Claude Code OAuth token written to ~/.env_keys"
     else
         error "Failed to write Claude Code OAuth token"
@@ -544,7 +578,7 @@ step_claude_auth() {
     fi
 
     # Verify auth works
-    if remote_exec "source ~/.env_keys && claude -p 'ping' >/dev/null 2>&1"; then
+    if remote_exec ". ~/.env_keys && claude -p 'ping' >/dev/null 2>&1"; then
         success "Claude Code authenticated on remote"
     else
         warn "Token written but auth not verified — check 'claude -p hello' on the remote"
@@ -596,8 +630,8 @@ step_api_keys() {
     fi
 
     # Use base64 to safely transfer (avoids shell quoting issues)
-    if printf "%s" "$env_keys" | base64 | remote_exec "base64 -d > ~/.env_keys && chmod 600 ~/.env_keys"; then
-        remote_exec "grep -qF '.env_keys' ~/.bashrc 2>/dev/null || echo '[ -f ~/.env_keys ] && source ~/.env_keys' >> ~/.bashrc"
+    if remote_upsert_env_exports "$env_keys"; then
+        ensure_remote_env_keys_loader
         success "API keys written to ~/.env_keys"
     else
         error "Failed to write API keys"
