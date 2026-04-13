@@ -373,7 +373,7 @@ add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes 
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Clone repo & setup.sh" "yes"                                                      "on"
 add_step "Claude Code auth"      "yes"                                                      "on"
-add_step "Codex auth"            "$([ "$HAS_CODEX_API_KEY" = true ] && echo yes || echo no)" "on"
+add_step "Codex auth"            "yes"                                                      "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
 
 # Auto-deselect unavailable items
@@ -588,9 +588,19 @@ step_claude_auth() {
 step_codex_auth() {
     section "Codex Auth"
     if [ -z "$CODEX_API_KEY" ]; then
-        error "No Codex API key available locally"
-        echo "    Export OPENAI_API_KEY or sign in locally with an API key first."
-        return 1
+        echo "  An OpenAI API key is needed for headless Codex auth."
+        if [ "$AUTO_YES" = true ]; then
+            error "OPENAI_API_KEY is required when running with --yes"
+            return 1
+        fi
+        echo "  Export OPENAI_API_KEY ahead of time, or paste it here."
+        echo ""
+        read -rsp "  OPENAI_API_KEY: " CODEX_API_KEY
+        echo ""
+        if [ -z "$CODEX_API_KEY" ]; then
+            error "No OpenAI API key provided"
+            return 1
+        fi
     fi
 
     if ! remote_exec "command -v codex &>/dev/null"; then
