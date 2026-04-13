@@ -3,7 +3,26 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 YES=false
-[[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && YES=true
+REMOVE_NON_SYMLINKS=false
+
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) YES=true ;;
+        --remove-non-symlinks) REMOVE_NON_SYMLINKS=true ;;
+        -h|--help)
+            echo "Usage: uninstall.sh [--yes|-y] [--remove-non-symlinks] [--help|-h]"
+            echo "  -y, --yes                 Skip confirmation prompts"
+            echo "      --remove-non-symlinks Remove managed config paths even if they are regular files/directories"
+            echo "  -h, --help                Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Run './uninstall.sh --help' for usage."
+            exit 1
+            ;;
+    esac
+done
 
 # --- Helpers ---
 
@@ -14,17 +33,26 @@ confirm() {
 }
 
 # Remove a symlink only if it points into this repo, then restore .bak if present
+restore_backup() {
+    local dst="$1"
+    if [ -e "${dst}.bak" ]; then
+        mv "${dst}.bak" "$dst"
+        echo "  Restored ${dst}.bak -> $dst"
+    fi
+}
+
 unlink_config() {
     local dst="$1"
     if [ -L "$dst" ] && [[ "$(readlink -f "$dst")" == "$DIR"/* ]]; then
         rm "$dst"
         echo "  Removed $dst"
-        if [ -e "${dst}.bak" ]; then
-            mv "${dst}.bak" "$dst"
-            echo "  Restored ${dst}.bak -> $dst"
-        fi
+        restore_backup "$dst"
     elif [ -L "$dst" ]; then
         echo "  Skipped $dst (symlink points elsewhere)"
+    elif [ -e "$dst" ] && $REMOVE_NON_SYMLINKS; then
+        rm -rf "$dst"
+        echo "  Removed $dst (non-symlink)"
+        restore_backup "$dst"
     else
         echo "  Skipped $dst (not a symlink to this repo)"
     fi
