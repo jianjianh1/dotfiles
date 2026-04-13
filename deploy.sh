@@ -64,6 +64,48 @@ run_step() {
     fi
 }
 
+extract_codex_api_key() {
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        printf "%s" "$OPENAI_API_KEY"
+        return 0
+    fi
+
+    if [ ! -f "$HOME/.codex/auth.json" ]; then
+        return 1
+    fi
+
+    if command -v jq &>/dev/null; then
+        local key
+        key="$(jq -r '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" 2>/dev/null)"
+        [ -n "$key" ] || return 1
+        printf "%s" "$key"
+        return 0
+    fi
+
+    if command -v python3 &>/dev/null; then
+        python3 - <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path.home() / ".codex" / "auth.json"
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    sys.exit(1)
+
+key = data.get("OPENAI_API_KEY")
+if not key:
+    sys.exit(1)
+
+sys.stdout.write(key)
+PY
+        return $?
+    fi
+
+    return 1
+}
+
 # --- Retry wrapper for network operations ---
 retry() {
     local attempts=3 delay=2 n=0
@@ -264,8 +306,11 @@ HAS_CLAUDE_AUTH=false
 command -v claude &>/dev/null && HAS_CLAUDE_CLI=true || HAS_CLAUDE_CLI=false
 
 # Codex
-HAS_CODEX_AUTH=false
-[ -f ~/.codex/auth.json ] && HAS_CODEX_AUTH=true
+HAS_CODEX_API_KEY=false
+CODEX_API_KEY=""
+if CODEX_API_KEY="$(extract_codex_api_key 2>/dev/null)"; then
+    HAS_CODEX_API_KEY=true
+fi
 
 # API keys
 HAS_API_KEYS=false
@@ -275,7 +320,7 @@ HAS_API_KEYS=false
 [ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && success "${#LOCAL_SSH_KEYS[@]} SSH key pair(s) found" || warn "No SSH keys found"
 [ "$HAS_GH_AUTH" = true ]      && success "GitHub CLI authenticated" || printf "  ${DIM}- GitHub CLI: not found${RESET}\n"
 [ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code OAuth token found" || warn "Claude Code: CLAUDE_CODE_OAUTH_TOKEN not set (will prompt during deploy)"
-[ "$HAS_CODEX_AUTH" = true ]   && success "Codex auth found" || printf "  ${DIM}- Codex auth: not found${RESET}\n"
+[ "$HAS_CODEX_API_KEY" = true ] && success "Codex API key available for headless login" || printf "  ${DIM}- Codex API key: not found${RESET}\n"
 [ "$HAS_API_KEYS" = true ]     && success "API keys detected in env" || printf "  ${DIM}- API keys: not set${RESET}\n"
 
 # ============================================================
@@ -297,7 +342,7 @@ add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes 
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Clone repo & setup.sh" "yes"                                                      "on"
 add_step "Claude Code auth"      "yes"                                                      "on"
-add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
+add_step "Codex auth"            "$([ "$HAS_CODEX_API_KEY" = true ] && echo yes || echo no)" "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
 
 # Auto-deselect unavailable items
@@ -508,12 +553,32 @@ step_claude_auth() {
 
 step_codex_auth() {
     section "Codex Auth"
-    remote_exec "mkdir -p ~/.codex"
-    if remote_copy ~/.codex/auth.json "$REMOTE_HOST:~/.codex/"; then
-        success "Codex auth copied"
-    else
-        error "Failed to copy Codex auth"
+    if [ -z "$CODEX_API_KEY" ]; then
+        error "No Codex API key available locally"
+        echo "    Export OPENAI_API_KEY or sign in locally with an API key first."
         return 1
+    fi
+
+    if ! remote_exec "command -v codex &>/dev/null"; then
+        error "Codex CLI not found on remote"
+        echo "    Run the clone/setup step before Codex auth."
+        return 1
+    fi
+
+    remote_exec "mkdir -p ~/.codex"
+
+    # Use the documented automation path instead of copying a browser session blob.
+    if printf "%s" "$CODEX_API_KEY" | remote_exec "codex login --with-api-key >/dev/null 2>&1"; then
+        remote_exec "chmod 600 ~/.codex/auth.json 2>/dev/null || true"
+    else
+        error "Failed to log Codex in with API key"
+        return 1
+    fi
+
+    if remote_exec "codex login status >/dev/null 2>&1"; then
+        success "Codex authenticated via API key"
+    else
+        warn "Codex auth file written but login status did not verify"
     fi
 }
 
