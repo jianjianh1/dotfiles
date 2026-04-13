@@ -4,6 +4,9 @@
 # Reasoning
 model_reasoning_effort = "high"
 
+# Git attribution
+commit_attribution = ""
+
 # Bypass approvals and sandbox (equivalent to --dangerously-bypass-approvals-and-sandbox)
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
