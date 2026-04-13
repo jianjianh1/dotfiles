@@ -64,46 +64,30 @@ run_step() {
     fi
 }
 
-extract_codex_api_key() {
-    if [ -n "${OPENAI_API_KEY:-}" ]; then
-        printf "%s" "$OPENAI_API_KEY"
-        return 0
-    fi
+local_claude_credentials_file() {
+    printf "%s/.credentials.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
 
-    if [ ! -f "$HOME/.codex/auth.json" ]; then
-        return 1
-    fi
+local_codex_auth_file() {
+    printf "%s/auth.json" "${CODEX_HOME:-$HOME/.codex}"
+}
 
-    if command -v jq &>/dev/null; then
-        local key
-        key="$(jq -r '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" 2>/dev/null)"
-        [ -n "$key" ] || return 1
-        printf "%s" "$key"
-        return 0
-    fi
+copy_local_file_to_remote() {
+    local local_path="$1"
+    local remote_path="$2"
+    local mode="${3:-600}"
 
-    if command -v python3 &>/dev/null; then
-        python3 - <<'PY'
-import json
-import pathlib
-import sys
+    [ -f "$local_path" ] || return 1
 
-path = pathlib.Path.home() / ".codex" / "auth.json"
-try:
-    data = json.loads(path.read_text())
-except Exception:
-    sys.exit(1)
-
-key = data.get("OPENAI_API_KEY")
-if not key:
-    sys.exit(1)
-
-sys.stdout.write(key)
-PY
-        return $?
-    fi
-
-    return 1
+    base64 < "$local_path" | remote_exec "
+        dest=\"$remote_path\"
+        mkdir -p \"\$(dirname \"\$dest\")\" &&
+        tmp=\$(mktemp) &&
+        base64 -d > \"\$tmp\" &&
+        cat \"\$tmp\" > \"\$dest\" &&
+        chmod $mode \"\$dest\" &&
+        rm -f \"\$tmp\"
+    "
 }
 
 ensure_remote_env_keys_loader() {
@@ -332,16 +316,14 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null; then
 fi
 
 # Claude Code
+LOCAL_CLAUDE_CREDENTIALS_FILE="$(local_claude_credentials_file)"
 HAS_CLAUDE_AUTH=false
-[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && HAS_CLAUDE_AUTH=true
-command -v claude &>/dev/null && HAS_CLAUDE_CLI=true || HAS_CLAUDE_CLI=false
+[ -f "$LOCAL_CLAUDE_CREDENTIALS_FILE" ] && HAS_CLAUDE_AUTH=true
 
 # Codex
-HAS_CODEX_API_KEY=false
-CODEX_API_KEY=""
-if CODEX_API_KEY="$(extract_codex_api_key 2>/dev/null)"; then
-    HAS_CODEX_API_KEY=true
-fi
+LOCAL_CODEX_AUTH_FILE="$(local_codex_auth_file)"
+HAS_CODEX_AUTH=false
+[ -f "$LOCAL_CODEX_AUTH_FILE" ] && HAS_CODEX_AUTH=true
 
 # API keys
 HAS_API_KEYS=false
@@ -350,8 +332,8 @@ HAS_API_KEYS=false
 # Print scan results
 [ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && success "${#LOCAL_SSH_KEYS[@]} SSH key pair(s) found" || warn "No SSH keys found"
 [ "$HAS_GH_AUTH" = true ]      && success "GitHub CLI authenticated" || printf "  ${DIM}- GitHub CLI: not found${RESET}\n"
-[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code OAuth token found" || warn "Claude Code: CLAUDE_CODE_OAUTH_TOKEN not set (will prompt during deploy)"
-[ "$HAS_CODEX_API_KEY" = true ] && success "Codex API key available for headless login" || printf "  ${DIM}- Codex API key: not found${RESET}\n"
+[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code auth file found ($LOCAL_CLAUDE_CREDENTIALS_FILE)" || warn "Claude Code auth file not found at $LOCAL_CLAUDE_CREDENTIALS_FILE"
+[ "$HAS_CODEX_AUTH" = true ]   && success "Codex auth file found ($LOCAL_CODEX_AUTH_FILE)" || warn "Codex auth file not found at $LOCAL_CODEX_AUTH_FILE"
 [ "$HAS_API_KEYS" = true ]     && success "API keys detected in env" || printf "  ${DIM}- API keys: not set${RESET}\n"
 
 # ============================================================
@@ -372,8 +354,8 @@ add_step() {
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Clone repo & setup.sh" "yes"                                                      "on"
-add_step "Claude Code auth"      "yes"                                                      "on"
-add_step "Codex auth"            "yes"                                                      "on"
+add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
+add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
 
 # Auto-deselect unavailable items
@@ -539,68 +521,44 @@ step_gh_auth() {
 step_claude_auth() {
     section "Claude Code Auth"
 
-    # Prompt for token if not already set
-    if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-        echo "  A long-lived OAuth token is needed for headless auth."
-        if [ "$HAS_CLAUDE_CLI" = true ]; then
-            echo "  Run this in another terminal and paste the token here:"
-            echo ""
-            printf "    ${BOLD}claude auth setup-token${RESET}\n"
-        else
-            echo "  Run 'claude auth setup-token' on a machine with a browser,"
-            echo "  then paste the token here."
-        fi
-        echo ""
-        read -rsp "  CLAUDE_CODE_OAUTH_TOKEN: " CLAUDE_CODE_OAUTH_TOKEN
-        echo ""
-        if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            error "No token provided"
-            return 1
-        fi
-    fi
-
-    # Write CLAUDE_CODE_OAUTH_TOKEN to ~/.env_keys on remote (alongside any API keys)
-    local token_export="export CLAUDE_CODE_OAUTH_TOKEN='${CLAUDE_CODE_OAUTH_TOKEN//\'/\'\\\'\'}'"
-    if remote_upsert_env_exports "$token_export"$'\n'; then
-        ensure_remote_env_keys_loader
-        success "Claude Code OAuth token written to ~/.env_keys"
-    else
-        error "Failed to write Claude Code OAuth token"
+    if [ ! -f "$LOCAL_CLAUDE_CREDENTIALS_FILE" ]; then
+        error "Local Claude Code auth file not found"
+        echo "    Expected: $LOCAL_CLAUDE_CREDENTIALS_FILE"
         return 1
     fi
 
-    # Skip onboarding/login prompt
-    remote_exec "mkdir -p ~/.claude"
-    if remote_exec "command -v jq &>/dev/null"; then
-        remote_exec "jq '.hasCompletedOnboarding = true' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json"
-    else
-        remote_exec "python3 -c 'import json,pathlib;p=pathlib.Path.home()/\".claude.json\";d=json.loads(p.read_text()) if p.exists() else {};d[\"hasCompletedOnboarding\"]=True;p.write_text(json.dumps(d))'"
+    if ! remote_exec "command -v claude &>/dev/null"; then
+        error "Claude Code CLI not found on remote"
+        echo "    Run the clone/setup step before Claude Code auth."
+        return 1
     fi
 
-    # Verify auth works
-    if remote_exec ". ~/.env_keys && claude -p 'ping' >/dev/null 2>&1"; then
-        success "Claude Code authenticated on remote"
+    if ! remote_exec "[ -f ~/.claude/settings.json ]"; then
+        error "Claude Code settings not found on remote"
+        echo "    Run the clone/setup step from this repo before Claude Code auth."
+        return 1
+    fi
+
+    if copy_local_file_to_remote "$LOCAL_CLAUDE_CREDENTIALS_FILE" '$HOME/.claude/.credentials.json' 600; then
+        success "Claude Code credentials copied to remote"
     else
-        warn "Token written but auth not verified — check 'claude -p hello' on the remote"
+        error "Failed to copy Claude Code credentials"
+        return 1
+    fi
+
+    if remote_exec "claude -p 'ping' >/dev/null 2>&1"; then
+        success "Claude Code auth verified on remote"
+    else
+        warn "Claude Code credentials copied but auth did not verify"
     fi
 }
 
 step_codex_auth() {
     section "Codex Auth"
-    if [ -z "$CODEX_API_KEY" ]; then
-        echo "  An OpenAI API key is needed for headless Codex auth."
-        if [ "$AUTO_YES" = true ]; then
-            error "OPENAI_API_KEY is required when running with --yes"
-            return 1
-        fi
-        echo "  Export OPENAI_API_KEY ahead of time, or paste it here."
-        echo ""
-        read -rsp "  OPENAI_API_KEY: " CODEX_API_KEY
-        echo ""
-        if [ -z "$CODEX_API_KEY" ]; then
-            error "No OpenAI API key provided"
-            return 1
-        fi
+    if [ ! -f "$LOCAL_CODEX_AUTH_FILE" ]; then
+        error "Local Codex auth file not found"
+        echo "    Expected: $LOCAL_CODEX_AUTH_FILE"
+        return 1
     fi
 
     if ! remote_exec "command -v codex &>/dev/null"; then
@@ -609,20 +567,23 @@ step_codex_auth() {
         return 1
     fi
 
-    remote_exec "mkdir -p ~/.codex"
+    if ! remote_exec "[ -f ~/.codex/config.toml ]"; then
+        error "Codex config not found on remote"
+        echo "    Run the clone/setup step from this repo before Codex auth."
+        return 1
+    fi
 
-    # Use the documented automation path instead of copying a browser session blob.
-    if printf "%s" "$CODEX_API_KEY" | remote_exec "codex login --with-api-key >/dev/null 2>&1"; then
-        remote_exec "chmod 600 ~/.codex/auth.json 2>/dev/null || true"
+    if copy_local_file_to_remote "$LOCAL_CODEX_AUTH_FILE" '$HOME/.codex/auth.json' 600; then
+        success "Codex auth file copied to remote"
     else
-        error "Failed to log Codex in with API key"
+        error "Failed to copy Codex auth file"
         return 1
     fi
 
     if remote_exec "codex login status >/dev/null 2>&1"; then
-        success "Codex authenticated via API key"
+        success "Codex auth verified on remote"
     else
-        warn "Codex auth file written but login status did not verify"
+        warn "Codex auth file copied but login status did not verify"
     fi
 }
 
@@ -661,7 +622,7 @@ step_clone_setup() {
     # Extract owner/repo slug (e.g. "jianjianh1/server-configs")
     REPO_SLUG="$(echo "$REPO_URL" | sed 's|.*github\.com/||; s|\.git$||')"
 
-    local REMOTE_DIR="\$HOME/repos/server-configs"
+    local REMOTE_DIR="\$HOME/.server-configs"
 
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."
@@ -670,13 +631,13 @@ step_clone_setup() {
         echo "  Cloning $REPO_SLUG..."
         if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
             # Prefer gh repo clone (uses gh's own auth)
-            if ! remote_exec "mkdir -p \$HOME/repos && cd \$HOME/repos && gh repo clone $REPO_SLUG"; then
+            if ! remote_exec "cd \$HOME && gh repo clone $REPO_SLUG .server-configs"; then
                 error "gh repo clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
                 return 1
             fi
         else
             # Fallback to git clone over HTTPS
-            if ! remote_exec "mkdir -p \$HOME/repos && git clone $REPO_URL $REMOTE_DIR"; then
+            if ! remote_exec "git clone $REPO_URL $REMOTE_DIR"; then
                 error "git clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
                 return 1
             fi
