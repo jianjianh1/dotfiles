@@ -25,6 +25,44 @@ install_plugin() {
     fi
 }
 
+cleanup_stale_codex_plugin_state() {
+    local settings_file="$HOME/.claude/settings.json"
+
+    # Older Codex marketplace installs used a different marketplace/plugin id.
+    # Remove that stale state so current installs use codex@openai-codex cleanly.
+    claude plugin marketplace remove codex-plugin-cc 2>/dev/null || true
+
+    if [ -f "$settings_file" ] && command -v python3 &>/dev/null; then
+        python3 - "$settings_file" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    sys.exit(0)
+
+changed = False
+
+enabled = data.get("enabledPlugins")
+if isinstance(enabled, dict) and "codex-plugin-cc@codex-plugin-cc" in enabled:
+    del enabled["codex-plugin-cc@codex-plugin-cc"]
+    changed = True
+
+marketplaces = data.get("extraKnownMarketplaces")
+if isinstance(marketplaces, dict) and "codex-plugin-cc" in marketplaces:
+    del marketplaces["codex-plugin-cc"]
+    changed = True
+
+if changed:
+    path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    fi
+}
+
 # Idempotent MCP server add: remove existing server first, then add
 mcp_add() {
     local name="$1"; shift
@@ -99,6 +137,7 @@ install_plugin "notion" claude plugin install notion@claude-plugins-official
 install_plugin "slack" claude plugin install slack@claude-plugins-official
 
 # Codex (OpenAI) — add marketplace then install
+cleanup_stale_codex_plugin_state
 install_plugin "codex-marketplace" claude plugin marketplace add openai/codex-plugin-cc
 install_plugin "codex" claude plugin install codex@openai-codex
 
