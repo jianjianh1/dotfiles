@@ -30,6 +30,29 @@ unlink_config() {
     fi
 }
 
+remove_path() {
+    local path="$1" label="${2:-$1}"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        rm -rf "$path"
+        echo "  Removed $label"
+    fi
+}
+
+remove_dir_if_empty() {
+    local path="$1" label="${2:-$1}"
+    if [ -d "$path" ]; then
+        rmdir "$path" 2>/dev/null && echo "  Removed $label"
+    fi
+}
+
+clean_line_from_file() {
+    local file="$1" pattern="$2"
+    if [ -f "$file" ]; then
+        sed -i "\|$pattern|d" "$file"
+        echo "  Cleaned $file"
+    fi
+}
+
 remove_bin() {
     local bin="$1"
     if [ -e "$HOME/.local/bin/$bin" ]; then
@@ -67,71 +90,81 @@ remove_symlinks() {
 }
 
 remove_bashrc_lines() {
-    echo "Removing source lines from ~/.bashrc..."
-    if [ -f "$HOME/.bashrc" ]; then
-        sed -i '/^source ~\/.bashrc_exports$/d' "$HOME/.bashrc"
-        sed -i '/^source ~\/.bashrc_aliases$/d' "$HOME/.bashrc"
-        echo "  Cleaned ~/.bashrc"
-    fi
+    echo "Removing shell init lines..."
+    clean_line_from_file "$HOME/.bashrc" '^source ~/.bashrc_exports$'
+    clean_line_from_file "$HOME/.bashrc" '^source ~/.bashrc_aliases$'
+    clean_line_from_file "$HOME/.bashrc" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
+    clean_line_from_file "$HOME/.profile" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
 }
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in glow fzf rg fd bat delta zoxide lazygit btop uv uvx node npm npx; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx; do
         remove_bin "$bin"
     done
 }
 
 remove_claude() {
+    echo "Removing Claude Code..."
     if command -v claude &>/dev/null; then
-        echo "Uninstalling Claude Code..."
         claude --uninstall 2>/dev/null || npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || true
-        echo "  Claude Code removed"
-    else
-        echo "  Claude Code not installed, skipping"
     fi
+
+    remove_bin claude
+    remove_path "$HOME/.claude" "~/.claude"
+    remove_path "$HOME/.claude.json" "~/.claude.json"
+    remove_path "$HOME/.local/share/claude" "~/.local/share/claude"
+    remove_path "$HOME/.cache/claude" "~/.cache/claude"
+    remove_path "$HOME/.config/claude" "~/.config/claude"
 }
 
 remove_codex() {
+    echo "Removing Codex CLI..."
     if command -v codex &>/dev/null; then
-        echo "Uninstalling Codex CLI..."
-        remove_bin codex
         # Clean up legacy npm install if present
         npm uninstall -g @openai/codex 2>/dev/null || true
-        echo "  Codex CLI removed"
-    else
-        echo "  Codex CLI not installed, skipping"
     fi
+
+    remove_bin codex
+    remove_path "$HOME/.codex" "~/.codex"
+    remove_path "$HOME/.local/share/codex" "~/.local/share/codex"
+    remove_path "$HOME/.cache/codex" "~/.cache/codex"
 }
 
 remove_node() {
+    echo "Removing Node.js..."
     # Remove node/npm/npx installed to ~/.local by setup.sh
     for bin in node npm npx corepack; do
         remove_bin "$bin"
     done
-    if [ -d "$HOME/.local/lib/node_modules" ]; then
-        rm -rf "$HOME/.local/lib/node_modules"
-        echo "  Removed ~/.local/lib/node_modules"
-    fi
-    if [ -d "$HOME/.local/include/node" ]; then
-        rm -rf "$HOME/.local/include/node"
-        echo "  Removed ~/.local/include/node"
-    fi
+    remove_path "$HOME/.local/lib/node_modules" "~/.local/lib/node_modules"
+    remove_path "$HOME/.local/include/node" "~/.local/include/node"
+    remove_path "$HOME/.local/share/doc/node" "~/.local/share/doc/node"
+    remove_path "$HOME/.local/share/man/man1/node.1" "~/.local/share/man/man1/node.1"
+    remove_path "$HOME/.local/share/systemtap/tapset/node.stp" "~/.local/share/systemtap/tapset/node.stp"
     # Also clean up nvm if present from an older install
-    if [ -d "$HOME/.nvm" ]; then
-        rm -rf "$HOME/.nvm"
-        echo "  Removed ~/.nvm"
-    fi
+    remove_path "$HOME/.nvm" "~/.nvm"
 }
 
 remove_dirs() {
     echo "Cleaning up directories..."
-    rmdir "$HOME/.vim/undodir" 2>/dev/null && echo "  Removed ~/.vim/undodir" || true
-    rmdir "$HOME/.vim" 2>/dev/null && echo "  Removed ~/.vim" || true
-    if [ -d "$HOME/.codex" ] && [ -z "$(ls -A "$HOME/.codex")" ]; then
-        rmdir "$HOME/.codex"
-        echo "  Removed ~/.codex"
-    fi
+    remove_dir_if_empty "$HOME/.vim/undodir" "~/.vim/undodir"
+    remove_dir_if_empty "$HOME/.vim" "~/.vim"
+    remove_dir_if_empty "$HOME/.ssh/sockets" "~/.ssh/sockets"
+    remove_dir_if_empty "$HOME/.claude" "~/.claude"
+    remove_dir_if_empty "$HOME/.codex" "~/.codex"
+    remove_dir_if_empty "$HOME/.local/share/man/man1" "~/.local/share/man/man1"
+    remove_dir_if_empty "$HOME/.local/share/man" "~/.local/share/man"
+    remove_dir_if_empty "$HOME/.local/share/doc" "~/.local/share/doc"
+    remove_dir_if_empty "$HOME/.local/share/systemtap/tapset" "~/.local/share/systemtap/tapset"
+    remove_dir_if_empty "$HOME/.local/share/systemtap" "~/.local/share/systemtap"
+    remove_dir_if_empty "$HOME/.local/share/claude" "~/.local/share/claude"
+    remove_dir_if_empty "$HOME/.local/share/codex" "~/.local/share/codex"
+    remove_dir_if_empty "$HOME/.local/share" "~/.local/share"
+    remove_dir_if_empty "$HOME/.local/include" "~/.local/include"
+    remove_dir_if_empty "$HOME/.local/lib" "~/.local/lib"
+    remove_dir_if_empty "$HOME/.local/bin" "~/.local/bin"
+    remove_dir_if_empty "$HOME/.local" "~/.local"
 }
 
 # ============================================================
