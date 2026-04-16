@@ -1,12 +1,16 @@
 return {
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
-    event = { "BufReadPost", "BufNewFile" },
-    main = "nvim-treesitter.config",
-    opts = {},
+    lazy = false,
     config = function()
+        local ok, ts_config = pcall(require, "nvim-treesitter.config")
+        if not ok then
+            vim.notify("nvim-treesitter failed to load", vim.log.levels.WARN)
+            return
+        end
+
         -- Parser management (install_dir, :TSInstall, etc.)
-        require("nvim-treesitter.config").setup()
+        ts_config.setup()
 
         -- Install parsers if missing
         local wanted = {
@@ -14,7 +18,7 @@ return {
             "markdown", "markdown_inline", "python", "regex",
             "toml", "vim", "vimdoc", "yaml",
         }
-        local installed = require("nvim-treesitter.config").get_installed()
+        local installed = ts_config.get_installed()
         local installed_set = {}
         for _, lang in ipairs(installed) do
             installed_set[lang] = true
@@ -37,6 +41,5 @@ return {
                 end
             end,
         })
-
     end,
 }

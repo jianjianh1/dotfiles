@@ -8,7 +8,7 @@
 [core]
 	editor = vim
 	autocrlf = input
-	pager = "delta 2>/dev/null || less"
+	pager = "delta 2>/dev/null || less 2>/dev/null || cat"
 
 [interactive]
 	diffFilter = "delta --color-only 2>/dev/null || cat"
