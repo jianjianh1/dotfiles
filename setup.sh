@@ -2,7 +2,11 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly DIR
 GENERATED_DIR="$HOME/.server-configs-generated"
+readonly GENERATED_DIR
+INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
+readonly INSTALL_MANIFEST
 CLAUDE_SETTINGS_SRC=""
 CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
@@ -14,20 +18,33 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # --- Flags ---
 FORCE=false
+DRY_RUN=false
 for arg in "$@"; do
     case "$arg" in
         --force|-f) FORCE=true ;;
+        --dry-run|-n) DRY_RUN=true ;;
     esac
 done
 
 # --- Error tracking ---
 FAILURES=()
 
+# --- Cleanup trap ---
+_setup_cleanup() {
+    # Remove any leftover temp dirs from subshell traps that didn't fire
+    rm -rf /tmp/setup-$$-* 2>/dev/null || true
+}
+trap _setup_cleanup EXIT
+
 # --- Shared helpers (run_step, retry, backup_and_link, backup_and_copy) ---
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
 
 # --- Helpers ---
+
+mkdir -p "$GENERATED_DIR"
+chmod 700 "$GENERATED_DIR" 2>/dev/null || true
+: > "$INSTALL_MANIFEST"
 
 # Wrapper: move/copy files respecting sudo needs
 install_to() {
@@ -45,6 +62,42 @@ command_output_contains() {
     shift
     output="$("$@" 2>/dev/null || true)"
     [[ "$output" == *"$pattern"* ]]
+}
+
+record_command_if_managed() {
+    local cmd="$1"
+    local path
+
+    path="$(command -v "$cmd" 2>/dev/null || true)"
+    [ -n "$path" ] || return 1
+    manifest_add_path "$path"
+}
+
+record_node_manifest() {
+    local path
+
+    for path in \
+        "$HOME/.local/bin/node" \
+        "$HOME/.local/bin/npm" \
+        "$HOME/.local/bin/npx" \
+        "$HOME/.local/bin/corepack" \
+        "$HOME/.local/lib/node_modules" \
+        "$HOME/.local/include/node" \
+        "$HOME/.local/share/doc/node" \
+        "$HOME/.local/share/man/man1/node.1" \
+        "$HOME/.local/share/systemtap/tapset/node.stp"
+    do
+        [ -e "$path" ] && manifest_add_path "$path"
+    done
+}
+
+append_line_if_missing() {
+    local line="$1" file="$2"
+
+    if ! grep -qF "$line" "$file" 2>/dev/null; then
+        mkdir -p "$(dirname "$file")" || return 1
+        printf '%s\n' "$line" >> "$file" || return 1
+    fi
 }
 
 version_at_least() {
@@ -387,6 +440,17 @@ write_compat_report() {
         claude_version_out="$(claude --version 2>&1 | head -1)"
     fi
 
+    local starship_version_out="not installed"
+    local atuin_version_out="not installed"
+
+    if command -v starship &>/dev/null; then
+        starship_version_out="$(starship --version 2>&1 | head -1)"
+    fi
+
+    if command -v atuin &>/dev/null; then
+        atuin_version_out="$(atuin --version 2>&1 | head -1)"
+    fi
+
     if command -v codex &>/dev/null; then
         codex_version_out="$(codex --version 2>&1 | head -1)"
     fi
@@ -408,6 +472,9 @@ nvim: ${nvim_version_out}
 git:
   gh git-credential helper: ${gh_helper}
 
+starship: ${starship_version_out}
+atuin: ${atuin_version_out}
+
 claude: ${claude_version_out}
   settings source: ${CLAUDE_SETTINGS_MODE}
 
@@ -418,9 +485,6 @@ EOF
 }
 
 render_compat_configs() {
-    mkdir -p "$GENERATED_DIR"
-    chmod 700 "$GENERATED_DIR" 2>/dev/null || true
-
     render_tmux_compat
     render_vim_compat
     render_git_compat
@@ -446,6 +510,7 @@ gh_latest() {
 install_gh_binary() {
     local name="$1" url="$2" bin_name="${3:-$1}"
     if command -v "$bin_name" &>/dev/null && ! $FORCE; then
+        record_command_if_managed "$bin_name" || true
         echo "$bin_name already installed"
         return 0
     fi
@@ -468,7 +533,11 @@ install_gh_binary() {
         return 1
     fi
     chmod +x "$bin"
-    install_to "$bin" "$BIN_DIR/$bin_name"
+    if ! install_to "$bin" "$BIN_DIR/$bin_name"; then
+        echo "  Warning: failed to install $name to $BIN_DIR/$bin_name"
+        return 1
+    fi
+    manifest_add_path "$BIN_DIR/$bin_name"
     echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
@@ -476,6 +545,7 @@ install_gh_binary() {
 install_gh_bare_binary() {
     local name="$1" url="$2" bin_name="${3:-$1}"
     if command -v "$bin_name" &>/dev/null && ! $FORCE; then
+        record_command_if_managed "$bin_name" || true
         echo "$bin_name already installed"
         return 0
     fi
@@ -488,7 +558,11 @@ install_gh_bare_binary() {
         return 1
     fi
     chmod +x "$TMP/$bin_name"
-    install_to "$TMP/$bin_name" "$BIN_DIR/$bin_name"
+    if ! install_to "$TMP/$bin_name" "$BIN_DIR/$bin_name"; then
+        echo "  Warning: failed to install $name to $BIN_DIR/$bin_name"
+        return 1
+    fi
+    manifest_add_path "$BIN_DIR/$bin_name"
     echo "  $name installed to $BIN_DIR/$bin_name"
 }
 
@@ -496,6 +570,7 @@ install_gh_bare_binary() {
 
 install_gh_cli() {
     if command -v gh &>/dev/null && ! $FORCE; then
+        record_command_if_managed gh || true
         echo "gh already installed: $(gh --version | head -1)"
         return 0
     fi
@@ -524,7 +599,11 @@ install_gh_cli() {
         return 1
     fi
     chmod +x "$bin"
-    install_to "$bin" "$BIN_DIR/gh"
+    if ! install_to "$bin" "$BIN_DIR/gh"; then
+        echo "  Warning: failed to install gh to $BIN_DIR/gh"
+        return 1
+    fi
+    manifest_add_path "$BIN_DIR/gh"
     echo "  gh $GH_VERSION installed to $BIN_DIR/gh"
     if ! gh auth status &>/dev/null; then
         echo "  Run 'gh auth login' to authenticate with GitHub."
@@ -533,6 +612,7 @@ install_gh_cli() {
 
 install_glow() {
     if command -v glow &>/dev/null && ! $FORCE; then
+        record_command_if_managed glow || true
         echo "glow already installed: $(glow --version)"
         return 0
     fi
@@ -554,14 +634,25 @@ install_glow() {
         return 1
     fi
     tar xz -C "$TMP" --strip-components=1 -f "$TMP/archive.tar.gz"
-    install_to "$TMP/glow" "$BIN_DIR/glow"
+    if ! install_to "$TMP/glow" "$BIN_DIR/glow"; then
+        echo "  Warning: failed to install glow to $BIN_DIR/glow"
+        return 1
+    fi
+    manifest_add_path "$BIN_DIR/glow"
     echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
 }
 
 install_node() {
+    local MIN_NODE_MAJOR=18
     if command -v node &>/dev/null && ! $FORCE; then
-        echo "Node.js already installed: $(node --version)"
-        return 0
+        local cur_major
+        cur_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+        if [ -n "$cur_major" ] && [ "$cur_major" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
+            record_node_manifest
+            echo "Node.js already installed: $(node --version)"
+            return 0
+        fi
+        echo "Node.js $(node --version) is too old (need >= v${MIN_NODE_MAJOR}). Upgrading..."
     fi
     echo "Installing Node.js..."
     local ARCH NODE_ARCH
@@ -602,18 +693,24 @@ install_node() {
     # Remove stale symlinks (e.g. from old nvm-based installs) before copying
     rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx" "$HOME/.local/bin/corepack"
     # Install node tree into ~/.local (bin/, lib/, include/, share/)
-    cp -rf "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"
+    if ! cp -rf "$TMP/bin" "$TMP/lib" "$TMP/include" "$TMP/share" "$HOME/.local/"; then
+        echo "  Node.js install failed - could not copy files into ~/.local"
+        return 1
+    fi
     # Clear bash's command hash so it finds the newly installed binaries
     hash -r
     if ! "$HOME/.local/bin/node" --version &>/dev/null; then
         echo "  Node.js install failed — binary not working"
         return 1
     fi
+    record_node_manifest
     echo "  Node.js $NODE_VERSION installed to ~/.local"
 }
 
 install_uv() {
     if command -v uv &>/dev/null && ! $FORCE; then
+        record_command_if_managed uv || true
+        record_command_if_managed uvx || true
         echo "uv already installed: $(uv --version)"
         return 0
     fi
@@ -634,7 +731,12 @@ install_uv() {
         return 1
     fi
     mkdir -p "$HOME/.local/bin"
-    mv -f "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"
+    if ! mv -f "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"; then
+        echo "  Warning: failed to install uv binaries"
+        return 1
+    fi
+    manifest_add_path "$HOME/.local/bin/uv"
+    manifest_add_path "$HOME/.local/bin/uvx"
     echo "  uv $(uv --version) installed"
 }
 
@@ -643,6 +745,7 @@ install_nvim() {
         local current_version
         current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
         if version_at_least "${current_version}" "0.9.0"; then
+            record_command_if_managed nvim || true
             echo "nvim already installed: NVIM v${current_version}"
             return 0
         fi
@@ -709,8 +812,12 @@ install_nvim() {
         if retry curl -sfL -o "$TMP/nvim.appimage" "$url"; then
             chmod +x "$TMP/nvim.appimage"
             if "$TMP/nvim.appimage" --version &>/dev/null; then
-                install_to "$TMP/nvim.appimage" "$BIN_DIR/nvim"
+                if ! install_to "$TMP/nvim.appimage" "$BIN_DIR/nvim"; then
+                    echo "  Warning: failed to install Neovim to $BIN_DIR/nvim"
+                    return 1
+                fi
                 hash -r
+                manifest_add_path "$BIN_DIR/nvim"
                 echo "  $(nvim --version 2>/dev/null | head -1) installed to $BIN_DIR/nvim"
                 return 0
             fi
@@ -783,20 +890,48 @@ install_gh_tools() {
         run_step "jq" install_gh_bare_binary jq \
             "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}"
     else FAILURES+=("jq"); fi
+
+    if V="$(gh_latest starship/starship)"; then
+        run_step "starship" install_gh_binary starship \
+            "https://github.com/starship/starship/releases/download/v${V}/starship-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    else FAILURES+=("starship"); fi
+
+    if V="$(gh_latest atuinsh/atuin)"; then
+        run_step "atuin" install_gh_binary atuin \
+            "https://github.com/atuinsh/atuin/releases/download/v${V}/atuin-${GH_ARCH}-unknown-linux-musl.tar.gz"
+    else FAILURES+=("atuin"); fi
 }
 
 install_claude() {
     if command -v claude &>/dev/null && ! $FORCE; then
+        record_command_if_managed claude || true
         echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
         return 0
     fi
     echo "Installing Claude Code..."
-    curl -fsSL https://claude.ai/install.sh | bash
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -fsSL -o "$TMP/install.sh" https://claude.ai/install.sh; then
+        echo "  Warning: failed to download Claude Code installer"
+        return 1
+    fi
+    if ! bash "$TMP/install.sh"; then
+        echo "  Warning: Claude Code installer exited with an error"
+        return 1
+    fi
+    hash -r
+    if ! command -v claude &>/dev/null; then
+        echo "  Claude Code install failed - 'claude' not found after installer ran"
+        return 1
+    fi
+    record_command_if_managed claude || true
     echo "  Run 'claude' to authenticate and get started."
 }
 
 install_codex() {
     if command -v codex &>/dev/null && ! $FORCE; then
+        record_command_if_managed codex || true
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
@@ -820,16 +955,60 @@ install_codex() {
     fi
     tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
     chmod +x "$TMP/codex-${ARCH}-unknown-linux-musl"
-    install_to "$TMP/codex-${ARCH}-unknown-linux-musl" "$BIN_DIR/codex"
+    if ! install_to "$TMP/codex-${ARCH}-unknown-linux-musl" "$BIN_DIR/codex"; then
+        echo "  Warning: failed to install Codex CLI to $BIN_DIR/codex"
+        return 1
+    fi
     if ! codex --version &>/dev/null; then
         echo "  Codex CLI install failed — binary not working"
         return 1
     fi
+    manifest_add_path "$BIN_DIR/codex"
     echo "  Codex CLI $(codex --version 2>&1 | head -1) installed to $BIN_DIR"
+}
+
+install_tpm() {
+    local tpm_dir="$HOME/.tmux/plugins/tpm"
+    if [ -d "$tpm_dir" ]; then
+        echo "TPM already installed"
+        return 0
+    fi
+    echo "Installing TPM (Tmux Plugin Manager)..."
+    if ! git clone --depth 1 https://github.com/tmux-plugins/tpm "$tpm_dir" 2>/dev/null; then
+        echo "  Warning: failed to clone TPM"
+        return 1
+    fi
+    echo "  TPM installed. Press prefix + I inside tmux to install plugins."
 }
 
 install_plugins() {
     "$DIR/install_claude_plugins.sh"
+}
+
+link_core_configs() {
+    mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" || return 1
+    backup_and_link "$DIR/vimrc" "$HOME/.vimrc" || return 1
+    backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf" || return 1
+    backup_and_link "$DIR/nvim" "$HOME/.config/nvim" || return 1
+    backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig" || return 1
+    backup_and_link "$DIR/inputrc" "$HOME/.inputrc" || return 1
+    backup_and_link "$DIR/dircolors" "$HOME/.dircolors" || return 1
+    backup_and_link "$DIR/sshconfig" "$HOME/.ssh/config" || return 1
+    backup_and_link "$DIR/starship.toml" "$HOME/.config/starship.toml" || return 1
+    # XDG-compliant tmux path (tmux 3.2+ reads this natively)
+    mkdir -p "$HOME/.config/tmux" 2>/dev/null || true
+    backup_and_link "$DIR/tmux.conf" "$HOME/.config/tmux/tmux.conf" || return 1
+}
+
+link_generated_configs() {
+    backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports" || return 1
+    backup_and_link "$DIR/bashrc_aliases" "$HOME/.bashrc_aliases" || return 1
+    backup_and_copy "$CLAUDE_SETTINGS_SRC" "$HOME/.claude/settings.json" || return 1
+    manifest_add_path "$HOME/.claude/settings.json" || return 1
+    backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml" || return 1
+    manifest_add_path "$HOME/.codex/config.toml" || return 1
+    append_line_if_missing 'source ~/.bashrc_exports' "$HOME/.bashrc" || return 1
+    append_line_if_missing 'source ~/.bashrc_aliases' "$HOME/.bashrc" || return 1
 }
 
 # ============================================================
@@ -843,18 +1022,7 @@ if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
 fi
 
 echo "Linking config files..."
-backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
-backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
-mkdir -p "$HOME/.config"
-backup_and_link "$DIR/nvim"      "$HOME/.config/nvim"
-backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig"
-backup_and_link "$DIR/inputrc"   "$HOME/.inputrc"
-backup_and_link "$DIR/dircolors" "$HOME/.dircolors"
-mkdir -p "$HOME/.ssh/sockets"
-backup_and_link "$DIR/sshconfig" "$HOME/.ssh/config"
-
-# Create vim undo directory
-mkdir -p "$HOME/.vim/undodir"
+run_step "core config links" link_core_configs
 
 # Determine install directories based on write access
 NEED_SUDO=""
@@ -875,22 +1043,14 @@ run_step "node"         install_node
 run_step "uv"           install_uv
 install_gh_tools
 run_step "nvim"         install_nvim
+run_step "tpm"          install_tpm
 run_step "claude"       install_claude
 run_step "codex"        install_codex
 
-render_compat_configs
+run_step "compat configs" render_compat_configs
 
 # Link remaining configs
-backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports"
-backup_and_link "$DIR/bashrc_aliases" "$HOME/.bashrc_aliases"
-backup_and_copy "$CLAUDE_SETTINGS_SRC" "$HOME/.claude/settings.json"
-backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml"
-if ! grep -qF 'source ~/.bashrc_exports' ~/.bashrc 2>/dev/null; then
-    echo 'source ~/.bashrc_exports' >> ~/.bashrc
-fi
-if ! grep -qF 'source ~/.bashrc_aliases' ~/.bashrc 2>/dev/null; then
-    echo 'source ~/.bashrc_aliases' >> ~/.bashrc
-fi
+run_step "shell config links" link_generated_configs
 # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
 [[ $- == *i* ]] && source ~/.bashrc || true
 

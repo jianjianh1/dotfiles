@@ -2,6 +2,7 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly DIR
 
 # --- Flags ---
 AUTO_YES=false
@@ -146,7 +147,7 @@ remote_exec() {
         return 1
     fi
     local cmd="$1" quoted_cmd
-    printf -v quoted_cmd '%q' "$cmd"
+    quoted_cmd="$(quote_for_bash_lc "$cmd")"
     ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
 }
 
@@ -515,7 +516,7 @@ step_ssh_keys() {
     # Copy known_hosts so remote trusts github.com etc.
     if [ -f ~/.ssh/known_hosts ]; then
         remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-        if remote_copy_if_changed ~/.ssh/known_hosts '~/.ssh/known_hosts'; then
+        if remote_copy_if_changed ~/.ssh/known_hosts '$HOME/.ssh/known_hosts'; then
             remote_exec "chmod 644 ~/.ssh/known_hosts"
         else
             warn "Failed to copy known_hosts"
@@ -541,7 +542,7 @@ step_gh_auth() {
     fi
 
     remote_exec "mkdir -p ~/.config/gh && chmod 700 ~/.config ~/.config/gh"
-    if remote_copy_if_changed ~/.config/gh/hosts.yml '~/.config/gh/hosts.yml'; then
+    if remote_copy_if_changed ~/.config/gh/hosts.yml '$HOME/.config/gh/hosts.yml'; then
         remote_exec "chmod 600 ~/.config/gh/hosts.yml"
     else
         error "Failed to copy GitHub CLI auth"
@@ -675,7 +676,7 @@ step_clone_setup() {
     # Extract owner/repo slug (e.g. "jianjianh1/server-configs")
     REPO_SLUG="$(echo "$REPO_URL" | sed 's|.*github\.com/||; s|\.git$||')"
 
-    local REMOTE_DIR="\$HOME/.server-configs"
+    local REMOTE_DIR='$HOME/.server-configs'
 
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."

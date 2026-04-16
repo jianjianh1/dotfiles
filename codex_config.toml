@@ -1,5 +1,5 @@
 # Codex CLI configuration
-# Symlinked to ~/.codex/config.toml by setup.sh
+# Copied to ~/.codex/config.toml by setup.sh
 
 # Reasoning
 model_reasoning_effort = "high"

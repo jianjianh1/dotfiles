@@ -6,7 +6,7 @@
 	defaultBranch = main
 
 [core]
-	editor = nvim
+	editor = vim
 	autocrlf = input
 	pager = "delta 2>/dev/null || less"
 
@@ -26,17 +26,37 @@
 	default = current
 	autoSetupRemote = true
 
+[column]
+	ui = auto
+
+[branch]
+	sort = -committerdate
+
+[tag]
+	sort = version:refname
+
 [fetch]
 	prune = true
+	pruneTags = true
 
 [merge]
-	conflictstyle = diff3
+	conflictstyle = zdiff3
 
 [diff]
+	algorithm = histogram
 	colorMoved = default
+	renames = true
 
 [rebase]
 	autoStash = true
+	autoSquash = true
+	updateRefs = true
+
+[commit]
+	verbose = true
+
+[help]
+	autocorrect = prompt
 
 [rerere]
 	enabled = true

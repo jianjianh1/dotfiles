@@ -34,4 +34,21 @@ if command -v shellcheck &>/dev/null; then
     fi
 fi
 
+# Secret scanning: check ALL staged files (not just shell scripts)
+mapfile -t staged_all < <(
+    git diff --cached --name-only --diff-filter=ACM
+)
+
+if [ ${#staged_all[@]} -gt 0 ]; then
+    # Patterns: AWS keys, OpenAI/Anthropic keys, GitHub PATs, private keys
+    secret_pattern='AKIA[0-9A-Z]{16}|sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|sk-ant-[a-zA-Z0-9_-]{20,}'
+    for f in "${staged_all[@]}"; do
+        [ -f "$f" ] || continue
+        if git diff --cached -- "$f" | grep -Eq "$secret_pattern"; then
+            echo "pre-commit: possible secret detected in $f" >&2
+            fail=1
+        fi
+    done
+fi
+
 exit "$fail"

@@ -16,6 +16,10 @@ _SERVER_CONFIGS_COMMON_SH=1
 # fall through silently so non-interactive runs don't hang.
 run_step() {
     local name="$1"; shift
+    if [ "${DRY_RUN:-false}" = true ]; then
+        echo "[dry-run] Would run: $name"
+        return 0
+    fi
     if ! "$@"; then
         FAILURES+=("$name")
         if [ "${AUTO_YES:-false}" != true ] && [ -t 0 ]; then
@@ -28,15 +32,47 @@ run_step() {
     fi
 }
 
-# Retry a command up to 3 times with a 2-second delay.
+# Retry a command up to 3 times with exponential backoff (2, 4, 8s).
 retry() {
     local attempts=3 delay=2 n=0
     while ! "$@"; do
         n=$((n + 1))
         if [ "$n" -ge "$attempts" ]; then return 1; fi
-        echo "  Retrying ($n/$attempts)..." >&2
+        echo "  Retrying ($n/$attempts) in ${delay}s..." >&2
         sleep "$delay"
+        delay=$((delay * 2))
     done
+}
+
+# Quote a command string so it can be passed as the single payload to
+# `bash -lc ...` without losing shell metacharacters.
+quote_for_bash_lc() {
+    local cmd="$1"
+    printf '%q' "$cmd"
+}
+
+path_is_manifest_managed() {
+    local path="$1"
+    case "$path" in
+        "$HOME"/*|/usr/local/bin/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+manifest_contains_path() {
+    local path="$1"
+    [ -n "${INSTALL_MANIFEST:-}" ] || return 1
+    [ -f "$INSTALL_MANIFEST" ] || return 1
+    grep -Fqx "$path" "$INSTALL_MANIFEST"
+}
+
+manifest_add_path() {
+    local path="$1"
+    [ -n "${INSTALL_MANIFEST:-}" ] || return 1
+    path_is_manifest_managed "$path" || return 0
+    mkdir -p "$(dirname "$INSTALL_MANIFEST")" || return 1
+    touch "$INSTALL_MANIFEST" || return 1
+    manifest_contains_path "$path" || printf '%s\n' "$path" >> "$INSTALL_MANIFEST"
 }
 
 # Internal: back up $dst to ${dst}.bak if it exists and isn't already a link
@@ -66,9 +102,9 @@ _backup_existing() {
 # Replace $dst with a symlink to $src, backing up any existing real file/dir.
 backup_and_link() {
     local src="$1" dst="$2"
-    _backup_existing "$src" "$dst" link
+    _backup_existing "$src" "$dst" link || return 1
     mkdir -p "$(dirname "$dst")"
-    ln -sf "$src" "$dst"
+    ln -sf "$src" "$dst" || return 1
     echo "  $src -> $dst"
 }
 
@@ -80,8 +116,8 @@ backup_and_copy() {
         echo "  $dst already up to date"
         return 0
     fi
-    _backup_existing "$src" "$dst" copy
+    _backup_existing "$src" "$dst" copy || return 1
     mkdir -p "$(dirname "$dst")"
-    cp -f "$src" "$dst"
+    cp -f "$src" "$dst" || return 1
     echo "  Copied $src -> $dst"
 }

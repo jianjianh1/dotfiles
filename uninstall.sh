@@ -2,24 +2,12 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+GENERATED_DIR="$HOME/.server-configs-generated"
+INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
 YES=false
 
-for arg in "$@"; do
-    case "$arg" in
-        -y|--yes) YES=true ;;
-        -h|--help)
-            echo "Usage: uninstall.sh [--yes|-y] [--help|-h]"
-            echo "  -y, --yes                 Skip confirmation prompts"
-            echo "  -h, --help                Show this help"
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $arg"
-            echo "Run './uninstall.sh --help' for usage."
-            exit 1
-            ;;
-    esac
-done
+# shellcheck source=lib/common.sh
+. "$DIR/lib/common.sh"
 
 # --- Helpers ---
 
@@ -40,10 +28,25 @@ restore_backup() {
 
 unlink_config() {
     local dst="$1"
-    if [ -e "$dst" ] || [ -L "$dst" ]; then
-        rm -rf "$dst"
-        echo "  Removed $dst"
-        restore_backup "$dst"
+    local target=""
+
+    if [ -L "$dst" ]; then
+        target="$(readlink -f "$dst" 2>/dev/null || true)"
+        case "$target" in
+            "$DIR"|"$DIR"/*)
+                rm -f "$dst"
+                echo "  Removed $dst"
+                restore_backup "$dst"
+                ;;
+            *)
+                echo "  Skipped $dst (not managed by this repo)"
+                ;;
+        esac
+        return
+    fi
+
+    if [ -e "$dst" ]; then
+        echo "  Skipped $dst (not a repo-managed symlink)"
     else
         echo "  Skipped $dst (not present)"
     fi
@@ -51,6 +54,22 @@ unlink_config() {
 
 remove_path() {
     local path="$1" label="${2:-$1}"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        rm -rf "$path"
+        echo "  Removed $label"
+    fi
+}
+
+remove_tracked_path() {
+    local path="$1" label="${2:-$1}"
+
+    if ! manifest_contains_path "$path"; then
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            echo "  Skipped $label (not tracked by setup.sh)"
+        fi
+        return 0
+    fi
+
     if [ -e "$path" ] || [ -L "$path" ]; then
         rm -rf "$path"
         echo "  Removed $label"
@@ -74,11 +93,19 @@ clean_line_from_file() {
 
 remove_bin() {
     local bin="$1"
-    if [ -e "$HOME/.local/bin/$bin" ]; then
-        rm "$HOME/.local/bin/$bin"
-        echo "  Removed ~/.local/bin/$bin"
+    if manifest_contains_path "$HOME/.local/bin/$bin"; then
+        if [ -e "$HOME/.local/bin/$bin" ]; then
+            rm "$HOME/.local/bin/$bin"
+            echo "  Removed ~/.local/bin/$bin"
+        fi
+    elif [ -e "$HOME/.local/bin/$bin" ]; then
+        echo "  Skipped ~/.local/bin/$bin (not tracked by setup.sh)"
     fi
-    if [ -e "/usr/local/bin/$bin" ]; then
+
+    if manifest_contains_path "/usr/local/bin/$bin"; then
+        if [ ! -e "/usr/local/bin/$bin" ]; then
+            return 0
+        fi
         if [ -w /usr/local/bin ] || { command -v sudo &>/dev/null && sudo -n true 2>/dev/null; }; then
             if [ -w /usr/local/bin ]; then
                 rm "/usr/local/bin/$bin"
@@ -89,6 +116,8 @@ remove_bin() {
         else
             echo "  Found /usr/local/bin/$bin but need sudo to remove"
         fi
+    elif [ -e "/usr/local/bin/$bin" ]; then
+        echo "  Skipped /usr/local/bin/$bin (not tracked by setup.sh)"
     fi
 }
 
@@ -103,10 +132,10 @@ remove_symlinks() {
     unlink_config "$HOME/.dircolors"
     unlink_config "$HOME/.ssh/config"
     unlink_config "$HOME/.config/nvim"
+    unlink_config "$HOME/.config/starship.toml"
+    unlink_config "$HOME/.config/tmux/tmux.conf"
     unlink_config "$HOME/.bashrc_exports"
     unlink_config "$HOME/.bashrc_aliases"
-    unlink_config "$HOME/.claude/settings.json"
-    unlink_config "$HOME/.codex/config.toml"
 }
 
 remove_bashrc_lines() {
@@ -119,64 +148,48 @@ remove_bashrc_lines() {
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin; do
         remove_bin "$bin"
     done
 }
 
 remove_claude() {
     echo "Removing Claude Code..."
-    if command -v claude &>/dev/null; then
-        claude --uninstall 2>/dev/null || npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || true
-    fi
-
     remove_bin claude
-    remove_path "$HOME/.claude" "~/.claude"
-    remove_path "$HOME/.claude.json" "~/.claude.json"
-    remove_path "$HOME/.local/share/claude" "~/.local/share/claude"
-    remove_path "$HOME/.cache/claude" "~/.cache/claude"
-    remove_path "$HOME/.config/claude" "~/.config/claude"
+    remove_tracked_path "$HOME/.claude/settings.json" "~/.claude/settings.json"
+    remove_dir_if_empty "$HOME/.claude" "~/.claude"
 }
 
 remove_codex() {
     echo "Removing Codex CLI..."
-    if command -v codex &>/dev/null; then
-        # Clean up legacy npm install if present
-        npm uninstall -g @openai/codex 2>/dev/null || true
-    fi
-
     remove_bin codex
-    remove_path "$HOME/.codex" "~/.codex"
-    remove_path "$HOME/.local/share/codex" "~/.local/share/codex"
-    remove_path "$HOME/.cache/codex" "~/.cache/codex"
+    remove_tracked_path "$HOME/.codex/config.toml" "~/.codex/config.toml"
+    remove_dir_if_empty "$HOME/.codex" "~/.codex"
 }
 
 remove_nvim() {
     echo "Removing Neovim..."
     remove_bin nvim
-    remove_path "$HOME/.local/share/nvim" "~/.local/share/nvim"
-    remove_path "$HOME/.local/state/nvim" "~/.local/state/nvim"
-    remove_path "$HOME/.cache/nvim" "~/.cache/nvim"
 }
 
 remove_node() {
     echo "Removing Node.js..."
-    # Remove node/npm/npx installed to ~/.local by setup.sh
     for bin in node npm npx corepack; do
         remove_bin "$bin"
     done
-    remove_path "$HOME/.local/lib/node_modules" "~/.local/lib/node_modules"
-    remove_path "$HOME/.local/include/node" "~/.local/include/node"
-    remove_path "$HOME/.local/share/doc/node" "~/.local/share/doc/node"
-    remove_path "$HOME/.local/share/man/man1/node.1" "~/.local/share/man/man1/node.1"
-    remove_path "$HOME/.local/share/systemtap/tapset/node.stp" "~/.local/share/systemtap/tapset/node.stp"
-    # Also clean up nvm if present from an older install
-    remove_path "$HOME/.nvm" "~/.nvm"
+    remove_tracked_path "$HOME/.local/lib/node_modules" "~/.local/lib/node_modules"
+    remove_tracked_path "$HOME/.local/include/node" "~/.local/include/node"
+    remove_tracked_path "$HOME/.local/share/doc/node" "~/.local/share/doc/node"
+    remove_tracked_path "$HOME/.local/share/man/man1/node.1" "~/.local/share/man/man1/node.1"
+    remove_tracked_path "$HOME/.local/share/systemtap/tapset/node.stp" "~/.local/share/systemtap/tapset/node.stp"
 }
 
 remove_dirs() {
     echo "Cleaning up directories..."
     remove_path "$HOME/.server-configs-generated" "~/.server-configs-generated"
+    remove_path "$HOME/.tmux/plugins" "~/.tmux/plugins"
+    remove_dir_if_empty "$HOME/.tmux" "~/.tmux"
+    remove_dir_if_empty "$HOME/.config/tmux" "~/.config/tmux"
     remove_dir_if_empty "$HOME/.vim/undodir" "~/.vim/undodir"
     remove_dir_if_empty "$HOME/.vim" "~/.vim"
     remove_dir_if_empty "$HOME/.ssh/sockets" "~/.ssh/sockets"
@@ -196,29 +209,54 @@ remove_dirs() {
     remove_dir_if_empty "$HOME/.local" "~/.local"
 }
 
-# ============================================================
-# Main
-# ============================================================
+parse_args() {
+    local arg
 
-echo "server-configs uninstaller"
-echo "========================="
-echo ""
+    for arg in "$@"; do
+        case "$arg" in
+            -y|--yes) YES=true ;;
+            -h|--help)
+                echo "Usage: uninstall.sh [--yes|-y] [--help|-h]"
+                echo "  -y, --yes                 Skip confirmation prompts"
+                echo "  -h, --help                Show this help"
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $arg"
+                echo "Run './uninstall.sh --help' for usage."
+                exit 1
+                ;;
+        esac
+    done
+}
 
-confirm "Remove config symlinks?" && remove_symlinks
-echo ""
-confirm "Remove source lines from ~/.bashrc?" && remove_bashrc_lines
-echo ""
-confirm "Uninstall Claude Code?" && remove_claude
-echo ""
-confirm "Uninstall Codex CLI?" && remove_codex
-echo ""
-confirm "Remove Neovim?" && remove_nvim
-echo ""
-confirm "Remove Node.js?" && remove_node
-echo ""
-confirm "Remove CLI tools from ~/.local/bin?" && remove_tools
-echo ""
-confirm "Clean up empty directories?" && remove_dirs
+main() {
+    parse_args "$@"
 
-echo ""
-echo "Uninstall complete. Open a new shell to pick up changes."
+    echo "server-configs uninstaller"
+    echo "========================="
+    echo ""
+
+    confirm "Remove config symlinks?" && remove_symlinks
+    echo ""
+    confirm "Remove source lines from ~/.bashrc?" && remove_bashrc_lines
+    echo ""
+    confirm "Uninstall Claude Code?" && remove_claude
+    echo ""
+    confirm "Uninstall Codex CLI?" && remove_codex
+    echo ""
+    confirm "Remove Neovim?" && remove_nvim
+    echo ""
+    confirm "Remove Node.js?" && remove_node
+    echo ""
+    confirm "Remove CLI tools from ~/.local/bin?" && remove_tools
+    echo ""
+    confirm "Clean up empty directories?" && remove_dirs
+
+    echo ""
+    echo "Uninstall complete. Open a new shell to pick up changes."
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

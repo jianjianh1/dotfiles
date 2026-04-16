@@ -1,0 +1,50 @@
+# Starship prompt: minimal, fast, context-aware
+# Docs: https://starship.rs/config/
+
+# Prompt order: keep it lean
+format = """$username$hostname$directory$git_branch$git_status$python$c$cmd_duration$line_break$character"""
+
+# Insert a blank line between prompts
+add_newline = false
+
+[username]
+show_always = false   # only show when SSH or root
+style_user = "bold green"
+style_root = "bold red"
+format = "[$user]($style)"
+
+[hostname]
+ssh_only = true
+style = "bold green"
+format = "[@$hostname]($style)"
+
+[directory]
+style = "bold blue"
+truncation_length = 4
+truncation_symbol = ".../"
+format = "[:$path]($style)[$read_only]($read_only_style) "
+
+[git_branch]
+style = "yellow"
+format = "[($branch)]($style)"
+
+[git_status]
+style = "yellow"
+format = "[$all_status$ahead_behind]($style) "
+
+[python]
+format = "[py$version]($style) "
+style = "dim cyan"
+
+[c]
+format = "[$name $version]($style) "
+style = "dim cyan"
+
+[cmd_duration]
+min_time = 2_000
+style = "dim white"
+format = "[took $duration]($style) "
+
+[character]
+success_symbol = "[\\$](bold white)"
+error_symbol = "[\\$](bold red)"

@@ -63,9 +63,12 @@ alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
 
 # Modern tool replacements (guarded)
+# bat as cat is safe — same basic interface. fd/rg are used directly (no alias)
+# since aliasing grep/find breaks scripts that rely on GNU flag syntax.
 command -v bat &>/dev/null && alias cat='bat --paging=never'
-command -v fd &>/dev/null && alias find='fd'
-command -v rg &>/dev/null && alias grep='rg'
+command -v fd &>/dev/null && alias ff='fd'
+
+[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat
 
 # Neovim (alias vim/vi to nvim when available)
 if command -v nvim &>/dev/null; then
@@ -78,5 +81,3 @@ fi
 command -v zoxide &>/dev/null && eval "$(zoxide init bash)"
 command -v fzf &>/dev/null && eval "$(fzf --bash 2>/dev/null)"
 [ -f ~/.fzf.bash ] && source ~/.fzf.bash
-
-[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat
