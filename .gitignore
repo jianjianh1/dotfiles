@@ -1,0 +1,21 @@
+# Backups created by setup.sh (backup_and_link / backup_and_copy)
+*.bak
+
+# Local overrides / generated state
+.server-configs-generated/
+*.local
+
+# Auth / secret material — never commit
+.credentials.json
+auth.json
+*.pem
+*.key
+*.keystore
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.vim/undodir/

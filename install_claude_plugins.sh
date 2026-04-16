@@ -4,6 +4,8 @@ set -uo pipefail
 # Install MCP servers (plugins) for Claude Code.
 # Requires: claude CLI, npx (node), and optionally a GITHUB_PERSONAL_ACCESS_TOKEN.
 
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
 if ! command -v claude &>/dev/null; then
     echo "Error: claude CLI not found. Run setup.sh first."
     exit 1
@@ -46,12 +48,11 @@ claude_supports_plugin_marketplace && CLAUDE_HAS_PLUGIN_MARKETPLACE=true
 # --- Error tracking ---
 FAILURES=()
 
-install_plugin() {
-    local name="$1"; shift
-    if ! "$@"; then
-        FAILURES+=("$name")
-    fi
-}
+# Shared run_step (records to FAILURES array). Aliased to install_plugin
+# so existing call-sites read naturally.
+# shellcheck source=lib/common.sh
+. "$DIR/lib/common.sh"
+install_plugin() { run_step "$@"; }
 
 cleanup_stale_codex_plugin_state() {
     local settings_file="$HOME/.claude/settings.json"

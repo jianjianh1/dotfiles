@@ -50,6 +50,9 @@ map("n", "<leader>bl", "<cmd>ls<CR>", { desc = "List buffers" })
 -- Quick terminal
 map("n", "<leader>t", "<cmd>terminal<CR>", { desc = "Open terminal" })
 
+-- Preview markdown with glow (matches vimrc)
+map("n", "<leader>m", "<cmd>!glow %<CR>", { desc = "Preview with glow" })
+
 -- Fold toggles
 map("n", "zO", "zR", { desc = "Open all folds" })
 map("n", "zC", "zM", { desc = "Close all folds" })

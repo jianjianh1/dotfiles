@@ -23,28 +23,11 @@ done
 # --- Error tracking ---
 FAILURES=()
 
-run_step() {
-    local name="$1"; shift
-    if ! "$@"; then
-        FAILURES+=("$name")
-    fi
-}
+# --- Shared helpers (run_step, retry, backup_and_link, backup_and_copy) ---
+# shellcheck source=lib/common.sh
+. "$DIR/lib/common.sh"
 
 # --- Helpers ---
-
-# Symlink configs (back up existing real files/dirs; overwrite existing symlinks)
-backup_and_link() {
-    local src="$1" dst="$2"
-    if [ -L "$dst" ]; then
-        rm -f "$dst"
-    elif [ -e "$dst" ]; then
-        rm -rf "${dst}.bak" 2>/dev/null || true
-        echo "  Backing up $dst -> ${dst}.bak"
-        mv -f "$dst" "${dst}.bak"
-    fi
-    ln -sf "$src" "$dst"
-    echo "  $src -> $dst"
-}
 
 # Wrapper: move/copy files respecting sudo needs
 install_to() {
@@ -54,17 +37,6 @@ install_to() {
     else
         mv -f "$src" "$dst"
     fi
-}
-
-# Retry a command up to 3 times with a 2-second delay
-retry() {
-    local attempts=3 delay=2 n=0
-    while ! "$@"; do
-        n=$((n + 1))
-        if [ "$n" -ge "$attempts" ]; then return 1; fi
-        echo "  Retrying ($n/$attempts)..."
-        sleep "$delay"
-    done
 }
 
 command_output_contains() {
@@ -114,6 +86,12 @@ tmux_supports_allow_passthrough() {
     local version
     version="$(tmux_version 2>/dev/null || true)"
     [ -n "$version" ] && version_at_least "$version" "3.3"
+}
+
+tmux_supports_set_clipboard() {
+    local version
+    version="$(tmux_version 2>/dev/null || true)"
+    [ -n "$version" ] && version_at_least "$version" "2.6"
 }
 
 vim_supports_clipboard() {
@@ -182,6 +160,26 @@ codex_supports_login_status() {
     codex login --help 2>/dev/null | grep -q '^[[:space:]]*status[[:space:]]'
 }
 
+ensure_module_command() {
+    local init
+
+    if command -v module &>/dev/null; then
+        return 0
+    fi
+
+    for init in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash; do
+        if [ -r "$init" ]; then
+            # shellcheck disable=SC1090
+            . "$init" >/dev/null 2>&1 || true
+            if command -v module &>/dev/null; then
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
 render_tmux_compat() {
     local default_terminal
     default_terminal="$(tmux_default_terminal)"
@@ -199,6 +197,16 @@ EOF
     else
         cat >> "$GENERATED_DIR/tmux.compat.conf" <<'EOF'
 # tmux < 3.3: leave passthrough disabled to avoid startup errors.
+EOF
+    fi
+
+    if tmux_supports_set_clipboard; then
+        cat >> "$GENERATED_DIR/tmux.compat.conf" <<'EOF'
+set -s set-clipboard on
+EOF
+    else
+        cat >> "$GENERATED_DIR/tmux.compat.conf" <<'EOF'
+# tmux clipboard integration unavailable on this host version.
 EOF
     fi
 }
@@ -288,6 +296,13 @@ EOF
         cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
 
 # Neovim via environment module
+if ! command -v module &>/dev/null; then
+    for init in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash; do
+        if [ -r "\$init" ]; then
+            . "\$init" >/dev/null 2>&1 && break
+        fi
+    done
+fi
 command -v module &>/dev/null && module load ${NVIM_MODULE} 2>/dev/null
 EOF
     fi
@@ -556,20 +571,23 @@ install_node() {
         aarch64) NODE_ARCH="arm64" ;;
         *)       echo "  Skipping Node.js (unsupported arch: $ARCH)"; return 1 ;;
     esac
-    # Get latest LTS version (prefer jq, fall back to regex)
+    # Get latest LTS version. Prefer jq, then python3. No grep fallback —
+    # the nodejs.org JSON layout is compact but not stable enough for regex,
+    # and python3 is effectively always available on our target systems.
     local NODE_VERSION
-    NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
-        | if command -v jq &>/dev/null; then
-            jq -r '[.[] | select(.lts != false)] | .[0].version'
-        elif command -v python3 &>/dev/null; then
-            python3 -c "import json,sys; d=json.load(sys.stdin); print(next(e['version'] for e in d if e.get('lts')))"
-        else
-            # Compact JSON: each entry on one line (fragile if format changes)
-            grep -o '"version":"v[0-9.]*".*"lts":"[^f][^"]*"' | head -1 \
-            | grep -o '"version":"v[^"]*"' | cut -d'"' -f4
-        fi)"
+    if command -v jq &>/dev/null; then
+        NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
+            | jq -r '[.[] | select(.lts != false)] | .[0].version')"
+    elif command -v python3 &>/dev/null; then
+        NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(e['version'] for e in d if e.get('lts')))")"
+    else
+        echo "  Cannot determine latest Node LTS: neither jq nor python3 is available."
+        echo "  Install one of them and re-run, or pass --force after installing Node manually."
+        return 1
+    fi
     if [ -z "$NODE_VERSION" ]; then
-        echo "  Failed to determine latest LTS version"
+        echo "  Failed to determine latest Node LTS version (empty response)"
         return 1
     fi
     local TMP
@@ -632,7 +650,7 @@ install_nvim() {
     fi
 
     # Strategy 1: Try loading an environment module (common on HPC clusters)
-    if command -v module &>/dev/null; then
+    if ensure_module_command; then
         local mod
         for mod in nvim/0.11.2 nvim; do
             if module load "$mod" 2>/dev/null && command -v nvim &>/dev/null; then
@@ -640,8 +658,8 @@ install_nvim() {
                 mod_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
                 if version_at_least "${mod_version}" "0.9.0"; then
                     echo "  nvim available via module: NVIM v${mod_version}"
-                    echo "  Adding 'module load $mod' to shell init"
                     NVIM_MODULE="$mod"
+                    hash -r
                     return 0
                 fi
             fi
@@ -656,13 +674,33 @@ install_nvim() {
         x86_64|aarch64) ;;
         *)  echo "  Skipping nvim (unsupported arch: $ARCH)"; return 1 ;;
     esac
+
+    # Pre-check glibc. Latest nvim AppImage needs ~2.31; 0.9.5 needs ~2.28.
+    # If we're below 2.28, skip the AppImage path entirely — it will just fail.
+    local glibc_version=""
+    if command -v ldd &>/dev/null; then
+        glibc_version="$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    fi
+    if [ -n "$glibc_version" ] && ! version_at_least "$glibc_version" "2.28"; then
+        echo "  glibc $glibc_version is too old for any nvim AppImage (need >= 2.28)."
+        echo "  Try: module load nvim   (if on an HPC cluster), or install from tarball manually."
+        return 1
+    fi
+
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
 
-    # Try latest stable first, then fall back to 0.9.5 (last glibc 2.28 compatible)
+    # Build the candidate list based on glibc. Latest needs >= 2.31; otherwise
+    # only v0.9.5 is worth trying.
+    local candidates=()
+    if [ -z "$glibc_version" ] || version_at_least "$glibc_version" "2.31"; then
+        candidates+=("latest/download")
+    fi
+    candidates+=("v0.9.5")
+
     local url version_tag
-    for version_tag in latest/download v0.9.5; do
+    for version_tag in "${candidates[@]}"; do
         local file_name="nvim-linux-${ARCH}.appimage"
         # v0.9.5 used a different asset name
         [ "$version_tag" = "v0.9.5" ] && file_name="nvim.appimage"
@@ -798,6 +836,12 @@ install_plugins() {
 # Main
 # ============================================================
 
+# Point this clone at the repo-local git hooks (idempotent; only when run
+# from inside the repo itself).
+if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
+    git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
+fi
+
 echo "Linking config files..."
 backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
 backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
@@ -839,10 +883,8 @@ render_compat_configs
 # Link remaining configs
 backup_and_link "$DIR/bashrc_exports" "$HOME/.bashrc_exports"
 backup_and_link "$DIR/bashrc_aliases" "$HOME/.bashrc_aliases"
-mkdir -p "$HOME/.claude"
-backup_and_link "$CLAUDE_SETTINGS_SRC" "$HOME/.claude/settings.json"
-mkdir -p "$HOME/.codex"
-backup_and_link "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml"
+backup_and_copy "$CLAUDE_SETTINGS_SRC" "$HOME/.claude/settings.json"
+backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml"
 if ! grep -qF 'source ~/.bashrc_exports' ~/.bashrc 2>/dev/null; then
     echo 'source ~/.bashrc_exports' >> ~/.bashrc
 fi

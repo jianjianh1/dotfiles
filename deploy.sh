@@ -3,28 +3,32 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# --- Flags ---
+AUTO_YES=false
+FORCE_COPY=0
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=true ;;
+        --force-copy) FORCE_COPY=1 ;;
+        -h|--help)
+            echo "Usage: deploy.sh [-y|--yes] [--force-copy] [-h|--help]"
+            echo "  -y, --yes     Skip all interactive confirmations"
+            echo "  --force-copy  Re-copy files even when the remote already matches"
+            echo "  -h, --help    Show this help"
+            exit 0 ;;
+    esac
+done
+export FORCE_COPY
+
 # --- Prerequisite checks ---
 missing=()
-for cmd in ssh scp ssh-copy-id git; do
+for cmd in ssh scp git; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
 done
 if [ ${#missing[@]} -gt 0 ]; then
     echo "Error: missing required commands: ${missing[*]}"
     exit 1
 fi
-
-# --- Flags ---
-AUTO_YES=false
-for arg in "$@"; do
-    case "$arg" in
-        -y|--yes) AUTO_YES=true ;;
-        -h|--help)
-            echo "Usage: deploy.sh [-y|--yes] [-h|--help]"
-            echo "  -y, --yes   Skip all interactive confirmations"
-            echo "  -h, --help  Show this help"
-            exit 0 ;;
-    esac
-done
 
 # --- Colors (respect NO_COLOR and non-tty) ---
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -54,15 +58,11 @@ confirm() {
 # --- Error tracking ---
 FAILURES=()
 
-run_step() {
-    local name="$1"; shift
-    if ! "$@"; then
-        FAILURES+=("$name")
-        if [ "$AUTO_YES" = false ]; then
-            confirm "Step '$name' failed. Continue?" "y" || exit 1
-        fi
-    fi
-}
+# --- Shared helpers (run_step, retry) ---
+# Export AUTO_YES so the library's run_step sees it.
+export AUTO_YES
+# shellcheck source=lib/common.sh
+. "$DIR/lib/common.sh"
 
 local_claude_credentials_file() {
     printf "%s/.credentials.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -78,6 +78,22 @@ copy_local_file_to_remote() {
     local mode="${3:-600}"
 
     [ -f "$local_path" ] || return 1
+
+    # Idempotency: skip copy if remote file is byte-identical. FORCE_COPY=1
+    # bypasses this (e.g. to rewrite permissions). The sha256 sum is compared
+    # over the remote path using the same shell expansion the write uses below.
+    if [ "${FORCE_COPY:-0}" != 1 ]; then
+        local local_sum remote_sum
+        local_sum="$(sha256sum "$local_path" 2>/dev/null | awk '{print $1}')"
+        remote_sum="$(remote_exec "
+            dest=\"$remote_path\"
+            [ -f \"\$dest\" ] && sha256sum \"\$dest\" 2>/dev/null | awk '{print \$1}'
+        " 2>/dev/null || true)"
+        if [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
+            echo "    (unchanged — skipping)"
+            return 0
+        fi
+    fi
 
     base64 < "$local_path" | remote_exec "
         dest=\"$remote_path\"
@@ -119,17 +135,6 @@ remote_upsert_env_exports() {
     '
 }
 
-# --- Retry wrapper for network operations ---
-retry() {
-    local attempts=3 delay=2 n=0
-    while ! "$@"; do
-        n=$((n + 1))
-        if [ "$n" -ge "$attempts" ]; then return 1; fi
-        warn "Retrying ($n/$attempts)..."
-        sleep "$delay"
-    done
-}
-
 # --- SSH helpers ---
 SSH_OPTS=()
 SSH_SOCKET=""
@@ -147,6 +152,23 @@ remote_exec() {
 
 remote_copy() {
     retry scp -r "${SSH_OPTS[@]}" "$@"
+}
+
+# Like remote_copy, but skips the transfer if the single local file already
+# matches the remote at $remote_path (by sha256). Respects FORCE_COPY=1.
+# Usage: remote_copy_if_changed <local_file> <remote_path>
+remote_copy_if_changed() {
+    local local_path="$1" remote_path="$2"
+    if [ "${FORCE_COPY:-0}" != 1 ] && [ -f "$local_path" ]; then
+        local local_sum remote_sum
+        local_sum="$(sha256sum "$local_path" 2>/dev/null | awk '{print $1}')"
+        remote_sum="$(remote_exec "[ -f \"$remote_path\" ] && sha256sum \"$remote_path\" 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+        if [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
+            echo "    (unchanged — skipping $remote_path)"
+            return 0
+        fi
+    fi
+    remote_copy "$local_path" "$REMOTE_HOST:$remote_path"
 }
 
 remote_claude_supports_print() {
@@ -480,6 +502,12 @@ fi
 step_ssh_keys() {
     section "SSH Keys"
 
+    if ! command -v ssh-copy-id &>/dev/null; then
+        error "ssh-copy-id is required for this step"
+        echo "    Install openssh-client tools locally or skip the SSH keys step."
+        return 1
+    fi
+
     # Authorize local public key on remote
     echo "  Authorizing local public key on remote..."
     ssh-copy-id "${SSH_OPTS[@]}" "$REMOTE_HOST" 2>&1 | grep -v "^$" || warn "ssh-copy-id failed (key may already be authorized)"
@@ -487,7 +515,7 @@ step_ssh_keys() {
     # Copy known_hosts so remote trusts github.com etc.
     if [ -f ~/.ssh/known_hosts ]; then
         remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-        if remote_copy ~/.ssh/known_hosts "$REMOTE_HOST:~/.ssh/known_hosts"; then
+        if remote_copy_if_changed ~/.ssh/known_hosts '~/.ssh/known_hosts'; then
             remote_exec "chmod 644 ~/.ssh/known_hosts"
         else
             warn "Failed to copy known_hosts"
@@ -513,7 +541,7 @@ step_gh_auth() {
     fi
 
     remote_exec "mkdir -p ~/.config/gh && chmod 700 ~/.config ~/.config/gh"
-    if remote_copy ~/.config/gh/hosts.yml "$REMOTE_HOST:~/.config/gh/"; then
+    if remote_copy_if_changed ~/.config/gh/hosts.yml '~/.config/gh/hosts.yml'; then
         remote_exec "chmod 600 ~/.config/gh/hosts.yml"
     else
         error "Failed to copy GitHub CLI auth"
@@ -635,7 +663,14 @@ step_clone_setup() {
     local REPO_URL REPO_SLUG
     REPO_URL="$(git -C "$DIR" remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|')"
     if [ -z "$REPO_URL" ]; then
-        REPO_URL="https://github.com/jianjianh1/server-configs.git"
+        local FALLBACK_REPO_URL="https://github.com/jianjianh1/server-configs.git"
+        warn "Could not read 'origin' remote from $DIR"
+        echo "    Default: $FALLBACK_REPO_URL"
+        if ! confirm "Use the default repo URL above?" "n"; then
+            error "Aborted. Re-run from inside the intended git clone, or set 'origin' first."
+            return 1
+        fi
+        REPO_URL="$FALLBACK_REPO_URL"
     fi
     # Extract owner/repo slug (e.g. "jianjianh1/server-configs")
     REPO_SLUG="$(echo "$REPO_URL" | sed 's|.*github\.com/||; s|\.git$||')"

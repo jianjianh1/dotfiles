@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Pre-commit: syntax-check all *.sh and run shellcheck if available.
+# Enable once per clone: git config core.hooksPath .githooks
+# (setup.sh does this automatically.)
+
+set -u
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT" || exit 1
+
+# Only lint files staged for commit, scoped to shell scripts.
+mapfile -t staged_sh < <(
+    git diff --cached --name-only --diff-filter=ACM -- '*.sh' '.githooks/pre-commit' 'lib/*.sh'
+)
+
+if [ ${#staged_sh[@]} -eq 0 ]; then
+    exit 0
+fi
+
+fail=0
+
+for f in "${staged_sh[@]}"; do
+    [ -f "$f" ] || continue
+    if ! bash -n "$f"; then
+        echo "pre-commit: bash -n failed on $f" >&2
+        fail=1
+    fi
+done
+
+if command -v shellcheck &>/dev/null; then
+    if ! shellcheck --severity=warning --exclude=SC1091 "${staged_sh[@]}"; then
+        echo "pre-commit: shellcheck reported warnings" >&2
+        fail=1
+    fi
+fi
+
+exit "$fail"
