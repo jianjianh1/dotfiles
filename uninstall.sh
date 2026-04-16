@@ -102,6 +102,7 @@ remove_symlinks() {
     unlink_config "$HOME/.inputrc"
     unlink_config "$HOME/.dircolors"
     unlink_config "$HOME/.ssh/config"
+    unlink_config "$HOME/.config/nvim"
     unlink_config "$HOME/.bashrc_exports"
     unlink_config "$HOME/.bashrc_aliases"
     unlink_config "$HOME/.claude/settings.json"
@@ -148,6 +149,14 @@ remove_codex() {
     remove_path "$HOME/.codex" "~/.codex"
     remove_path "$HOME/.local/share/codex" "~/.local/share/codex"
     remove_path "$HOME/.cache/codex" "~/.cache/codex"
+}
+
+remove_nvim() {
+    echo "Removing Neovim..."
+    remove_bin nvim
+    remove_path "$HOME/.local/share/nvim" "~/.local/share/nvim"
+    remove_path "$HOME/.local/state/nvim" "~/.local/state/nvim"
+    remove_path "$HOME/.cache/nvim" "~/.cache/nvim"
 }
 
 remove_node() {
@@ -202,6 +211,8 @@ echo ""
 confirm "Uninstall Claude Code?" && remove_claude
 echo ""
 confirm "Uninstall Codex CLI?" && remove_codex
+echo ""
+confirm "Remove Neovim?" && remove_nvim
 echo ""
 confirm "Remove Node.js?" && remove_node
 echo ""

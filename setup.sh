@@ -7,6 +7,7 @@ CLAUDE_SETTINGS_SRC=""
 CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
 CODEX_CONFIG_MODE="repo"
+NVIM_MODULE=""
 
 # Ensure ~/.local/bin is in PATH (node symlinks, uv, etc. live here)
 export PATH="$HOME/.local/bin:$PATH"
@@ -281,6 +282,15 @@ SERVER_CONFIGS_BASH_COMPAT_LOADED=1
 alias claude='${claude_alias}'
 alias codex='${codex_alias}'
 EOF
+
+    # If nvim was installed via module, persist the module load
+    if [ -n "${NVIM_MODULE:-}" ]; then
+        cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
+
+# Neovim via environment module
+command -v module &>/dev/null && module load ${NVIM_MODULE} 2>/dev/null
+EOF
+    fi
 }
 
 render_claude_settings_target() {
@@ -331,6 +341,7 @@ write_compat_report() {
     local vim_clipboard="off"
     local vim_listchars_mode="ascii"
     local gh_helper="off"
+    local nvim_version_out="not installed"
     local claude_version_out="not installed"
     local codex_version_out="not installed"
     local generated_at
@@ -353,6 +364,10 @@ write_compat_report() {
 
     gh_supports_git_credential && gh_helper="on"
 
+    if command -v nvim &>/dev/null; then
+        nvim_version_out="$(nvim --version 2>/dev/null | head -1)"
+    fi
+
     if command -v claude &>/dev/null; then
         claude_version_out="$(claude --version 2>&1 | head -1)"
     fi
@@ -372,6 +387,8 @@ tmux: ${tmux_version_out}
 vim: ${vim_version_out}
   clipboard: ${vim_clipboard}
   listchars: ${vim_listchars_mode}
+
+nvim: ${nvim_version_out}
 
 git:
   gh git-credential helper: ${gh_helper}
@@ -603,6 +620,72 @@ install_uv() {
     echo "  uv $(uv --version) installed"
 }
 
+install_nvim() {
+    if command -v nvim &>/dev/null && ! $FORCE; then
+        local current_version
+        current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
+        if version_at_least "${current_version}" "0.9.0"; then
+            echo "nvim already installed: NVIM v${current_version}"
+            return 0
+        fi
+        echo "Upgrading nvim from v${current_version}..."
+    fi
+
+    # Strategy 1: Try loading an environment module (common on HPC clusters)
+    if command -v module &>/dev/null; then
+        local mod
+        for mod in nvim/0.11.2 nvim; do
+            if module load "$mod" 2>/dev/null && command -v nvim &>/dev/null; then
+                local mod_version
+                mod_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
+                if version_at_least "${mod_version}" "0.9.0"; then
+                    echo "  nvim available via module: NVIM v${mod_version}"
+                    echo "  Adding 'module load $mod' to shell init"
+                    NVIM_MODULE="$mod"
+                    return 0
+                fi
+            fi
+        done
+    fi
+
+    # Strategy 2: Download AppImage from GitHub releases
+    echo "Installing Neovim..."
+    local ARCH
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|aarch64) ;;
+        *)  echo "  Skipping nvim (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+
+    # Try latest stable first, then fall back to 0.9.5 (last glibc 2.28 compatible)
+    local url version_tag
+    for version_tag in latest/download v0.9.5; do
+        local file_name="nvim-linux-${ARCH}.appimage"
+        # v0.9.5 used a different asset name
+        [ "$version_tag" = "v0.9.5" ] && file_name="nvim.appimage"
+
+        url="https://github.com/neovim/neovim/releases/${version_tag}/${file_name}"
+        if retry curl -sfL -o "$TMP/nvim.appimage" "$url"; then
+            chmod +x "$TMP/nvim.appimage"
+            if "$TMP/nvim.appimage" --version &>/dev/null; then
+                install_to "$TMP/nvim.appimage" "$BIN_DIR/nvim"
+                hash -r
+                echo "  $(nvim --version 2>/dev/null | head -1) installed to $BIN_DIR/nvim"
+                return 0
+            fi
+            echo "  AppImage from $version_tag not compatible with this system, trying next..."
+            rm -f "$TMP/nvim.appimage"
+        fi
+    done
+
+    echo "  Warning: could not install Neovim (glibc too old for AppImage)"
+    echo "  Try: module load nvim   (if on an HPC cluster)"
+    return 1
+}
+
 install_gh_tools() {
     local ARCH DEB_ARCH GH_ARCH
     ARCH="$(uname -m)"
@@ -718,6 +801,8 @@ install_plugins() {
 echo "Linking config files..."
 backup_and_link "$DIR/vimrc"     "$HOME/.vimrc"
 backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf"
+mkdir -p "$HOME/.config"
+backup_and_link "$DIR/nvim"      "$HOME/.config/nvim"
 backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig"
 backup_and_link "$DIR/inputrc"   "$HOME/.inputrc"
 backup_and_link "$DIR/dircolors" "$HOME/.dircolors"
@@ -745,6 +830,7 @@ run_step "glow"         install_glow
 run_step "node"         install_node
 run_step "uv"           install_uv
 install_gh_tools
+run_step "nvim"         install_nvim
 run_step "claude"       install_claude
 run_step "codex"        install_codex
 

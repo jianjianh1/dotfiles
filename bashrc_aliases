@@ -67,6 +67,12 @@ command -v bat &>/dev/null && alias cat='bat --paging=never'
 command -v fd &>/dev/null && alias find='fd'
 command -v rg &>/dev/null && alias grep='rg'
 
+# Neovim (alias vim/vi to nvim when available)
+if command -v nvim &>/dev/null; then
+    alias vim='nvim'
+    alias vi='nvim'
+fi
+
 # AI tools
 # Tool integrations
 command -v zoxide &>/dev/null && eval "$(zoxide init bash)"

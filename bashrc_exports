@@ -4,10 +4,6 @@
 # PATH
 export PATH="$HOME/.local/bin:$PATH"
 
-# Default editor
-export EDITOR=vim
-export VISUAL=vim
-
 # History
 export HISTSIZE=50000
 export HISTFILESIZE=100000
@@ -85,3 +81,12 @@ if ! shopt -oq posix; then
 fi
 
 [ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat
+
+# Default editor (prefer nvim if available; set after compat for module-loaded nvim)
+if command -v nvim &>/dev/null; then
+    export EDITOR=nvim
+    export VISUAL=nvim
+else
+    export EDITOR=vim
+    export VISUAL=vim
+fi
