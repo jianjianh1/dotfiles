@@ -83,3 +83,5 @@ if ! shopt -oq posix; then
         . /etc/bash_completion
     fi
 fi
+
+[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat

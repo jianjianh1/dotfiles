@@ -149,6 +149,14 @@ remote_copy() {
     retry scp -r "${SSH_OPTS[@]}" "$@"
 }
 
+remote_claude_supports_print() {
+    remote_exec "claude --help 2>/dev/null | grep -q -- '-p, --print'"
+}
+
+remote_codex_supports_login_status() {
+    remote_exec "codex login --help 2>/dev/null | grep -q '^[[:space:]]*status[[:space:]]'"
+}
+
 cleanup() {
     if [ -n "$SSH_SOCKET" ]; then
         ssh -O exit -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null || true
@@ -548,10 +556,14 @@ step_claude_auth() {
         return 1
     fi
 
-    if remote_exec "claude -p 'ping' >/dev/null 2>&1"; then
-        success "Claude Code auth verified on remote"
+    if remote_claude_supports_print; then
+        if remote_exec "claude -p 'ping' >/dev/null 2>&1"; then
+            success "Claude Code auth verified on remote"
+        else
+            warn "Claude Code credentials copied but auth did not verify"
+        fi
     else
-        warn "Claude Code credentials copied but auth did not verify"
+        warn "Claude Code credentials copied, but this remote Claude Code build has no print mode for verification"
     fi
 }
 
@@ -582,10 +594,14 @@ step_codex_auth() {
         return 1
     fi
 
-    if remote_exec "codex login status >/dev/null 2>&1"; then
-        success "Codex auth verified on remote"
+    if remote_codex_supports_login_status; then
+        if remote_exec "codex login status >/dev/null 2>&1"; then
+            success "Codex auth verified on remote"
+        else
+            warn "Codex auth file copied but login status did not verify"
+        fi
     else
-        warn "Codex auth file copied but login status did not verify"
+        warn "Codex auth file copied, but this remote Codex build has no 'login status' command for verification"
     fi
 }
 

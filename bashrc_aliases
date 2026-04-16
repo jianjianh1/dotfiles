@@ -68,10 +68,9 @@ command -v fd &>/dev/null && alias find='fd'
 command -v rg &>/dev/null && alias grep='rg'
 
 # AI tools
-alias claude='claude --dangerously-skip-permissions --remote-control'
-alias codex='codex --dangerously-bypass-approvals-and-sandbox'
-
 # Tool integrations
 command -v zoxide &>/dev/null && eval "$(zoxide init bash)"
 command -v fzf &>/dev/null && eval "$(fzf --bash 2>/dev/null)"
 [ -f ~/.fzf.bash ] && source ~/.fzf.bash
+
+[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat

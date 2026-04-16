@@ -7,12 +7,16 @@ set hidden                      " Allow switching buffers without saving
 set autoread                    " Reload files changed outside vim
 set history=1000
 set undolevels=1000
-set clipboard=unnamedplus       " Use system clipboard
 set mouse=a                     " Enable mouse in all modes
 set timeout
 set timeoutlen=300
 set ttimeout
 set ttimeoutlen=10              " Fast escape key
+
+" Version-sensitive settings are rendered by setup.sh.
+if filereadable(expand('~/.server-configs-generated/vimrc.compat'))
+    execute 'source' fnameescape(expand('~/.server-configs-generated/vimrc.compat'))
+endif
 
 " === UI ===
 set number                      " Line numbers
@@ -36,7 +40,6 @@ set wrap                        " Wrap long lines on screen
 set linebreak                   " Wrap at word boundaries
 set breakindent                 " Keep wrapped text visually aligned
 set list                        " Show whitespace
-set listchars=tab:>>·,trail:·,extends:›,precedes:‹,nbsp:␣
 
 " === Search ===
 set incsearch                   " Incremental search
@@ -167,8 +170,6 @@ augroup custom
     " Strip trailing whitespace on save
     autocmd BufWritePre * :%s/\s\+$//e
 
-    " Highlight yanked text briefly
-    autocmd TextYankPost * silent! lua vim.highlight.on_yank()
 augroup END
 
 " Disable expensive features for large files (>1MB)

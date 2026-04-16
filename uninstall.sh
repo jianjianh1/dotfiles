@@ -167,6 +167,7 @@ remove_node() {
 
 remove_dirs() {
     echo "Cleaning up directories..."
+    remove_path "$HOME/.server-configs-generated" "~/.server-configs-generated"
     remove_dir_if_empty "$HOME/.vim/undodir" "~/.vim/undodir"
     remove_dir_if_empty "$HOME/.vim" "~/.vim"
     remove_dir_if_empty "$HOME/.ssh/sockets" "~/.ssh/sockets"
