@@ -385,8 +385,8 @@ add_step() {
 }
 
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
-add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Clone repo & setup.sh" "yes"                                                      "on"
+add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
 add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
@@ -516,7 +516,7 @@ step_ssh_keys() {
     # Copy known_hosts so remote trusts github.com etc.
     if [ -f ~/.ssh/known_hosts ]; then
         remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
-        if remote_copy_if_changed ~/.ssh/known_hosts '$HOME/.ssh/known_hosts'; then
+        if remote_copy_if_changed ~/.ssh/known_hosts '~/.ssh/known_hosts'; then
             remote_exec "chmod 644 ~/.ssh/known_hosts"
         else
             warn "Failed to copy known_hosts"
@@ -541,9 +541,8 @@ step_gh_auth() {
         return 1
     fi
 
-    remote_exec "mkdir -p ~/.config/gh && chmod 700 ~/.config ~/.config/gh"
-    if remote_copy_if_changed ~/.config/gh/hosts.yml '$HOME/.config/gh/hosts.yml'; then
-        remote_exec "chmod 600 ~/.config/gh/hosts.yml"
+    if copy_local_file_to_remote "$HOME/.config/gh/hosts.yml" '$HOME/.config/gh/hosts.yml' 600; then
+        remote_exec "chmod 700 ~/.config ~/.config/gh 2>/dev/null || true"
     else
         error "Failed to copy GitHub CLI auth"
         return 1
@@ -714,8 +713,8 @@ step_clone_setup() {
 echo ""
 
 [ "${STEPS_SELECTED[0]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
-[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
-[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
+[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
+[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
 [ "${STEPS_SELECTED[3]}" = "on" ] && run_step "Claude Code auth" step_claude_auth
 [ "${STEPS_SELECTED[4]}" = "on" ] && run_step "Codex auth"       step_codex_auth
 [ "${STEPS_SELECTED[5]}" = "on" ] && run_step "API keys"         step_api_keys
