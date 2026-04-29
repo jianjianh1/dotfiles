@@ -93,7 +93,7 @@ Auth files (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.config/gh/h
 
 ## Lint / pre-commit
 
-A pre-commit hook at `.githooks/pre-commit` runs `bash -n` on all `*.sh` and, if `shellcheck` is on `$PATH`, a warning-level check. `setup.sh` wires this via `git config core.hooksPath .githooks` on first run.
+A pre-commit hook at `.githooks/pre-commit` runs `bash -n` on staged shell files, runs warning-level `shellcheck` if available, and scans staged diffs for common secret patterns. It is Bash 3.2-compatible for macOS control hosts. `setup.sh` wires this via `git config core.hooksPath .githooks` on first run.
 
 ## Reference Docs
 

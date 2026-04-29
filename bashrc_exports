@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+
 # Only run in interactive shells
 [[ $- == *i* ]] || return
 
@@ -14,10 +16,10 @@ shopt -s histappend
 
 # Shell options
 shopt -s checkwinsize
-shopt -s globstar
+shopt -s globstar 2>/dev/null || true
 shopt -s cdspell        # autocorrect minor cd typos
 shopt -s dirspell       # autocorrect directory name typos in completion
-shopt -s autocd         # type a directory name to cd into it
+shopt -s autocd 2>/dev/null || true         # type a directory name to cd into it
 
 # Colored output
 export CLICOLOR=1
@@ -31,7 +33,7 @@ set_preferred_utf8_locale() {
     local locale_name
 
     for locale_name in C.UTF-8 en_US.UTF-8 en_US.utf8; do
-        if LANG="$locale_name" LC_ALL= locale charmap >/dev/null 2>&1; then
+        if LANG="$locale_name" LC_ALL="" locale charmap >/dev/null 2>&1; then
             export LANG="$locale_name"
             return 0
         fi
@@ -55,7 +57,9 @@ command -v fd &>/dev/null && export FZF_ALT_C_COMMAND='fd --type d --hidden --ex
 export BAT_THEME="TwoDark"
 
 # dircolors
-[ -f ~/.dircolors ] && eval "$(dircolors -b ~/.dircolors)"
+if [ -f ~/.dircolors ] && command -v dircolors &>/dev/null; then
+    eval "$(dircolors -b ~/.dircolors)"
+fi
 
 # Prompt: use Starship if available, else fall back to custom PS1
 if command -v starship &>/dev/null; then
@@ -99,7 +103,10 @@ fi
 # Atuin: SQLite-backed shell history with context (replaces Ctrl-R)
 command -v atuin &>/dev/null && eval "$(atuin init bash --disable-up-arrow)"
 
-[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat
+if [ -f ~/.server-configs-generated/bashrc_compat ]; then
+    # shellcheck source=/dev/null
+    source ~/.server-configs-generated/bashrc_compat
+fi
 
 # Default editor (prefer nvim if available; set after compat for module-loaded nvim)
 if command -v nvim &>/dev/null; then

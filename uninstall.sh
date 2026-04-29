@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATED_DIR="$HOME/.server-configs-generated"
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
 YES=false
@@ -10,6 +10,16 @@ YES=false
 . "$DIR/lib/common.sh"
 
 # --- Helpers ---
+
+display_path() {
+    local path="$1"
+
+    case "$path" in
+        "$HOME") printf "~" ;;
+        "$HOME"/*) printf "%s/%s" "~" "${path#"$HOME"/}" ;;
+        *) printf "%s" "$path" ;;
+    esac
+}
 
 confirm() {
     if $YES; then return 0; fi
@@ -31,7 +41,7 @@ unlink_config() {
     local target=""
 
     if [ -L "$dst" ]; then
-        target="$(readlink -f "$dst" 2>/dev/null || true)"
+        target="$(portable_realpath "$dst" 2>/dev/null || true)"
         case "$target" in
             "$DIR"|"$DIR"/*)
                 rm -f "$dst"
@@ -53,7 +63,8 @@ unlink_config() {
 }
 
 remove_path() {
-    local path="$1" label="${2:-$1}"
+    local path="$1" label="${2:-}"
+    label="${label:-$(display_path "$path")}"
     if [ -e "$path" ] || [ -L "$path" ]; then
         rm -rf "$path"
         echo "  Removed $label"
@@ -61,7 +72,8 @@ remove_path() {
 }
 
 remove_tracked_path() {
-    local path="$1" label="${2:-$1}"
+    local path="$1" label="${2:-}"
+    label="${label:-$(display_path "$path")}"
 
     if ! manifest_contains_path "$path"; then
         if [ -e "$path" ] || [ -L "$path" ]; then
@@ -77,7 +89,8 @@ remove_tracked_path() {
 }
 
 remove_dir_if_empty() {
-    local path="$1" label="${2:-$1}"
+    local path="$1" label="${2:-}"
+    label="${label:-$(display_path "$path")}"
     if [ -d "$path" ]; then
         rmdir "$path" 2>/dev/null && echo "  Removed $label"
     fi
@@ -86,7 +99,7 @@ remove_dir_if_empty() {
 clean_line_from_file() {
     local file="$1" pattern="$2"
     if [ -f "$file" ]; then
-        sed -i "\|$pattern|d" "$file"
+        delete_matching_lines "$file" "$pattern" || return 1
         echo "  Cleaned $file"
     fi
 }
@@ -104,6 +117,10 @@ remove_bin() {
 
     if manifest_contains_path "/usr/local/bin/$bin"; then
         if [ ! -e "/usr/local/bin/$bin" ]; then
+            return 0
+        fi
+        if is_macos; then
+            echo "  Skipped /usr/local/bin/$bin (managed by system package manager on macOS)"
             return 0
         fi
         if [ -w /usr/local/bin ] || { command -v sudo &>/dev/null && sudo -n true 2>/dev/null; }; then
@@ -156,15 +173,15 @@ remove_tools() {
 remove_claude() {
     echo "Removing Claude Code..."
     remove_bin claude
-    remove_tracked_path "$HOME/.claude/settings.json" "~/.claude/settings.json"
-    remove_dir_if_empty "$HOME/.claude" "~/.claude"
+    remove_tracked_path "$HOME/.claude/settings.json"
+    remove_dir_if_empty "$HOME/.claude"
 }
 
 remove_codex() {
     echo "Removing Codex CLI..."
     remove_bin codex
-    remove_tracked_path "$HOME/.codex/config.toml" "~/.codex/config.toml"
-    remove_dir_if_empty "$HOME/.codex" "~/.codex"
+    remove_tracked_path "$HOME/.codex/config.toml"
+    remove_dir_if_empty "$HOME/.codex"
 }
 
 remove_nvim() {
@@ -177,36 +194,36 @@ remove_node() {
     for bin in node npm npx corepack; do
         remove_bin "$bin"
     done
-    remove_tracked_path "$HOME/.local/lib/node_modules" "~/.local/lib/node_modules"
-    remove_tracked_path "$HOME/.local/include/node" "~/.local/include/node"
-    remove_tracked_path "$HOME/.local/share/doc/node" "~/.local/share/doc/node"
-    remove_tracked_path "$HOME/.local/share/man/man1/node.1" "~/.local/share/man/man1/node.1"
-    remove_tracked_path "$HOME/.local/share/systemtap/tapset/node.stp" "~/.local/share/systemtap/tapset/node.stp"
+    remove_tracked_path "$HOME/.local/lib/node_modules"
+    remove_tracked_path "$HOME/.local/include/node"
+    remove_tracked_path "$HOME/.local/share/doc/node"
+    remove_tracked_path "$HOME/.local/share/man/man1/node.1"
+    remove_tracked_path "$HOME/.local/share/systemtap/tapset/node.stp"
 }
 
 remove_dirs() {
     echo "Cleaning up directories..."
-    remove_path "$HOME/.server-configs-generated" "~/.server-configs-generated"
-    remove_path "$HOME/.tmux/plugins" "~/.tmux/plugins"
-    remove_dir_if_empty "$HOME/.tmux" "~/.tmux"
-    remove_dir_if_empty "$HOME/.config/tmux" "~/.config/tmux"
-    remove_dir_if_empty "$HOME/.vim/undodir" "~/.vim/undodir"
-    remove_dir_if_empty "$HOME/.vim" "~/.vim"
-    remove_dir_if_empty "$HOME/.ssh/sockets" "~/.ssh/sockets"
-    remove_dir_if_empty "$HOME/.claude" "~/.claude"
-    remove_dir_if_empty "$HOME/.codex" "~/.codex"
-    remove_dir_if_empty "$HOME/.local/share/man/man1" "~/.local/share/man/man1"
-    remove_dir_if_empty "$HOME/.local/share/man" "~/.local/share/man"
-    remove_dir_if_empty "$HOME/.local/share/doc" "~/.local/share/doc"
-    remove_dir_if_empty "$HOME/.local/share/systemtap/tapset" "~/.local/share/systemtap/tapset"
-    remove_dir_if_empty "$HOME/.local/share/systemtap" "~/.local/share/systemtap"
-    remove_dir_if_empty "$HOME/.local/share/claude" "~/.local/share/claude"
-    remove_dir_if_empty "$HOME/.local/share/codex" "~/.local/share/codex"
-    remove_dir_if_empty "$HOME/.local/share" "~/.local/share"
-    remove_dir_if_empty "$HOME/.local/include" "~/.local/include"
-    remove_dir_if_empty "$HOME/.local/lib" "~/.local/lib"
-    remove_dir_if_empty "$HOME/.local/bin" "~/.local/bin"
-    remove_dir_if_empty "$HOME/.local" "~/.local"
+    remove_path "$HOME/.server-configs-generated"
+    remove_path "$HOME/.tmux/plugins"
+    remove_dir_if_empty "$HOME/.tmux"
+    remove_dir_if_empty "$HOME/.config/tmux"
+    remove_dir_if_empty "$HOME/.vim/undodir"
+    remove_dir_if_empty "$HOME/.vim"
+    remove_dir_if_empty "$HOME/.ssh/sockets"
+    remove_dir_if_empty "$HOME/.claude"
+    remove_dir_if_empty "$HOME/.codex"
+    remove_dir_if_empty "$HOME/.local/share/man/man1"
+    remove_dir_if_empty "$HOME/.local/share/man"
+    remove_dir_if_empty "$HOME/.local/share/doc"
+    remove_dir_if_empty "$HOME/.local/share/systemtap/tapset"
+    remove_dir_if_empty "$HOME/.local/share/systemtap"
+    remove_dir_if_empty "$HOME/.local/share/claude"
+    remove_dir_if_empty "$HOME/.local/share/codex"
+    remove_dir_if_empty "$HOME/.local/share"
+    remove_dir_if_empty "$HOME/.local/include"
+    remove_dir_if_empty "$HOME/.local/lib"
+    remove_dir_if_empty "$HOME/.local/bin"
+    remove_dir_if_empty "$HOME/.local"
 }
 
 parse_args() {

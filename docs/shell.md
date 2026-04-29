@@ -42,6 +42,8 @@ shopt -s histappend   # Append, don't overwrite, on shell exit
 | `dirspell` | Autocorrect directory name typos in completion |
 | `autocd` | Type a directory name to `cd` into it |
 
+`globstar` and `autocd` are guarded so older Bash builds, including macOS Bash 3.2, skip them without startup errors.
+
 ### Colors
 
 | Variable | Value | Purpose |
@@ -78,7 +80,7 @@ BAT_THEME="TwoDark"
 
 ### Dircolors
 
-Loads `~/.dircolors` via `dircolors -b` if the file exists.
+Loads `~/.dircolors` via `dircolors -b` if both the file and command exist.
 
 ### Prompt
 
@@ -110,13 +112,13 @@ Prefers `nvim` if available, falls back to `vim`. Sets both `EDITOR` and `VISUAL
 
 ### File Listing
 
-| Alias | With `eza` | Without `eza` |
-|-------|-----------|---------------|
-| `ls` | `eza --group-directories-first` | `ls --color=auto` |
-| `ll` | `eza -la --group-directories-first --git` | `ls -alFh --color=auto` |
-| `la` | `eza -a --group-directories-first` | `ls -A --color=auto` |
-| `lt` | `eza -T --level=2` | *(not defined)* |
-| `l` | `ls -CF` | `ls -CF` |
+| Alias | With `eza` | GNU `ls` fallback | macOS fallback |
+|-------|-----------|-------------------|----------------|
+| `ls` | `eza --group-directories-first` | `ls --color=auto` | `ls -G` |
+| `ll` | `eza -la --group-directories-first --git` | `ls -alFh --color=auto` | `ls -alFhG` |
+| `la` | `eza -a --group-directories-first` | `ls -A --color=auto` | `ls -AG` |
+| `lt` | `eza -T --level=2` | *(not defined)* | *(not defined)* |
+| `l` | `ls -CF` | `ls -CF` | `ls -CF` |
 
 ### Grep
 
@@ -168,12 +170,12 @@ See also: [Git config aliases](git.md#aliases-gitconfig)
 |-------|------------|---------|
 | `h` | `history \| tail -30` | Recent history |
 | `j` | `jobs -l` | Running jobs |
-| `ports` | `ss -tulnp` | Listening ports |
+| `ports` | `ss -tulnp` or `lsof -nP -iTCP -sTCP:LISTEN` | Listening ports |
 | `myip` | `curl -s ifconfig.me` | Public IP |
 | `cls` | `clear` | Clear terminal |
 | `path` | `echo -e ${PATH//:/\\n}` | PATH entries, one per line |
 | `now` | `date +"%Y-%m-%d %H:%M:%S"` | Current timestamp |
-| `open` | `xdg-open` | Open file with default app |
+| `open` | `xdg-open` | Linux default-app opener when available; macOS keeps native `open` |
 
 ### tmux
 
@@ -191,8 +193,7 @@ These only activate if the tool is installed:
 | Alias | Replacement | Original |
 |-------|-------------|----------|
 | `cat` | `bat --paging=never` | `cat` |
-| `find` | `fd` | `find` |
-| `grep` | `rg` | `grep` (overrides the `--color=auto` alias above) |
+| `ff` | `fd` | fast file search helper |
 | `vim` / `vi` | `nvim` | `vim` / `vi` |
 
 ### Tool Integrations

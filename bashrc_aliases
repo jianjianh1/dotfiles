@@ -1,3 +1,8 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2262
+
+SERVER_CONFIGS_OS="$(uname -s 2>/dev/null || printf unknown)"
+
 # Navigation
 alias ..='cd ..'
 alias ...='cd ../..'
@@ -9,10 +14,17 @@ if command -v eza &>/dev/null; then
     alias ll='eza -la --group-directories-first --git'
     alias la='eza -a --group-directories-first'
     alias lt='eza -T --level=2'
-else
+elif ls --color=auto -d . >/dev/null 2>&1; then
     alias ls='ls --color=auto'
     alias ll='ls -alFh --color=auto'
     alias la='ls -A --color=auto'
+elif [ "$SERVER_CONFIGS_OS" = "Darwin" ]; then
+    alias ls='ls -G'
+    alias ll='ls -alFhG'
+    alias la='ls -AG'
+else
+    alias ll='ls -alFh'
+    alias la='ls -A'
 fi
 alias l='ls -CF'
 
@@ -49,12 +61,18 @@ alias dud='du -d 1 -h | sort -hr'
 # System / quick look
 alias h='history | tail -30'
 alias j='jobs -l'
-alias ports='ss -tulnp'
+if command -v ss &>/dev/null; then
+    alias ports='ss -tulnp'
+elif command -v lsof &>/dev/null; then
+    alias ports='lsof -nP -iTCP -sTCP:LISTEN'
+fi
 alias myip='curl -s ifconfig.me'
 alias cls='clear'
 alias path='echo -e ${PATH//:/\\n}'
 alias now='date +"%Y-%m-%d %H:%M:%S"'
-alias open='xdg-open'
+if [ "$SERVER_CONFIGS_OS" != "Darwin" ] && command -v xdg-open &>/dev/null; then
+    alias open='xdg-open'
+fi
 
 # tmux
 alias ta='tmux attach -t'
@@ -68,7 +86,10 @@ alias tk='tmux kill-session -t'
 command -v bat &>/dev/null && alias cat='bat --paging=never'
 command -v fd &>/dev/null && alias ff='fd'
 
-[ -f ~/.server-configs-generated/bashrc_compat ] && source ~/.server-configs-generated/bashrc_compat
+if [ -f ~/.server-configs-generated/bashrc_compat ]; then
+    # shellcheck source=/dev/null
+    source ~/.server-configs-generated/bashrc_compat
+fi
 
 # Neovim (alias vim/vi to nvim when available)
 if command -v nvim &>/dev/null; then
@@ -80,4 +101,7 @@ fi
 # Tool integrations
 command -v zoxide &>/dev/null && eval "$(zoxide init bash)"
 command -v fzf &>/dev/null && eval "$(fzf --bash 2>/dev/null)"
-[ -f ~/.fzf.bash ] && source ~/.fzf.bash
+if [ -f ~/.fzf.bash ]; then
+    # shellcheck source=/dev/null
+    source ~/.fzf.bash
+fi

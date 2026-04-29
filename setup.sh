@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DIR
 GENERATED_DIR="$HOME/.server-configs-generated"
 readonly GENERATED_DIR
@@ -12,29 +12,13 @@ CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
 CODEX_CONFIG_MODE="repo"
 NVIM_MODULE=""
-
-# Ensure ~/.local/bin is in PATH (node symlinks, uv, etc. live here)
-export PATH="$HOME/.local/bin:$PATH"
-
-# --- Flags ---
-FORCE=false
-DRY_RUN=false
-for arg in "$@"; do
-    case "$arg" in
-        --force|-f) FORCE=true ;;
-        --dry-run|-n) DRY_RUN=true ;;
-    esac
-done
-
-# --- Error tracking ---
+FORCE="${FORCE:-false}"
+DRY_RUN="${DRY_RUN:-false}"
 FAILURES=()
 
-# --- Cleanup trap ---
 _setup_cleanup() {
-    # Remove any leftover temp dirs from subshell traps that didn't fire
-    rm -rf /tmp/setup-$$-* 2>/dev/null || true
+    :
 }
-trap _setup_cleanup EXIT
 
 # --- Shared helpers (run_step, retry, backup_and_link, backup_and_copy) ---
 # shellcheck source=lib/common.sh
@@ -42,13 +26,13 @@ trap _setup_cleanup EXIT
 
 # --- Helpers ---
 
-mkdir -p "$GENERATED_DIR"
-chmod 700 "$GENERATED_DIR" 2>/dev/null || true
-: > "$INSTALL_MANIFEST"
-
 # Wrapper: move/copy files respecting sudo needs
 install_to() {
     local src="$1" dst="$2"
+    if [ "${DRY_RUN:-false}" = true ]; then
+        echo "[dry-run] Would install $src -> $dst"
+        return 0
+    fi
     if [ -n "$NEED_SUDO" ]; then
         sudo mv -f "$src" "$dst"
     else
@@ -70,7 +54,33 @@ record_command_if_managed() {
 
     path="$(command -v "$cmd" 2>/dev/null || true)"
     [ -n "$path" ] || return 1
+    case "$path" in
+        "$HOME"/*) ;;
+        *) return 0 ;;
+    esac
     manifest_add_path "$path"
+}
+
+brew_install() {
+    local formula="$1" cmd="${2:-$1}"
+
+    is_macos || return 1
+    if ! command -v brew &>/dev/null; then
+        echo "  Skipping $formula: Homebrew is not installed."
+        return 1
+    fi
+    if command -v "$cmd" &>/dev/null && ! $FORCE; then
+        echo "$cmd already installed: $("$cmd" --version 2>&1 | head -1)"
+        return 0
+    fi
+    echo "Installing $formula with Homebrew..."
+    if brew list --formula "$formula" >/dev/null 2>&1 && ! $FORCE; then
+        brew link "$formula" >/dev/null 2>&1 || true
+    else
+        brew install "$formula" || return 1
+    fi
+    hash -r
+    command -v "$cmd" &>/dev/null
 }
 
 record_node_manifest() {
@@ -569,6 +579,10 @@ install_gh_bare_binary() {
 # --- Install functions ---
 
 install_gh_cli() {
+    if is_macos; then
+        brew_install gh gh
+        return $?
+    fi
     if command -v gh &>/dev/null && ! $FORCE; then
         record_command_if_managed gh || true
         echo "gh already installed: $(gh --version | head -1)"
@@ -578,7 +592,7 @@ install_gh_cli() {
     local GH_VERSION
     GH_VERSION="$(gh_latest cli/cli)" || return 1
     local ARCH GH_ARCH
-    ARCH="$(uname -m)"
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64)  GH_ARCH="amd64" ;;
         aarch64) GH_ARCH="arm64" ;;
@@ -611,6 +625,10 @@ install_gh_cli() {
 }
 
 install_glow() {
+    if is_macos; then
+        brew_install glow glow
+        return $?
+    fi
     if command -v glow &>/dev/null && ! $FORCE; then
         record_command_if_managed glow || true
         echo "glow already installed: $(glow --version)"
@@ -620,7 +638,7 @@ install_glow() {
     local GLOW_VERSION
     GLOW_VERSION="$(gh_latest charmbracelet/glow)" || return 1
     local ARCH GLOW_ARCH
-    ARCH="$(uname -m)"
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64)  GLOW_ARCH="x86_64" ;;
         aarch64) GLOW_ARCH="arm64"  ;;
@@ -644,6 +662,10 @@ install_glow() {
 
 install_node() {
     local MIN_NODE_MAJOR=18
+    if is_macos; then
+        brew_install node node
+        return $?
+    fi
     if command -v node &>/dev/null && ! $FORCE; then
         local cur_major
         cur_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
@@ -656,7 +678,7 @@ install_node() {
     fi
     echo "Installing Node.js..."
     local ARCH NODE_ARCH
-    ARCH="$(uname -m)"
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64)  NODE_ARCH="x64" ;;
         aarch64) NODE_ARCH="arm64" ;;
@@ -708,6 +730,10 @@ install_node() {
 }
 
 install_uv() {
+    if is_macos; then
+        brew_install uv uv
+        return $?
+    fi
     if command -v uv &>/dev/null && ! $FORCE; then
         record_command_if_managed uv || true
         record_command_if_managed uvx || true
@@ -716,7 +742,7 @@ install_uv() {
     fi
     echo "Installing uv..."
     local UV_ARCH TMP
-    UV_ARCH="$(uname -m)"
+    UV_ARCH="$(machine_arch)"
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-musl.tar.gz"; then
@@ -741,6 +767,10 @@ install_uv() {
 }
 
 install_nvim() {
+    if is_macos; then
+        brew_install neovim nvim
+        return $?
+    fi
     if command -v nvim &>/dev/null && ! $FORCE; then
         local current_version
         current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
@@ -772,7 +802,7 @@ install_nvim() {
     # Strategy 2: Download AppImage from GitHub releases
     echo "Installing Neovim..."
     local ARCH
-    ARCH="$(uname -m)"
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64|aarch64) ;;
         *)  echo "  Skipping nvim (unsupported arch: $ARCH)"; return 1 ;;
@@ -832,8 +862,30 @@ install_nvim() {
 }
 
 install_gh_tools() {
+    if [ "${DRY_RUN:-false}" = true ]; then
+        for tool in fzf ripgrep fd bat delta zoxide lazygit btop jq starship atuin; do
+            run_step "$tool" true
+        done
+        return 0
+    fi
+
+    if is_macos; then
+        run_step "fzf"      brew_install fzf fzf
+        run_step "ripgrep"  brew_install ripgrep rg
+        run_step "fd"       brew_install fd fd
+        run_step "bat"      brew_install bat bat
+        run_step "delta"    brew_install git-delta delta
+        run_step "zoxide"   brew_install zoxide zoxide
+        run_step "lazygit"  brew_install lazygit lazygit
+        run_step "btop"     brew_install btop btop
+        run_step "jq"       brew_install jq jq
+        run_step "starship" brew_install starship starship
+        run_step "atuin"    brew_install atuin atuin
+        return 0
+    fi
+
     local ARCH DEB_ARCH GH_ARCH
-    ARCH="$(uname -m)"
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64)  DEB_ARCH="amd64"; GH_ARCH="x86_64" ;;
         aarch64) DEB_ARCH="arm64"; GH_ARCH="aarch64" ;;
@@ -939,23 +991,28 @@ install_codex() {
     # gh_latest returns the full tag (e.g. "rust-v0.120.0") since the tag isn't a plain "v*"
     local CODEX_TAG
     CODEX_TAG="$(gh_latest openai/codex)" || return 1
-    local ARCH
-    ARCH="$(uname -m)"
+    local ARCH TARGET
+    ARCH="$(machine_arch)"
     case "$ARCH" in
         x86_64|aarch64) ;;
         *) echo "  Skipping Codex CLI (unsupported arch: $ARCH)"; return 1 ;;
     esac
+    if is_macos; then
+        TARGET="apple-darwin"
+    else
+        TARGET="unknown-linux-musl"
+    fi
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
     if ! retry curl -sfL -o "$TMP/archive.tar.gz" \
-        "https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-unknown-linux-musl.tar.gz"; then
+        "https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-${TARGET}.tar.gz"; then
         echo "  Warning: failed to download Codex CLI"
         return 1
     fi
     tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
-    chmod +x "$TMP/codex-${ARCH}-unknown-linux-musl"
-    if ! install_to "$TMP/codex-${ARCH}-unknown-linux-musl" "$BIN_DIR/codex"; then
+    chmod +x "$TMP/codex-${ARCH}-${TARGET}"
+    if ! install_to "$TMP/codex-${ARCH}-${TARGET}" "$BIN_DIR/codex"; then
         echo "  Warning: failed to install Codex CLI to $BIN_DIR/codex"
         return 1
     fi
@@ -1011,62 +1068,104 @@ link_generated_configs() {
     append_line_if_missing 'source ~/.bashrc_aliases' "$HOME/.bashrc" || return 1
 }
 
-# ============================================================
-# Main
-# ============================================================
+setup_main() {
+    FORCE=false
+    DRY_RUN=false
+    FAILURES=()
 
-# Point this clone at the repo-local git hooks (idempotent; only when run
-# from inside the repo itself).
-if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
-    git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
-fi
-
-echo "Linking config files..."
-run_step "core config links" link_core_configs
-
-# Determine install directories based on write access
-NEED_SUDO=""
-if [ -w /usr/local/bin ]; then
-    BIN_DIR="/usr/local/bin"
-elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
-    BIN_DIR="/usr/local/bin"
-    NEED_SUDO=1
-else
-    BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$BIN_DIR"
-fi
-
-# Install tools (each step continues on failure)
-run_step "gh"           install_gh_cli
-run_step "glow"         install_glow
-run_step "node"         install_node
-run_step "uv"           install_uv
-install_gh_tools
-run_step "nvim"         install_nvim
-run_step "tpm"          install_tpm
-run_step "claude"       install_claude
-run_step "codex"        install_codex
-
-run_step "compat configs" render_compat_configs
-
-# Link remaining configs
-run_step "shell config links" link_generated_configs
-# Source bashrc only in interactive shells; non-interactive may lack shopt etc.
-[[ $- == *i* ]] && source ~/.bashrc || true
-
-run_step "mcp plugins" install_plugins
-
-# --- Summary ---
-echo ""
-if [ ${#FAILURES[@]} -gt 0 ]; then
-    echo "Setup complete with ${#FAILURES[@]} warning(s):"
-    for f in "${FAILURES[@]}"; do
-        echo "  - $f (optional)"
+    for arg in "$@"; do
+        case "$arg" in
+            --force|-f) FORCE=true ;;
+            --dry-run|-n) DRY_RUN=true ;;
+            -h|--help)
+                echo "Usage: setup.sh [--force|-f] [--dry-run|-n] [--help|-h]"
+                echo "  -f, --force    Reinstall CLI tools even if already present"
+                echo "  -n, --dry-run  Show setup steps without changing files"
+                echo "  -h, --help     Show this help"
+                return 0
+                ;;
+            *)
+                echo "Unknown option: $arg"
+                echo "Run './setup.sh --help' for usage."
+                return 1
+                ;;
+        esac
     done
+
+    export PATH="$HOME/.local/bin:$PATH"
+    trap _setup_cleanup EXIT
+
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$GENERATED_DIR" || return 1
+        chmod 700 "$GENERATED_DIR" 2>/dev/null || true
+        : > "$INSTALL_MANIFEST"
+
+        # Point this clone at the repo-local git hooks (idempotent; only when
+        # run from inside the repo itself).
+        if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
+            git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
+        fi
+    fi
+
+    echo "Linking config files..."
+    run_step "core config links" link_core_configs
+
+    # Determine install directories based on write access
+    NEED_SUDO=""
+    if [ "$DRY_RUN" = true ]; then
+        BIN_DIR="$HOME/.local/bin"
+    elif is_macos; then
+        BIN_DIR="$HOME/.local/bin"
+        mkdir -p "$BIN_DIR"
+    elif [ -w /usr/local/bin ]; then
+        BIN_DIR="/usr/local/bin"
+    elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+        BIN_DIR="/usr/local/bin"
+        NEED_SUDO=1
+    else
+        BIN_DIR="$HOME/.local/bin"
+        mkdir -p "$BIN_DIR"
+    fi
+
+    # Install tools (each step continues on failure)
+    run_step "gh"           install_gh_cli
+    run_step "glow"         install_glow
+    run_step "node"         install_node
+    run_step "uv"           install_uv
+    install_gh_tools
+    run_step "nvim"         install_nvim
+    run_step "tpm"          install_tpm
+    run_step "claude"       install_claude
+    run_step "codex"        install_codex
+
+    run_step "compat configs" render_compat_configs
+
+    # Link remaining configs
+    run_step "shell config links" link_generated_configs
+    # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
+    if [[ $- == *i* ]] && [ "$DRY_RUN" = false ]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.bashrc"
+    fi
+
+    run_step "mcp plugins" install_plugins
+
+    # --- Summary ---
     echo ""
-    echo "Compatibility report: $GENERATED_DIR/compat-report.txt"
-    echo "Start a new tmux session or run: tmux source ~/.tmux.conf"
-else
-    echo "Compatibility report: $GENERATED_DIR/compat-report.txt"
-    echo "Setup complete! Start a new tmux session or run: tmux source ~/.tmux.conf"
+    if [ ${#FAILURES[@]} -gt 0 ]; then
+        echo "Setup complete with ${#FAILURES[@]} warning(s):"
+        for f in "${FAILURES[@]}"; do
+            echo "  - $f (optional)"
+        done
+        echo ""
+        echo "Compatibility report: $GENERATED_DIR/compat-report.txt"
+        echo "Start a new tmux session or run: tmux source ~/.tmux.conf"
+    else
+        echo "Compatibility report: $GENERATED_DIR/compat-report.txt"
+        echo "Setup complete! Start a new tmux session or run: tmux source ~/.tmux.conf"
+    fi
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    setup_main "$@"
 fi

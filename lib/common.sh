@@ -44,6 +44,87 @@ retry() {
     done
 }
 
+os_name() {
+    uname -s 2>/dev/null || printf unknown
+}
+
+is_macos() {
+    [ "$(os_name)" = "Darwin" ]
+}
+
+is_linux() {
+    [ "$(os_name)" = "Linux" ]
+}
+
+machine_arch() {
+    local arch
+    arch="$(uname -m 2>/dev/null || true)"
+    case "$arch" in
+        arm64) printf "aarch64" ;;
+        *) printf "%s" "$arch" ;;
+    esac
+}
+
+to_lower() {
+    printf "%s" "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+portable_realpath() {
+    local path="$1" dir base
+
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$path" 2>/dev/null && return 0
+    fi
+
+    if [ -L "$path" ]; then
+        path="$(readlink "$path" 2>/dev/null || printf "%s" "$path")"
+    fi
+
+    dir="$(dirname "$path")"
+    base="$(basename "$path")"
+    if dir="$(cd "$dir" 2>/dev/null && pwd -P)"; then
+        printf "%s/%s\n" "$dir" "$base"
+        return 0
+    fi
+
+    return 1
+}
+
+sha256_file() {
+    local path="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+base64_decode_cmd() {
+    if printf "" | base64 -d >/dev/null 2>&1; then
+        printf "base64 -d"
+    elif printf "" | base64 -D >/dev/null 2>&1; then
+        printf "base64 -D"
+    else
+        return 1
+    fi
+}
+
+delete_matching_lines() {
+    local file="$1" pattern="$2" tmp
+
+    [ -f "$file" ] || return 0
+    tmp="$(mktemp "${TMPDIR:-/tmp}/server-configs.XXXXXX")" || return 1
+    grep -v -E "$pattern" "$file" > "$tmp" || true
+    cat "$tmp" > "$file" || {
+        rm -f "$tmp"
+        return 1
+    }
+    rm -f "$tmp"
+}
+
 # Quote a command string so it can be passed as the single payload to
 # `bash -lc ...` without losing shell metacharacters.
 quote_for_bash_lc() {
@@ -80,7 +161,7 @@ manifest_add_path() {
 _backup_existing() {
     local src="$1" dst="$2" current_target=""
     if [ -L "$dst" ]; then
-        current_target="$(readlink -f "$dst" 2>/dev/null || true)"
+        current_target="$(portable_realpath "$dst" 2>/dev/null || true)"
         if [ "$current_target" = "$src" ]; then
             rm -f "$dst"
             return 0

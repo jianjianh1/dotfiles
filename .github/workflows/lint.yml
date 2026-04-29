@@ -2,19 +2,35 @@ name: Lint
 
 on:
   push:
-    paths: ['*.sh', 'lib/*.sh', '.githooks/*']
+    paths: ['*.sh', 'lib/*.sh', '.githooks/*', 'bashrc_exports', 'bashrc_aliases', '.github/workflows/lint.yml']
   pull_request:
-    paths: ['*.sh', 'lib/*.sh', '.githooks/*']
+    paths: ['*.sh', 'lib/*.sh', '.githooks/*', 'bashrc_exports', 'bashrc_aliases', '.github/workflows/lint.yml']
 
 jobs:
-  shellcheck:
-    runs-on: ubuntu-latest
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@2.0.0
-        with:
-          severity: warning
-          additional_files: .githooks/pre-commit
-        env:
-          SHELLCHECK_OPTS: --exclude=SC1091
+      - name: Install ShellCheck on Ubuntu
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install ShellCheck on macOS
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - name: Syntax check
+        run: |
+          bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+      - name: ShellCheck
+        run: |
+          shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+      - name: Regression tests
+        run: bash test_regressions.sh
+      - name: Safe smoke checks
+        run: |
+          ./deploy.sh --help
+          ./uninstall.sh --help
+          HOME="$(mktemp -d)" ./setup.sh --dry-run

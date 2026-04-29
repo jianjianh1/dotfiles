@@ -1,35 +1,51 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DIR
 
 # --- Flags ---
-AUTO_YES=false
-FORCE_COPY=0
-for arg in "$@"; do
-    case "$arg" in
-        -y|--yes) AUTO_YES=true ;;
-        --force-copy) FORCE_COPY=1 ;;
-        -h|--help)
-            echo "Usage: deploy.sh [-y|--yes] [--force-copy] [-h|--help]"
-            echo "  -y, --yes     Skip all interactive confirmations"
-            echo "  --force-copy  Re-copy files even when the remote already matches"
-            echo "  -h, --help    Show this help"
-            exit 0 ;;
-    esac
-done
-export FORCE_COPY
+AUTO_YES="${AUTO_YES:-false}"
+FORCE_COPY="${FORCE_COPY:-0}"
 
-# --- Prerequisite checks ---
-missing=()
-for cmd in ssh scp git; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
-done
-if [ ${#missing[@]} -gt 0 ]; then
-    echo "Error: missing required commands: ${missing[*]}"
-    exit 1
-fi
+usage() {
+    echo "Usage: deploy.sh [-y|--yes] [--force-copy] [-h|--help]"
+    echo "  -y, --yes     Skip all interactive confirmations"
+    echo "  --force-copy  Re-copy files even when the remote already matches"
+    echo "  -h, --help    Show this help"
+}
+
+parse_args() {
+    local arg
+
+    AUTO_YES=false
+    FORCE_COPY=0
+    for arg in "$@"; do
+        case "$arg" in
+            -y|--yes) AUTO_YES=true ;;
+            --force-copy) FORCE_COPY=1 ;;
+            -h|--help) usage; return 2 ;;
+            *)
+                echo "Unknown option: $arg"
+                usage
+                return 1
+                ;;
+        esac
+    done
+    export FORCE_COPY
+}
+
+check_prereqs() {
+    local missing=() cmd
+
+    for cmd in ssh scp git; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Error: missing required commands: ${missing[*]}"
+        return 1
+    fi
+}
 
 # --- Colors (respect NO_COLOR and non-tty) ---
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -85,10 +101,16 @@ copy_local_file_to_remote() {
     # over the remote path using the same shell expansion the write uses below.
     if [ "${FORCE_COPY:-0}" != 1 ]; then
         local local_sum remote_sum
-        local_sum="$(sha256sum "$local_path" 2>/dev/null | awk '{print $1}')"
+        local_sum="$(sha256_file "$local_path" 2>/dev/null || true)"
         remote_sum="$(remote_exec "
             dest=\"$remote_path\"
-            [ -f \"\$dest\" ] && sha256sum \"\$dest\" 2>/dev/null | awk '{print \$1}'
+            if [ -f \"\$dest\" ]; then
+                if command -v sha256sum >/dev/null 2>&1; then
+                    sha256sum \"\$dest\" 2>/dev/null | awk '{print \$1}'
+                elif command -v shasum >/dev/null 2>&1; then
+                    shasum -a 256 \"\$dest\" 2>/dev/null | awk '{print \$1}'
+                fi
+            fi
         " 2>/dev/null || true)"
         if [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
             echo "    (unchanged — skipping)"
@@ -100,7 +122,15 @@ copy_local_file_to_remote() {
         dest=\"$remote_path\"
         mkdir -p \"\$(dirname \"\$dest\")\" &&
         tmp=\$(mktemp) &&
-        base64 -d > \"\$tmp\" &&
+        if printf '' | base64 -d >/dev/null 2>&1; then
+            base64_decode='base64 -d'
+        elif printf '' | base64 -D >/dev/null 2>&1; then
+            base64_decode='base64 -D'
+        else
+            echo 'base64 decode is unavailable' >&2
+            exit 1
+        fi &&
+        \$base64_decode > \"\$tmp\" &&
         cat \"\$tmp\" > \"\$dest\" &&
         chmod $mode \"\$dest\" &&
         rm -f \"\$tmp\"
@@ -119,7 +149,15 @@ remote_upsert_env_exports() {
     printf "%s" "$1" | base64 | remote_exec '
         tmp_in=$(mktemp)
         tmp_out=$(mktemp)
-        base64 -d > "$tmp_in"
+        if printf "" | base64 -d >/dev/null 2>&1; then
+            base64_decode="base64 -d"
+        elif printf "" | base64 -D >/dev/null 2>&1; then
+            base64_decode="base64 -D"
+        else
+            echo "base64 decode is unavailable" >&2
+            exit 1
+        fi
+        $base64_decode > "$tmp_in"
         touch ~/.env_keys
         cp ~/.env_keys "$tmp_out"
         while IFS= read -r line; do
@@ -162,8 +200,16 @@ remote_copy_if_changed() {
     local local_path="$1" remote_path="$2"
     if [ "${FORCE_COPY:-0}" != 1 ] && [ -f "$local_path" ]; then
         local local_sum remote_sum
-        local_sum="$(sha256sum "$local_path" 2>/dev/null | awk '{print $1}')"
-        remote_sum="$(remote_exec "[ -f \"$remote_path\" ] && sha256sum \"$remote_path\" 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+        local_sum="$(sha256_file "$local_path" 2>/dev/null || true)"
+        remote_sum="$(remote_exec "
+            if [ -f \"$remote_path\" ]; then
+                if command -v sha256sum >/dev/null 2>&1; then
+                    sha256sum \"$remote_path\" 2>/dev/null | awk '{print \$1}'
+                elif command -v shasum >/dev/null 2>&1; then
+                    shasum -a 256 \"$remote_path\" 2>/dev/null | awk '{print \$1}'
+                fi
+            fi
+        " 2>/dev/null || true)"
         if [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
             echo "    (unchanged — skipping $remote_path)"
             return 0
@@ -186,11 +232,21 @@ cleanup() {
         rm -f "$SSH_SOCKET"
     fi
 }
-trap cleanup EXIT
 
 # ============================================================
 # Connection Setup
 # ============================================================
+
+deploy_main() {
+parse_args "$@"
+case "$?" in
+    0) ;;
+    2) return 0 ;;
+    *) return 1 ;;
+esac
+export AUTO_YES
+check_prereqs || return 1
+trap cleanup EXIT
 
 printf "\n${BOLD}=== Remote Server Deploy ===${RESET}\n\n"
 
@@ -215,7 +271,7 @@ echo ""
 read -rp "Auth method [1-5, default=2]: " AUTH_METHOD
 AUTH_METHOD="${AUTH_METHOD:-2}"
 # Normalize text input to number (case-insensitive)
-case "${AUTH_METHOD,,}" in
+case "$(to_lower "$AUTH_METHOD")" in
     password)       AUTH_METHOD=1 ;;
     key|ssh)        AUTH_METHOD=2 ;;
     custom)         AUTH_METHOD=3 ;;
@@ -255,7 +311,7 @@ case "$AUTH_METHOD" in
         read -rp "SSH port [22]: " SSH_PORT
         SSH_PORT="${SSH_PORT:-22}"
         CONNECT_TIMEOUT=90
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o PreferredAuthentications=keyboard-interactive,password -o NumberOfPasswordPrompts=3 -o Port="$SSH_PORT")
+        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o "PreferredAuthentications=keyboard-interactive,password" -o NumberOfPasswordPrompts=3 -o Port="$SSH_PORT")
         echo ""
         warn "2FA/DUO mode: you will be prompted for password + 2FA approval."
         echo "    Approve the push when prompted. Timeout: ${CONNECT_TIMEOUT}s."
@@ -427,7 +483,7 @@ if [ "$AUTO_YES" = false ]; then
         if [ -z "$selection" ]; then
             break
         fi
-        case "${selection,,}" in
+        case "$(to_lower "$selection")" in
             a|all)
                 for i in "${!STEPS[@]}"; do
                     [ "${STEPS_AVAILABLE[$i]}" = "yes" ] && STEPS_SELECTED[$i]="on"
@@ -516,6 +572,7 @@ step_ssh_keys() {
     # Copy known_hosts so remote trusts github.com etc.
     if [ -f ~/.ssh/known_hosts ]; then
         remote_exec "mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+        # shellcheck disable=SC2088 # Remote scp target; tilde expands on the server.
         if remote_copy_if_changed ~/.ssh/known_hosts '~/.ssh/known_hosts'; then
             remote_exec "chmod 644 ~/.ssh/known_hosts"
         else
@@ -738,4 +795,9 @@ else
     [ "$AUTH_METHOD" != "5" ] && printf " -p %s" "$SSH_PORT"
     [ -n "$IDENTITY_FILE" ] && printf " -i %s" "$IDENTITY_FILE"
     printf " %s\n" "$REMOTE_HOST"
+fi
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    deploy_main "$@"
 fi

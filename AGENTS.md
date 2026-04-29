@@ -23,16 +23,18 @@ Use the scripts directly from the repo root.
 
 - `./setup.sh` installs tools and symlinks configs into `$HOME`.
 - `./setup.sh --force` reinstalls tools even if they already exist.
+- `./setup.sh --dry-run` shows planned setup steps without changing files.
 - `./deploy.sh --help` shows deploy options for remote server setup.
 - `./deploy.sh --yes` skips confirmation prompts during deploy.
 - `./uninstall.sh --yes` removes symlinks and tool installs non-interactively.
-- `bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh` runs a syntax check.
+- `bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases` runs a syntax check.
 
 ## Script Flag Conventions
 
 | Script | Flag | Purpose |
 |--------|------|---------|
 | `setup.sh` | `--force` | Reinstall CLI tools even if already present |
+| `setup.sh` | `--dry-run`, `-n` | Show planned setup steps without changing files |
 | `deploy.sh` | `-y`, `--yes` | Skip all interactive confirmations |
 | `deploy.sh` | `--force-copy` | Re-copy files even if remote content matches |
 | `deploy.sh` | `-h`, `--help` | Show usage information |
@@ -68,9 +70,11 @@ shellcheck --severity=warning --exclude=SC1091 bashrc_exports bashrc_aliases
 ### Script changes (`setup.sh`, `deploy.sh`, `uninstall.sh`)
 
 ```bash
-bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh
-shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh
+bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+bash test_regressions.sh
 # Run affected script to smoke test
+./setup.sh --dry-run          # after setup.sh changes (safe, no side effects)
 ./setup.sh                    # after setup.sh changes
 ./deploy.sh --help            # after deploy.sh changes (safe, no side effects)
 ./uninstall.sh --help         # after uninstall.sh changes

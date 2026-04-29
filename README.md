@@ -1,6 +1,6 @@
 # server-configs
 
-Personal dotfiles and server bootstrap scripts for Linux/HPC systems.
+Personal dotfiles and server bootstrap scripts for Linux/HPC and macOS systems.
 
 ## Quickstart
 
@@ -11,7 +11,10 @@ git clone <this-repo> ~/.server-configs
 cd ~/.server-configs
 ./setup.sh               # idempotent — re-run is safe
 ./setup.sh --force       # reinstall CLI tools even if present
+./setup.sh --dry-run     # show planned steps without changing files
 ```
+
+On macOS, `setup.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
 
 ### Remote server
 
@@ -31,6 +34,15 @@ cd ~/.server-configs
 ```
 
 Restores `.bak` backups of any files that were replaced.
+
+### Validation
+
+```bash
+bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+bash test_regressions.sh
+HOME="$(mktemp -d)" ./setup.sh --dry-run
+```
 
 ---
 
