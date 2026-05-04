@@ -14,8 +14,16 @@ CODEX_CONFIG_MODE="repo"
 NVIM_MODULE=""
 CLAUDE_MODULE=""
 CODEX_MODULE=""
+GH_MODULE=""
+NODE_MODULE=""
+UV_MODULE=""
+BTOP_MODULE=""
 CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")
 CODEX_MODULE_CANDIDATES=("codex" "openai-codex")
+GH_MODULE_CANDIDATES=("gh")
+NODE_MODULE_CANDIDATES=("nodejs")
+UV_MODULE_CANDIDATES=("uv")
+BTOP_MODULE_CANDIDATES=("btop")
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 FAILURES=()
@@ -385,9 +393,14 @@ alias claude='${claude_alias}'
 alias codex='${codex_alias}'
 EOF
 
-    # If any tool was installed via module, persist module initialization once.
-    if [ -n "${NVIM_MODULE:-}" ] || [ -n "${CLAUDE_MODULE:-}" ] || [ -n "${CODEX_MODULE:-}" ]; then
-        cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
+    # Persist module loads for any tool installed via module.
+    local mod_load mod_val _any_module=false
+    for mod_load in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE; do
+        mod_val="${!mod_load:-}"
+        if [ -n "$mod_val" ]; then
+            if ! "$_any_module"; then
+                _any_module=true
+                cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
 
 # Environment modules
 if ! command -v module &>/dev/null; then
@@ -398,12 +411,7 @@ if ! command -v module &>/dev/null; then
     done
 fi
 EOF
-    fi
-
-    local mod_load mod_val
-    for mod_load in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE; do
-        mod_val="${!mod_load:-}"
-        if [ -n "$mod_val" ]; then
+            fi
             cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
 command -v module &>/dev/null && module load ${mod_val} 2>/dev/null
 EOF
@@ -676,6 +684,10 @@ install_gh_cli() {
         brew_install gh gh
         return $?
     fi
+    if is_chpc; then
+        try_chpc_module_load gh "GitHub CLI" GH_MODULE "${GH_MODULE_CANDIDATES[@]}"
+        return
+    fi
     if command -v gh &>/dev/null && ! $FORCE; then
         record_command_if_managed gh || true
         echo "gh already installed: $(gh --version | head -1)"
@@ -759,6 +771,10 @@ install_node() {
         brew_install node node
         return $?
     fi
+    if is_chpc; then
+        try_chpc_module_load node "Node.js" NODE_MODULE "${NODE_MODULE_CANDIDATES[@]}"
+        return
+    fi
     if command -v node &>/dev/null && ! $FORCE; then
         local cur_major
         cur_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
@@ -826,6 +842,10 @@ install_uv() {
     if is_macos; then
         brew_install uv uv
         return $?
+    fi
+    if is_chpc; then
+        try_chpc_module_load uv "uv" UV_MODULE "${UV_MODULE_CANDIDATES[@]}"
+        return
     fi
     if command -v uv &>/dev/null && ! $FORCE; then
         record_command_if_managed uv || true
@@ -1026,7 +1046,9 @@ install_gh_tools() {
             "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
     else FAILURES+=("lazygit"); fi
 
-    if V="$(gh_latest aristocratos/btop)"; then
+    if is_chpc; then
+        run_step "btop" try_chpc_module_load btop "btop" BTOP_MODULE "${BTOP_MODULE_CANDIDATES[@]}"
+    elif V="$(gh_latest aristocratos/btop)"; then
         run_step "btop" install_gh_binary btop \
             "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
     else FAILURES+=("btop"); fi
@@ -1178,6 +1200,10 @@ setup_main() {
     NVIM_MODULE=""
     CLAUDE_MODULE=""
     CODEX_MODULE=""
+    GH_MODULE=""
+    NODE_MODULE=""
+    UV_MODULE=""
+    BTOP_MODULE=""
 
     for arg in "$@"; do
         case "$arg" in
