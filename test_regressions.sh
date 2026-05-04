@@ -124,6 +124,115 @@ test_deploy_sources_without_prompting() (
     command -v deploy_main >/dev/null || fail "deploy_main missing after source"
 )
 
+test_auth_state_helpers() (
+    local tmp state quoted quoted_value
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export PATH="$tmp/bin:/usr/bin:/bin"
+    unset GH_CONFIG_DIR XDG_CONFIG_HOME CLAUDE_CONFIG_DIR CODEX_HOME
+    unset ANTHROPIC_API_KEY OPENAI_API_KEY GH_STATUS_EXIT GH_TOKEN_VALUE CLAUDE_STATUS_EXIT
+    mkdir -p "$HOME" "$tmp/bin"
+
+    # shellcheck source=deploy.sh
+    . "$DIR/deploy.sh"
+
+    quoted="$(shell_quote_env_value "alpha'beta")"
+    eval "quoted_value=$quoted"
+    [ "$quoted_value" = "alpha'beta" ] ||
+        fail "shell_quote_env_value did not preserve apostrophes"
+
+    [ "$(local_gh_config_dir)" = "$HOME/.config/gh" ] ||
+        fail "local_gh_config_dir did not default to ~/.config/gh"
+    export XDG_CONFIG_HOME="$tmp/xdg"
+    [ "$(local_gh_config_dir)" = "$tmp/xdg/gh" ] ||
+        fail "local_gh_config_dir did not honor XDG_CONFIG_HOME"
+    export GH_CONFIG_DIR="$tmp/gh-config"
+    [ "$(local_gh_config_dir)" = "$tmp/gh-config" ] ||
+        fail "local_gh_config_dir did not honor GH_CONFIG_DIR"
+
+    state="$(auth_state_gh "$tmp/missing-hosts.yml")"
+    [ "$(auth_state_status "$state")" = "missing" ] ||
+        fail "auth_state_gh should be missing without gh"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'case "$1 $2" in' \
+        '  "auth status") exit "${GH_STATUS_EXIT:-0}" ;;' \
+        '  "auth token") [ -n "${GH_TOKEN_VALUE:-}" ] && printf "%s\n" "$GH_TOKEN_VALUE"; exit 0 ;;' \
+        '  *) exit 1 ;;' \
+        'esac' > "$tmp/bin/gh"
+    chmod +x "$tmp/bin/gh"
+
+    export GH_STATUS_EXIT=1
+    state="$(auth_state_gh "$tmp/missing-hosts.yml")"
+    [ "$(auth_state_status "$state")" = "missing" ] ||
+        fail "auth_state_gh should be missing when gh is unauthenticated"
+
+    export GH_STATUS_EXIT=0 GH_TOKEN_VALUE=secret-token
+    state="$(auth_state_gh "$tmp/missing-hosts.yml")"
+    [ "$(auth_state_status "$state")" = "deployable" ] &&
+        printf '%s\n' "$state" | grep -q 'gh auth token' ||
+        fail "auth_state_gh should prefer gh auth token"
+
+    unset GH_TOKEN_VALUE
+    mkdir -p "$(dirname "$(local_gh_hosts_file)")"
+    printf 'github.com:\n    oauth_token: secret-token\n' > "$(local_gh_hosts_file)"
+    state="$(auth_state_gh "$(local_gh_hosts_file)")"
+    [ "$(auth_state_status "$state")" = "deployable" ] &&
+        printf '%s\n' "$state" | grep -q 'hosts.yml' ||
+        fail "auth_state_gh should fall back to plaintext hosts.yml token"
+
+    rm -f "$(local_gh_hosts_file)"
+    state="$(auth_state_gh "$(local_gh_hosts_file)")"
+    [ "$(auth_state_status "$state")" = "blocked" ] ||
+        fail "auth_state_gh should be blocked for keychain-only auth with unreadable token"
+
+    export CLAUDE_CONFIG_DIR="$tmp/claude"
+    state="$(auth_state_claude)"
+    [ "$(auth_state_status "$state")" = "missing" ] ||
+        fail "auth_state_claude should be missing without file or CLI login"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'case "$1 $2" in' \
+        '  "auth status") exit "${CLAUDE_STATUS_EXIT:-0}" ;;' \
+        '  *) exit 1 ;;' \
+        'esac' > "$tmp/bin/claude"
+    chmod +x "$tmp/bin/claude"
+
+    export CLAUDE_STATUS_EXIT=0
+    state="$(auth_state_claude)"
+    [ "$(auth_state_status "$state")" = "blocked" ] ||
+        fail "auth_state_claude should be blocked for login without credentials file"
+
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+    printf '{}\n' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+    state="$(auth_state_claude)"
+    [ "$(auth_state_status "$state")" = "deployable" ] ||
+        fail "auth_state_claude should be deployable when credentials file exists"
+
+    export CODEX_HOME="$tmp/codex"
+    state="$(auth_state_codex)"
+    [ "$(auth_state_status "$state")" = "missing" ] ||
+        fail "auth_state_codex should be missing without auth.json"
+    mkdir -p "$CODEX_HOME"
+    printf '{}\n' > "$CODEX_HOME/auth.json"
+    state="$(auth_state_codex)"
+    [ "$(auth_state_status "$state")" = "deployable" ] ||
+        fail "auth_state_codex should be deployable with auth.json"
+
+    state="$(auth_state_api_keys)"
+    [ "$(auth_state_status "$state")" = "missing" ] ||
+        fail "auth_state_api_keys should be missing without env vars"
+    export OPENAI_API_KEY=test-key
+    state="$(auth_state_api_keys)"
+    [ "$(auth_state_status "$state")" = "deployable" ] &&
+        printf '%s\n' "$state" | grep -q 'OPENAI_API_KEY' ||
+        fail "auth_state_api_keys should list deployable key names"
+)
+
 test_setup_dry_run_is_non_mutating() (
     local tmp output
     tmp="$(mktemp -d)"
@@ -149,6 +258,7 @@ main() {
     test_manifest_controls_uninstall
     test_scripts_source_without_side_effects
     test_deploy_sources_without_prompting
+    test_auth_state_helpers
     test_setup_dry_run_is_non_mutating
     test_pre_commit_no_staged_files
     echo "All regression tests passed."

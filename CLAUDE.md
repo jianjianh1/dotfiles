@@ -64,7 +64,7 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ./deploy.sh --yes        # accept defaults, skip confirmations
 ```
 
-Auth files (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.config/gh/hosts.yml`) are copied from the local machine to the remote — they are **never** committed to this repo (see `.gitignore`).
+Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.codex/auth.json`) from the local machine to the remote. GitHub CLI auth is recreated from the local `gh auth token` before cloning, with `hosts.yml` used only as a plaintext-token fallback. Keychain-backed Claude auth is reported as non-transferable and must be set up on the remote with `claude auth login` or `claude setup-token`. Auth material is **never** committed to this repo (see `.gitignore`).
 
 ## Vim & Neovim
 

@@ -8,6 +8,7 @@
 # Auth / secret material — never commit
 .credentials.json
 auth.json
+hosts.yml
 *.pem
 *.key
 *.keystore

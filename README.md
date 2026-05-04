@@ -26,6 +26,8 @@ On macOS, `setup.sh` uses Homebrew for managed CLI tools when `brew` is already 
 
 `deploy.sh` authenticates once via SSH ControlMaster, then multiplexes all subsequent commands. Supports password, SSH key, custom key path, 2FA/DUO, and SSH config aliases. Use `--help` for full usage.
 
+GitHub CLI auth is recreated on the remote from the local `gh auth token` before cloning, bootstrapping `gh` to `~/.local/bin` on Linux remotes when needed. If the token is already stored in plaintext locally, `deploy.sh` can fall back to copying `hosts.yml`. Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.codex/auth.json`); keychain-backed Claude auth is reported as non-transferable and must be set up on the remote with `claude auth login` or `claude setup-token`.
+
 ### Uninstall
 
 ```bash

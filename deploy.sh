@@ -38,7 +38,7 @@ parse_args() {
 check_prereqs() {
     local missing=() cmd
 
-    for cmd in ssh scp git; do
+    for cmd in ssh scp git base64; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [ ${#missing[@]} -gt 0 ]; then
@@ -89,6 +89,96 @@ local_codex_auth_file() {
     printf "%s/auth.json" "${CODEX_HOME:-$HOME/.codex}"
 }
 
+local_gh_config_dir() {
+    if [ -n "${GH_CONFIG_DIR:-}" ]; then
+        printf "%s" "$GH_CONFIG_DIR"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        printf "%s/gh" "$XDG_CONFIG_HOME"
+    else
+        printf "%s/.config/gh" "$HOME"
+    fi
+}
+
+local_gh_hosts_file() {
+    printf "%s/hosts.yml" "$(local_gh_config_dir)"
+}
+
+local_gh_hosts_has_token() {
+    local hosts_file="$1"
+
+    [ -f "$hosts_file" ] || return 1
+    grep -q '^[[:space:]]*oauth_token:' "$hosts_file"
+}
+
+local_gh_token_available() {
+    command -v gh >/dev/null 2>&1 || return 1
+    [ -n "$(gh auth token 2>/dev/null || true)" ]
+}
+
+auth_state_gh() {
+    local hosts_file="${1:-$(local_gh_hosts_file)}"
+
+    if ! command -v gh >/dev/null 2>&1; then
+        printf "missing|gh CLI not installed locally"
+    elif ! gh auth status >/dev/null 2>&1; then
+        printf "missing|gh CLI is not authenticated locally"
+    elif local_gh_token_available; then
+        printf "deployable|token from gh auth token -> gh auth login --with-token on remote"
+    elif local_gh_hosts_has_token "$hosts_file"; then
+        printf "deployable|plaintext hosts.yml -> \$HOME/.config/gh/hosts.yml"
+    else
+        printf "blocked|gh is authenticated, but no readable token or plaintext hosts.yml token is available"
+    fi
+}
+
+auth_state_claude() {
+    local credentials_file="${1:-$(local_claude_credentials_file)}"
+
+    if [ -f "$credentials_file" ]; then
+        printf "deployable|%s -> \$HOME/.claude/.credentials.json" "$credentials_file"
+    elif command -v claude >/dev/null 2>&1 && claude auth status >/dev/null 2>&1; then
+        printf "blocked|Claude is logged in locally, but auth is not in a copyable credentials file; run 'claude auth login' or 'claude setup-token' on the remote"
+    else
+        printf "missing|Claude credentials file not found at %s" "$credentials_file"
+    fi
+}
+
+auth_state_codex() {
+    local auth_file="${1:-$(local_codex_auth_file)}"
+
+    if [ -f "$auth_file" ]; then
+        printf "deployable|%s -> \$HOME/.codex/auth.json" "$auth_file"
+    else
+        printf "missing|Codex auth file not found at %s" "$auth_file"
+    fi
+}
+
+auth_state_api_keys() {
+    local names=()
+
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && names+=("ANTHROPIC_API_KEY")
+    [ -n "${OPENAI_API_KEY:-}" ] && names+=("OPENAI_API_KEY")
+    if [ ${#names[@]} -gt 0 ]; then
+        printf "deployable|%s -> \$HOME/.env_keys" "${names[*]}"
+    else
+        printf "missing|ANTHROPIC_API_KEY and OPENAI_API_KEY are not set"
+    fi
+}
+
+auth_state_status() {
+    printf "%s" "$1" | cut -d '|' -f 1
+}
+
+auth_state_detail() {
+    printf "%s" "$1" | cut -d '|' -f 2-
+}
+
+shell_quote_env_value() {
+    printf "'"
+    printf "%s" "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
 copy_local_file_to_remote() {
     local local_path="$1"
     local remote_path="$2"
@@ -119,9 +209,14 @@ copy_local_file_to_remote() {
     fi
 
     base64 < "$local_path" | remote_exec "
+        set -eu
+        umask 077
         dest=\"$remote_path\"
-        mkdir -p \"\$(dirname \"\$dest\")\" &&
-        tmp=\$(mktemp) &&
+        dest_dir=\$(dirname \"\$dest\")
+        mkdir -p \"\$dest_dir\" || exit 1
+        tmp=\$(mktemp \"\$dest_dir/.deploy.XXXXXX\") || exit 1
+        cleanup_tmp() { rm -f \"\$tmp\"; }
+        trap cleanup_tmp EXIT HUP INT TERM
         if printf '' | base64 -d >/dev/null 2>&1; then
             base64_decode='base64 -d'
         elif printf '' | base64 -D >/dev/null 2>&1; then
@@ -129,11 +224,14 @@ copy_local_file_to_remote() {
         else
             echo 'base64 decode is unavailable' >&2
             exit 1
-        fi &&
+        fi
         \$base64_decode > \"\$tmp\" &&
-        cat \"\$tmp\" > \"\$dest\" &&
-        chmod $mode \"\$dest\" &&
-        rm -f \"\$tmp\"
+        chmod $mode \"\$tmp\" &&
+        mv -f \"\$tmp\" \"\$dest\"
+        status=\$?
+        [ \$status -eq 0 ] || cleanup_tmp
+        trap - EXIT HUP INT TERM
+        exit \$status
     "
 }
 
@@ -147,8 +245,15 @@ ensure_remote_env_keys_loader() {
 
 remote_upsert_env_exports() {
     printf "%s" "$1" | base64 | remote_exec '
-        tmp_in=$(mktemp)
-        tmp_out=$(mktemp)
+        set -eu
+        umask 077
+        dest="$HOME/.env_keys"
+        dest_dir=$(dirname "$dest")
+        mkdir -p "$dest_dir"
+        tmp_in=$(mktemp "$dest_dir/.env_keys.in.XXXXXX")
+        tmp_out=$(mktemp "$dest_dir/.env_keys.out.XXXXXX")
+        cleanup_tmp() { rm -f "$tmp_in" "$tmp_out" "${tmp_out}.next"; }
+        trap cleanup_tmp EXIT HUP INT TERM
         if printf "" | base64 -d >/dev/null 2>&1; then
             base64_decode="base64 -d"
         elif printf "" | base64 -D >/dev/null 2>&1; then
@@ -158,8 +263,9 @@ remote_upsert_env_exports() {
             exit 1
         fi
         $base64_decode > "$tmp_in"
-        touch ~/.env_keys
-        cp ~/.env_keys "$tmp_out"
+        touch "$dest"
+        chmod 600 "$dest"
+        cp "$dest" "$tmp_out"
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             var=${line#export }
@@ -168,9 +274,12 @@ remote_upsert_env_exports() {
             mv "${tmp_out}.next" "$tmp_out"
             printf "%s\n" "$line" >> "$tmp_out"
         done < "$tmp_in"
-        mv "$tmp_out" ~/.env_keys
-        chmod 600 ~/.env_keys
-        rm -f "$tmp_in"
+        chmod 600 "$tmp_out"
+        mv "$tmp_out" "$dest"
+        status=$?
+        [ $status -eq 0 ] || cleanup_tmp
+        trap - EXIT HUP INT TERM
+        exit $status
     '
 }
 
@@ -224,6 +333,43 @@ remote_claude_supports_print() {
 
 remote_codex_supports_login_status() {
     remote_exec "codex login --help 2>/dev/null | grep -q '^[[:space:]]*status[[:space:]]'"
+}
+
+bootstrap_remote_gh_cli() {
+    remote_exec '
+        if command -v gh >/dev/null 2>&1; then
+            exit 0
+        fi
+
+        if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+            echo "curl and tar are required to bootstrap gh" >&2
+            exit 1
+        fi
+
+        os="$(uname -s 2>/dev/null || true)"
+        arch="$(uname -m 2>/dev/null || true)"
+        case "$os:$arch" in
+            Linux:x86_64|Linux:amd64) gh_arch=amd64 ;;
+            Linux:aarch64|Linux:arm64) gh_arch=arm64 ;;
+            *) echo "unsupported remote platform for gh bootstrap: $os $arch" >&2; exit 1 ;;
+        esac
+
+        tmp="$(mktemp -d)"
+        trap '\''rm -rf "$tmp"'\'' EXIT
+        latest_url="$(curl -fsIL -o /dev/null -w "%{url_effective}" https://github.com/cli/cli/releases/latest)"
+        version="${latest_url##*/v}"
+        case "$version" in
+            ""|"$latest_url") echo "could not determine latest gh version" >&2; exit 1 ;;
+        esac
+
+        mkdir -p "$HOME/.local/bin"
+        curl -sfL -o "$tmp/gh.tar.gz" "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_linux_${gh_arch}.tar.gz"
+        tar -xzf "$tmp/gh.tar.gz" -C "$tmp"
+        bin="$(find "$tmp" -type f -path "*/bin/gh" | head -1)"
+        [ -n "$bin" ] || { echo "gh binary not found in archive" >&2; exit 1; }
+        cp "$bin" "$HOME/.local/bin/gh"
+        chmod 755 "$HOME/.local/bin/gh"
+    '
 }
 
 cleanup() {
@@ -399,31 +545,58 @@ for f in ~/.ssh/id_*.pub; do
 done
 
 # GitHub CLI
+LOCAL_GH_HOSTS_FILE="$(local_gh_hosts_file)"
+GH_AUTH_STATE="$(auth_state_gh "$LOCAL_GH_HOSTS_FILE")"
+GH_AUTH_STATUS="$(auth_state_status "$GH_AUTH_STATE")"
+GH_AUTH_DETAIL="$(auth_state_detail "$GH_AUTH_STATE")"
 HAS_GH_AUTH=false
-if command -v gh &>/dev/null && gh auth status &>/dev/null; then
-    HAS_GH_AUTH=true
-fi
+[ "$GH_AUTH_STATUS" = "deployable" ] && HAS_GH_AUTH=true
 
 # Claude Code
 LOCAL_CLAUDE_CREDENTIALS_FILE="$(local_claude_credentials_file)"
+CLAUDE_AUTH_STATE="$(auth_state_claude "$LOCAL_CLAUDE_CREDENTIALS_FILE")"
+CLAUDE_AUTH_STATUS="$(auth_state_status "$CLAUDE_AUTH_STATE")"
+CLAUDE_AUTH_DETAIL="$(auth_state_detail "$CLAUDE_AUTH_STATE")"
 HAS_CLAUDE_AUTH=false
-[ -f "$LOCAL_CLAUDE_CREDENTIALS_FILE" ] && HAS_CLAUDE_AUTH=true
+[ "$CLAUDE_AUTH_STATUS" = "deployable" ] && HAS_CLAUDE_AUTH=true
 
 # Codex
 LOCAL_CODEX_AUTH_FILE="$(local_codex_auth_file)"
+CODEX_AUTH_STATE="$(auth_state_codex "$LOCAL_CODEX_AUTH_FILE")"
+CODEX_AUTH_STATUS="$(auth_state_status "$CODEX_AUTH_STATE")"
+CODEX_AUTH_DETAIL="$(auth_state_detail "$CODEX_AUTH_STATE")"
 HAS_CODEX_AUTH=false
-[ -f "$LOCAL_CODEX_AUTH_FILE" ] && HAS_CODEX_AUTH=true
+[ "$CODEX_AUTH_STATUS" = "deployable" ] && HAS_CODEX_AUTH=true
 
 # API keys
+API_KEYS_STATE="$(auth_state_api_keys)"
+API_KEYS_STATUS="$(auth_state_status "$API_KEYS_STATE")"
+API_KEYS_DETAIL="$(auth_state_detail "$API_KEYS_STATE")"
 HAS_API_KEYS=false
-{ [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; } && HAS_API_KEYS=true
+[ "$API_KEYS_STATUS" = "deployable" ] && HAS_API_KEYS=true
 
 # Print scan results
 [ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && success "${#LOCAL_SSH_KEYS[@]} SSH key pair(s) found" || warn "No SSH keys found"
-[ "$HAS_GH_AUTH" = true ]      && success "GitHub CLI authenticated" || printf "  ${DIM}- GitHub CLI: not found${RESET}\n"
-[ "$HAS_CLAUDE_AUTH" = true ]  && success "Claude Code auth file found ($LOCAL_CLAUDE_CREDENTIALS_FILE)" || warn "Claude Code auth file not found at $LOCAL_CLAUDE_CREDENTIALS_FILE"
-[ "$HAS_CODEX_AUTH" = true ]   && success "Codex auth file found ($LOCAL_CODEX_AUTH_FILE)" || warn "Codex auth file not found at $LOCAL_CODEX_AUTH_FILE"
-[ "$HAS_API_KEYS" = true ]     && success "API keys detected in env" || printf "  ${DIM}- API keys: not set${RESET}\n"
+case "$GH_AUTH_STATUS" in
+    deployable) success "GitHub CLI auth deployable ($GH_AUTH_DETAIL)" ;;
+    blocked) warn "GitHub CLI auth not transferable: $GH_AUTH_DETAIL" ;;
+    *) printf "  ${DIM}- GitHub CLI auth: %s${RESET}\n" "$GH_AUTH_DETAIL" ;;
+esac
+case "$CLAUDE_AUTH_STATUS" in
+    deployable) success "Claude Code auth deployable ($CLAUDE_AUTH_DETAIL)" ;;
+    blocked) warn "Claude Code auth not transferable: $CLAUDE_AUTH_DETAIL" ;;
+    *) printf "  ${DIM}- Claude Code auth: %s${RESET}\n" "$CLAUDE_AUTH_DETAIL" ;;
+esac
+case "$CODEX_AUTH_STATUS" in
+    deployable) success "Codex auth deployable ($CODEX_AUTH_DETAIL)" ;;
+    blocked) warn "Codex auth not transferable: $CODEX_AUTH_DETAIL" ;;
+    *) printf "  ${DIM}- Codex auth: %s${RESET}\n" "$CODEX_AUTH_DETAIL" ;;
+esac
+case "$API_KEYS_STATUS" in
+    deployable) success "API keys deployable ($API_KEYS_DETAIL)" ;;
+    blocked) warn "API keys not transferable: $API_KEYS_DETAIL" ;;
+    *) printf "  ${DIM}- API keys: %s${RESET}\n" "$API_KEYS_DETAIL" ;;
+esac
 
 # ============================================================
 # Step Selection Menu
@@ -441,8 +614,8 @@ add_step() {
 }
 
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
-add_step "Clone repo & setup.sh" "yes"                                                      "on"
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
+add_step "Clone repo & setup.sh" "yes"                                                      "on"
 add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
@@ -546,6 +719,39 @@ case "$AUTH_METHOD" in
     5) echo "SSH config alias" ;;
 esac
 echo "  Steps:   ${selected_names[*]}"
+echo "  Auth transfer:"
+auth_transfer_count=0
+if [ "${STEPS_SELECTED[0]}" = "on" ]; then
+    echo "    - SSH public key authorization via ssh-copy-id"
+    if [ -f ~/.ssh/known_hosts ]; then
+        echo "    - ~/.ssh/known_hosts -> \$HOME/.ssh/known_hosts"
+    fi
+    echo "    - Private SSH keys: never copied"
+    auth_transfer_count=$((auth_transfer_count + 1))
+fi
+if [ "${STEPS_SELECTED[1]}" = "on" ]; then
+    echo "    - GitHub CLI: $GH_AUTH_DETAIL"
+    echo "      verify: gh auth status"
+    auth_transfer_count=$((auth_transfer_count + 1))
+fi
+if [ "${STEPS_SELECTED[3]}" = "on" ]; then
+    echo "    - Claude Code: $CLAUDE_AUTH_DETAIL"
+    echo "      verify: claude auth status / claude -p 'ping'"
+    auth_transfer_count=$((auth_transfer_count + 1))
+fi
+if [ "${STEPS_SELECTED[4]}" = "on" ]; then
+    echo "    - Codex: $CODEX_AUTH_DETAIL"
+    echo "      verify: codex login status"
+    auth_transfer_count=$((auth_transfer_count + 1))
+fi
+if [ "${STEPS_SELECTED[5]}" = "on" ]; then
+    echo "    - API keys: $API_KEYS_DETAIL"
+    echo "      values are never printed"
+    auth_transfer_count=$((auth_transfer_count + 1))
+fi
+if [ "$auth_transfer_count" -eq 0 ]; then
+    echo "    - none selected"
+fi
 echo ""
 
 if ! confirm "Proceed?" "y"; then
@@ -587,21 +793,54 @@ step_ssh_keys() {
 
 step_gh_auth() {
     section "GitHub CLI Auth"
-    if [ ! -f "$HOME/.config/gh/hosts.yml" ]; then
-        error "Local gh credentials file not found"
+    local gh_token=""
+
+    if [ "${GH_AUTH_STATUS:-missing}" != "deployable" ]; then
+        error "GitHub CLI auth is not deployable"
+        echo "    ${GH_AUTH_DETAIL:-not detected}"
+        return 1
+    fi
+
+    if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null; then
+        error "Local gh is not authenticated"
+        echo "    Run 'gh auth login' locally first."
         return 1
     fi
 
     if ! remote_exec "command -v gh &>/dev/null"; then
-        error "GitHub CLI not found on remote"
-        echo "    Run the clone/setup step before GitHub CLI auth."
+        echo "  GitHub CLI not found on remote; bootstrapping to ~/.local/bin..."
+        if ! bootstrap_remote_gh_cli; then
+            error "GitHub CLI not found on remote and bootstrap failed"
+            echo "    Install gh on the remote manually or skip this step."
+            return 1
+        fi
+    fi
+
+    if ! remote_exec "command -v gh &>/dev/null"; then
+        error "GitHub CLI not found on remote after bootstrap"
         return 1
     fi
 
-    if copy_local_file_to_remote "$HOME/.config/gh/hosts.yml" '$HOME/.config/gh/hosts.yml' 600; then
-        remote_exec "chmod 700 ~/.config ~/.config/gh 2>/dev/null || true"
+    gh_token="$(gh auth token 2>/dev/null || true)"
+    if [ -n "$gh_token" ] && printf "%s\n" "$gh_token" | remote_exec "
+        set -u
+        umask 077
+        mkdir -p \"\$HOME/.config/gh\" || exit 1
+        chmod 700 \"\$HOME/.config\" \"\$HOME/.config/gh\" 2>/dev/null || true
+        GH_PROMPT_DISABLED=1 gh auth login --hostname github.com --git-protocol https --with-token >/dev/null
+        gh auth setup-git >/dev/null 2>&1 || true
+    "; then
+        :
+    elif local_gh_hosts_has_token "$LOCAL_GH_HOSTS_FILE" &&
+        copy_local_file_to_remote "$LOCAL_GH_HOSTS_FILE" '$HOME/.config/gh/hosts.yml' 600; then
+        remote_exec "
+            set -u
+            chmod 700 \"\$HOME/.config\" \"\$HOME/.config/gh\" 2>/dev/null || true
+            gh auth setup-git >/dev/null 2>&1 || true
+        "
     else
         error "Failed to copy GitHub CLI auth"
+        echo "    Local gh token is not readable, and $LOCAL_GH_HOSTS_FILE has no plaintext token fallback."
         return 1
     fi
 
@@ -615,6 +854,12 @@ step_gh_auth() {
 
 step_claude_auth() {
     section "Claude Code Auth"
+
+    if [ "${CLAUDE_AUTH_STATUS:-missing}" != "deployable" ]; then
+        error "Claude Code auth is not deployable"
+        echo "    ${CLAUDE_AUTH_DETAIL:-not detected}"
+        return 1
+    fi
 
     if [ ! -f "$LOCAL_CLAUDE_CREDENTIALS_FILE" ]; then
         error "Local Claude Code auth file not found"
@@ -654,6 +899,12 @@ step_claude_auth() {
 
 step_codex_auth() {
     section "Codex Auth"
+    if [ "${CODEX_AUTH_STATUS:-missing}" != "deployable" ]; then
+        error "Codex auth is not deployable"
+        echo "    ${CODEX_AUTH_DETAIL:-not detected}"
+        return 1
+    fi
+
     if [ ! -f "$LOCAL_CODEX_AUTH_FILE" ]; then
         error "Local Codex auth file not found"
         echo "    Expected: $LOCAL_CODEX_AUTH_FILE"
@@ -694,12 +945,18 @@ step_api_keys() {
     section "API Keys"
 
     local env_keys=""
+    if [ "${API_KEYS_STATUS:-missing}" != "deployable" ]; then
+        error "API keys are not deployable"
+        echo "    ${API_KEYS_DETAIL:-not detected}"
+        return 1
+    fi
+
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        env_keys+="export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY//\'/\'\\\'\'}'"$'\n'
+        env_keys+="export ANTHROPIC_API_KEY=$(shell_quote_env_value "$ANTHROPIC_API_KEY")"$'\n'
         echo "  • ANTHROPIC_API_KEY"
     fi
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        env_keys+="export OPENAI_API_KEY='${OPENAI_API_KEY//\'/\'\\\'\'}'"$'\n'
+        env_keys+="export OPENAI_API_KEY=$(shell_quote_env_value "$OPENAI_API_KEY")"$'\n'
         echo "  • OPENAI_API_KEY"
     fi
 
@@ -770,8 +1027,8 @@ step_clone_setup() {
 echo ""
 
 [ "${STEPS_SELECTED[0]}" = "on" ] && run_step "SSH keys"         step_ssh_keys
-[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
-[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
+[ "${STEPS_SELECTED[1]}" = "on" ] && run_step "GitHub CLI auth"  step_gh_auth
+[ "${STEPS_SELECTED[2]}" = "on" ] && run_step "Clone & setup"    step_clone_setup
 [ "${STEPS_SELECTED[3]}" = "on" ] && run_step "Claude Code auth" step_claude_auth
 [ "${STEPS_SELECTED[4]}" = "on" ] && run_step "Codex auth"       step_codex_auth
 [ "${STEPS_SELECTED[5]}" = "on" ] && run_step "API keys"         step_api_keys
