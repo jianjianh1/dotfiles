@@ -246,6 +246,114 @@ test_setup_dry_run_is_non_mutating() (
         fail "setup.sh --dry-run created generated state"
 )
 
+test_chpc_config_rendering_is_safe_without_tools() (
+    local tmp claude_cfg codex_cfg bash_compat
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export HOSTNAME="login1.chpc.utah.edu"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    mkdir -p "$HOME"
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+    mkdir -p "$GENERATED_DIR"
+    render_compat_configs
+
+    claude_cfg="$GENERATED_DIR/claude_settings.json"
+    codex_cfg="$GENERATED_DIR/codex_config.toml"
+    bash_compat="$GENERATED_DIR/bashrc_compat"
+
+    [ "$CLAUDE_SETTINGS_MODE" = "chpc" ] ||
+        fail "CHPC Claude settings should be generated even when claude is missing"
+    [ "$CODEX_CONFIG_MODE" = "chpc" ] ||
+        fail "CHPC Codex config should be generated even when codex is missing"
+
+    grep -q '"defaultMode": "default"' "$claude_cfg" ||
+        fail "CHPC Claude settings should use default permission mode"
+    grep -q '"skipDangerousModePermissionPrompt": false' "$claude_cfg" ||
+        fail "CHPC Claude settings should not skip dangerous prompts"
+    grep -q '"sandbox": { "enabled": true' "$claude_cfg" ||
+        fail "CHPC Claude settings should enable sandboxing"
+
+    grep -q 'approval_policy = "untrusted"' "$codex_cfg" ||
+        fail "CHPC Codex config should require approval for untrusted commands"
+    grep -q 'sandbox_mode = "workspace-write"' "$codex_cfg" ||
+        fail "CHPC Codex config should use a valid workspace sandbox mode"
+
+    grep -q "alias claude='claude'" "$bash_compat" ||
+        fail "CHPC bash compat should not add dangerous Claude alias flags"
+    grep -q "alias codex='codex'" "$bash_compat" ||
+        fail "CHPC bash compat should not add dangerous Codex alias flags"
+)
+
+test_chpc_module_loads_initialize_module_command() (
+    local tmp bash_compat init_line claude_line codex_line
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export HOSTNAME="login1.chpc.utah.edu"
+    mkdir -p "$HOME"
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+    mkdir -p "$GENERATED_DIR"
+    CLAUDE_MODULE="claude-code"
+    CODEX_MODULE="codex"
+    render_bash_compat
+
+    bash_compat="$GENERATED_DIR/bashrc_compat"
+    init_line="$(grep -n 'for init in /etc/profile.d/modules.sh' "$bash_compat" | cut -d: -f1)"
+    claude_line="$(grep -n 'module load claude-code' "$bash_compat" | cut -d: -f1)"
+    codex_line="$(grep -n 'module load codex' "$bash_compat" | cut -d: -f1)"
+
+    [ -n "$init_line" ] || fail "module initialization block missing"
+    [ -n "$claude_line" ] || fail "Claude module load missing"
+    [ -n "$codex_line" ] || fail "Codex module load missing"
+    [ "$init_line" -lt "$claude_line" ] ||
+        fail "Claude module load should come after module initialization"
+    [ "$init_line" -lt "$codex_line" ] ||
+        fail "Codex module load should come after module initialization"
+)
+
+test_chpc_mcp_skip_and_override() (
+    local tmp output
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export HOSTNAME="login1.chpc.utah.edu"
+    export PATH="$tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    mkdir -p "$HOME" "$tmp/bin"
+
+    output="$(bash "$DIR/install_claude_plugins.sh" 2>&1)" ||
+        fail "CHPC MCP default skip should exit successfully"
+    printf '%s\n' "$output" | grep -q 'CHPC detected: skipping MCP server installation.' ||
+        fail "CHPC MCP default run should skip"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'case "$1" in' \
+        '  --version) printf "fake claude\n"; exit 0 ;;' \
+        '  mcp) [ "${2:-}" = "--help" ] && exit 1; [ "${2:-}" = "list" ] && exit 0; exit 1 ;;' \
+        '  plugin|plugins) [ "${2:-}" = "--help" ] && exit 1; exit 1 ;;' \
+        '  *) exit 1 ;;' \
+        'esac' > "$tmp/bin/claude"
+    chmod +x "$tmp/bin/claude"
+
+    output="$(bash "$DIR/install_claude_plugins.sh" --allow-chpc 2>&1)" ||
+        fail "CHPC MCP --allow-chpc should continue with fake Claude: $output"
+    printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
+        fail "CHPC MCP --allow-chpc did not continue past CHPC guard"
+
+    output="$(SERVER_CONFIGS_ALLOW_CHPC_MCP=true bash "$DIR/install_claude_plugins.sh" 2>&1)" ||
+        fail "CHPC MCP env override should continue with fake Claude: $output"
+    printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
+        fail "CHPC MCP env override did not continue past CHPC guard"
+)
+
 test_pre_commit_no_staged_files() (
     git -C "$DIR" diff --cached --quiet || return 0
     "$DIR/.githooks/pre-commit" || fail "pre-commit failed with no staged files"
@@ -260,6 +368,9 @@ main() {
     test_deploy_sources_without_prompting
     test_auth_state_helpers
     test_setup_dry_run_is_non_mutating
+    test_chpc_config_rendering_is_safe_without_tools
+    test_chpc_module_loads_initialize_module_command
+    test_chpc_mcp_skip_and_override
     test_pre_commit_no_staged_files
     echo "All regression tests passed."
 }

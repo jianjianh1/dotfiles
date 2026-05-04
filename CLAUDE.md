@@ -82,6 +82,24 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 - **Indentation**: vimrc defaults to 4-space tabs; web filetypes (html/css/js/ts/json/yaml) use 2-space via autocmd. Neovim adds `lua` to the 2-space list.
 - Glow is used for markdown preview in vim (`<leader>m`).
 
+## CHPC (Center for High Performance Computing)
+
+`is_chpc()` in `lib/common.sh` detects CHPC systems via hostname (`*.chpc.utah.edu`) or path (`/uufs/chpc.utah.edu`). When on CHPC, `setup.sh` automatically:
+
+- Uses `module load` for Claude Code and Codex instead of self-installing
+- Generates CHPC-safe agent settings even if the CLIs are not currently installed or loaded
+- Uses approval-required, sandboxed defaults (`default` mode for Claude, `untrusted`/`workspace-write` for Codex)
+- Skips MCP server installation by default (`install_claude_plugins.sh` — needs CHPC approval first)
+
+**Module name placeholders** — update in `setup.sh` after confirming on CHPC:
+
+```bash
+CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")   # check with: module spider claude
+CODEX_MODULE_CANDIDATES=("codex" "openai-codex")    # check with: module spider codex
+```
+
+The CHPC-safe configs are written to `~/.server-configs-generated/` (not the repo files). Run `setup.sh` on CHPC to regenerate them. After MCP approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
+
 ## Do Not
 
 - **Do not** add plugins to `vimrc` — it is intentionally plugin-free.

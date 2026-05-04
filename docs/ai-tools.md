@@ -142,11 +142,17 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 trust_level = "trusted"
 ```
 
+### CHPC Generated Overrides
+
+When `setup.sh` detects CHPC, it copies generated safe configs from `~/.server-configs-generated/` instead of these repo defaults. Claude uses `defaultMode = "default"` with sandboxing enabled. Codex uses `approval_policy = "untrusted"` and `sandbox_mode = "workspace-write"`.
+
 ---
 
 ## MCP Servers (`install_claude_plugins.sh`)
 
 The install script sets up Model Context Protocol servers for Claude Code. It detects the installed Claude CLI version and uses the marketplace when available, falling back to manual `npx`/`uvx` registration.
+
+On CHPC systems, MCP installation is skipped by default because servers need local approval first. After approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
 
 ### Installed Servers
 

@@ -56,6 +56,14 @@ is_linux() {
     [ "$(os_name)" = "Linux" ]
 }
 
+is_chpc() {
+    case "${HOSTNAME:-$(hostname 2>/dev/null)}" in
+        *.chpc.utah.edu) return 0 ;;
+    esac
+    [ -d "/uufs/chpc.utah.edu" ] && return 0
+    return 1
+}
+
 machine_arch() {
     local arch
     arch="$(uname -m 2>/dev/null || true)"

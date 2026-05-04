@@ -6,6 +6,44 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# shellcheck source=lib/common.sh
+. "$DIR/lib/common.sh"
+
+ALLOW_CHPC_MCP="${SERVER_CONFIGS_ALLOW_CHPC_MCP:-false}"
+
+usage() {
+    cat <<'EOF'
+Usage: install_claude_plugins.sh [--allow-chpc] [--help|-h]
+  --allow-chpc  Install on CHPC after required MCP approval
+  -h, --help    Show this help
+
+Set SERVER_CONFIGS_ALLOW_CHPC_MCP=true as an automation-friendly alternative
+to --allow-chpc.
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --allow-chpc) ALLOW_CHPC_MCP=true ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if is_chpc && [ "$ALLOW_CHPC_MCP" != true ]; then
+    echo "CHPC detected: skipping MCP server installation."
+    echo "MCP servers require CHPC approval — contact helpdesk@chpc.utah.edu."
+    echo "After approval, re-run with --allow-chpc or SERVER_CONFIGS_ALLOW_CHPC_MCP=true."
+    exit 0
+fi
+
 if ! command -v claude &>/dev/null; then
     echo "Error: claude CLI not found. Run setup.sh first."
     exit 1
