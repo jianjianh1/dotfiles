@@ -295,7 +295,7 @@ remote_exec() {
     fi
     local cmd="$1" quoted_cmd
     quoted_cmd="$(quote_for_bash_lc "$cmd")"
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
+    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
 }
 
 remote_copy() {
