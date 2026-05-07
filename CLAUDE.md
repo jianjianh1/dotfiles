@@ -55,6 +55,7 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ```bash
 ./setup.sh               # idempotent — re-run is safe
 ./setup.sh --force       # reinstall CLI tools even if present
+./setup.sh --use-modules # on CHPC, prefer module load over binary install
 ```
 
 ## Remote deploy
@@ -86,12 +87,13 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 
 `is_chpc()` in `lib/common.sh` detects CHPC systems via hostname (`*.chpc.utah.edu`) or path (`/uufs/chpc.utah.edu`). When on CHPC, `setup.sh` automatically:
 
-- Uses `module load` for gh, Node.js, uv, btop, Claude Code, and Codex instead of self-installing
+- Installs gh, Node.js, uv, btop, Claude Code, and Codex via direct binary download (same as non-CHPC)
+- Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates CHPC-safe agent settings even if the CLIs are not currently installed or loaded
 - Uses approval-required, sandboxed defaults (`default` mode for Claude, `untrusted`/`workspace-write` for Codex)
 - Skips MCP server installation by default (`install_claude_plugins.sh` — needs CHPC approval first)
 
-**Module name placeholders** — update in `setup.sh` after confirming on CHPC:
+**Module name placeholders** (used with `--use-modules`) — update in `setup.sh` after confirming on CHPC:
 
 ```bash
 CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")   # check with: module spider claude

@@ -26,6 +26,7 @@ UV_MODULE_CANDIDATES=("uv")
 BTOP_MODULE_CANDIDATES=("btop")
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
 FAILURES=()
 
 _setup_cleanup() {
@@ -684,7 +685,7 @@ install_gh_cli() {
         brew_install gh gh
         return $?
     fi
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         try_chpc_module_load gh "GitHub CLI" GH_MODULE "${GH_MODULE_CANDIDATES[@]}"
         return
     fi
@@ -771,7 +772,7 @@ install_node() {
         brew_install node node
         return $?
     fi
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         try_chpc_module_load node "Node.js" NODE_MODULE "${NODE_MODULE_CANDIDATES[@]}"
         return
     fi
@@ -843,7 +844,7 @@ install_uv() {
         brew_install uv uv
         return $?
     fi
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         try_chpc_module_load uv "uv" UV_MODULE "${UV_MODULE_CANDIDATES[@]}"
         return
     fi
@@ -1046,7 +1047,7 @@ install_gh_tools() {
             "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
     else FAILURES+=("lazygit"); fi
 
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         run_step "btop" try_chpc_module_load btop "btop" BTOP_MODULE "${BTOP_MODULE_CANDIDATES[@]}"
     elif V="$(gh_latest aristocratos/btop)"; then
         run_step "btop" install_gh_binary btop \
@@ -1070,7 +1071,7 @@ install_gh_tools() {
 }
 
 install_claude() {
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         try_chpc_module_load claude "Claude Code" CLAUDE_MODULE "${CLAUDE_MODULE_CANDIDATES[@]}"
         return
     fi
@@ -1102,7 +1103,7 @@ install_claude() {
 }
 
 install_codex() {
-    if is_chpc; then
+    if is_chpc && $CHPC_USE_MODULES; then
         try_chpc_module_load codex "Codex" CODEX_MODULE "${CODEX_MODULE_CANDIDATES[@]}"
         return
     fi
@@ -1209,11 +1210,13 @@ setup_main() {
         case "$arg" in
             --force|-f) FORCE=true ;;
             --dry-run|-n) DRY_RUN=true ;;
+            --use-modules|-m) CHPC_USE_MODULES=true ;;
             -h|--help)
-                echo "Usage: setup.sh [--force|-f] [--dry-run|-n] [--help|-h]"
-                echo "  -f, --force    Reinstall CLI tools even if already present"
-                echo "  -n, --dry-run  Show setup steps without changing files"
-                echo "  -h, --help     Show this help"
+                echo "Usage: setup.sh [--force|-f] [--dry-run|-n] [--use-modules|-m] [--help|-h]"
+                echo "  -f, --force        Reinstall CLI tools even if already present"
+                echo "  -n, --dry-run      Show setup steps without changing files"
+                echo "  -m, --use-modules  On CHPC, prefer module load over binary install"
+                echo "  -h, --help         Show this help"
                 return 0
                 ;;
             *)
