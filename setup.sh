@@ -11,13 +11,15 @@ CLAUDE_SETTINGS_SRC=""
 CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
 CODEX_CONFIG_MODE="repo"
-NVIM_MODULE=""
-CLAUDE_MODULE=""
-CODEX_MODULE=""
-GH_MODULE=""
-NODE_MODULE=""
-UV_MODULE=""
-BTOP_MODULE=""
+reset_module_vars() {
+    local module_var
+
+    for module_var in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE; do
+        printf -v "$module_var" '%s' ""
+    done
+}
+
+reset_module_vars
 CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")
 CODEX_MODULE_CANDIDATES=("codex" "openai-codex")
 GH_MODULE_CANDIDATES=("gh")
@@ -113,6 +115,20 @@ record_node_manifest() {
     do
         [ -e "$path" ] && manifest_add_path "$path"
     done
+}
+
+record_nvim_manifest() {
+    local opt_dir target target_bin
+
+    target_bin="$HOME/.local/bin/nvim"
+    opt_dir="$HOME/.local/opt/nvim"
+
+    if [ -L "$target_bin" ]; then
+        target="$(portable_realpath "$target_bin" 2>/dev/null || true)"
+        [ "$target" = "$opt_dir/bin/nvim" ] || return 0
+        manifest_add_path "$target_bin"
+        [ -d "$opt_dir" ] && manifest_add_path "$opt_dir"
+    fi
 }
 
 append_line_if_missing() {
@@ -881,6 +897,104 @@ install_uv() {
     echo "  uv $(uv --version) installed"
 }
 
+nvim_glibc_version() {
+    local first_line
+
+    command -v ldd &>/dev/null || return 0
+    first_line="$(ldd --version 2>/dev/null | head -1 || true)"
+    case "$first_line" in
+        *GLIBC*|*GNU\ libc*)
+            printf '%s\n' "$first_line" |
+                sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9.]*\).*/\1/p'
+            ;;
+    esac
+}
+
+install_nvim_tarball() {
+    local label="$1" url="$2" tmp="$3"
+    local work_dir extracted_dir install_dir target_bin
+
+    echo "  Trying $label Neovim tarball..."
+    rm -rf "$tmp/nvim-tarball" "$tmp/nvim.tar.gz"
+    work_dir="$tmp/nvim-tarball"
+    mkdir -p "$work_dir" || return 1
+
+    if ! retry curl -sfL -o "$tmp/nvim.tar.gz" "$url"; then
+        echo "  Warning: failed to download $label Neovim tarball"
+        return 1
+    fi
+    if ! tar xz -C "$work_dir" -f "$tmp/nvim.tar.gz"; then
+        echo "  Warning: failed to extract $label Neovim tarball"
+        return 1
+    fi
+
+    extracted_dir="$(find "$work_dir" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    if [ -z "$extracted_dir" ] || [ ! -x "$extracted_dir/bin/nvim" ]; then
+        echo "  Warning: $label Neovim tarball had unexpected layout"
+        return 1
+    fi
+    if ! "$extracted_dir/bin/nvim" --version &>/dev/null; then
+        echo "  $label Neovim tarball is not compatible with this system"
+        return 1
+    fi
+
+    install_dir="$HOME/.local/opt/nvim"
+    target_bin="$HOME/.local/bin/nvim"
+    if [ -d "$target_bin" ] && [ ! -L "$target_bin" ]; then
+        echo "  Warning: cannot replace directory $target_bin"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$install_dir")" "$HOME/.local/bin" || return 1
+    rm -rf "$install_dir"
+    if ! mv "$extracted_dir" "$install_dir"; then
+        echo "  Warning: failed to install Neovim to $install_dir"
+        return 1
+    fi
+    rm -f "$target_bin"
+    if ! ln -s "$install_dir/bin/nvim" "$target_bin"; then
+        echo "  Warning: failed to link Neovim to $target_bin"
+        return 1
+    fi
+
+    hash -r
+    manifest_add_path "$target_bin"
+    manifest_add_path "$install_dir"
+    echo "  $("$target_bin" --version 2>/dev/null | head -1) installed to $install_dir"
+}
+
+install_nvim_appimage() {
+    local label="$1" url="$2" tmp="$3"
+    local target_bin="$HOME/.local/bin/nvim"
+
+    echo "  Trying $label Neovim AppImage..."
+    rm -f "$tmp/nvim.appimage"
+    if ! retry curl -sfL -o "$tmp/nvim.appimage" "$url"; then
+        echo "  Warning: failed to download $label Neovim AppImage"
+        return 1
+    fi
+
+    chmod +x "$tmp/nvim.appimage"
+    if ! "$tmp/nvim.appimage" --version &>/dev/null; then
+        echo "  $label Neovim AppImage is not compatible with this system"
+        return 1
+    fi
+    if [ -d "$target_bin" ] && [ ! -L "$target_bin" ]; then
+        echo "  Warning: cannot replace directory $target_bin"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.local/bin" || return 1
+    rm -f "$target_bin"
+    if ! mv "$tmp/nvim.appimage" "$target_bin"; then
+        echo "  Warning: failed to install Neovim to $target_bin"
+        return 1
+    fi
+    hash -r
+    manifest_add_path "$target_bin"
+    echo "  $("$target_bin" --version 2>/dev/null | head -1) installed to $target_bin"
+}
+
 install_nvim() {
     if is_macos; then
         brew_install neovim nvim
@@ -894,71 +1008,58 @@ install_nvim() {
         local current_version
         current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
         if version_at_least "${current_version}" "0.9.0"; then
-            record_command_if_managed nvim || true
+            record_nvim_manifest || true
             echo "nvim already installed: NVIM v${current_version}"
             return 0
         fi
         echo "Upgrading nvim from v${current_version}..."
     fi
 
-    # Download AppImage from GitHub releases
     echo "Installing Neovim..."
-    local ARCH
+    local ARCH NVIM_ARCH
     ARCH="$(machine_arch)"
     case "$ARCH" in
-        x86_64|aarch64) ;;
+        x86_64)  NVIM_ARCH="x86_64" ;;
+        aarch64) NVIM_ARCH="arm64" ;;
         *)  echo "  Skipping nvim (unsupported arch: $ARCH)"; return 1 ;;
     esac
-
-    # Pre-check glibc. Latest nvim AppImage needs ~2.31; 0.9.5 needs ~2.28.
-    # If we're below 2.28, skip the AppImage path entirely — it will just fail.
-    local glibc_version=""
-    if command -v ldd &>/dev/null; then
-        glibc_version="$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
-    fi
-    if [ -n "$glibc_version" ] && ! version_at_least "$glibc_version" "2.28"; then
-        echo "  glibc $glibc_version is too old for any nvim AppImage (need >= 2.28)."
-        echo "  Try: module load nvim   (if on an HPC cluster), or install from tarball manually."
-        return 1
-    fi
 
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
 
-    # Build the candidate list based on glibc. Latest needs >= 2.31; otherwise
-    # only v0.9.5 is worth trying.
-    local candidates=()
-    if [ -z "$glibc_version" ] || version_at_least "$glibc_version" "2.31"; then
-        candidates+=("latest/download")
-    fi
-    candidates+=("v0.9.5")
+    local glibc_version official_tarball official_appimage legacy_tarball
+    glibc_version="$(nvim_glibc_version)"
+    official_tarball="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.tar.gz"
+    official_appimage="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${NVIM_ARCH}.appimage"
+    legacy_tarball="https://github.com/neovim/neovim-releases/releases/latest/download/nvim-linux-x86_64.tar.gz"
 
-    local url version_tag
-    for version_tag in "${candidates[@]}"; do
-        local file_name="nvim-linux-${ARCH}.appimage"
-        # v0.9.5 used a different asset name
-        [ "$version_tag" = "v0.9.5" ] && file_name="nvim.appimage"
-
-        url="https://github.com/neovim/neovim/releases/${version_tag}/${file_name}"
-        if retry curl -sfL -o "$TMP/nvim.appimage" "$url"; then
-            chmod +x "$TMP/nvim.appimage"
-            if "$TMP/nvim.appimage" --version &>/dev/null; then
-                if ! install_to "$TMP/nvim.appimage" "$BIN_DIR/nvim"; then
-                    echo "  Warning: failed to install Neovim to $BIN_DIR/nvim"
-                    return 1
-                fi
-                hash -r
-                manifest_add_path "$BIN_DIR/nvim"
-                echo "  $(nvim --version 2>/dev/null | head -1) installed to $BIN_DIR/nvim"
-                return 0
-            fi
-            echo "  AppImage from $version_tag not compatible with this system, trying next..."
-            rm -f "$TMP/nvim.appimage"
+    if [ "$ARCH" = "x86_64" ] && [ -n "$glibc_version" ]; then
+        if ! version_at_least "$glibc_version" "2.17"; then
+            echo "  glibc $glibc_version is too old for Neovim release binaries (need >= 2.17)."
+            echo "  Try: ./setup.sh --use-modules   (if on an HPC cluster with an nvim module)"
+            return 1
         fi
-    done
+        if ! version_at_least "$glibc_version" "2.31"; then
+            echo "  glibc $glibc_version is old; using Neovim's legacy glibc 2.17 build."
+            install_nvim_tarball "legacy" "$legacy_tarball" "$TMP" && return 0
+            echo "  Warning: could not install Neovim from the legacy glibc build"
+            echo "  Try: ./setup.sh --use-modules   (if on an HPC cluster with an nvim module)"
+            return 1
+        fi
+    fi
 
-    echo "  Warning: could not install Neovim (glibc too old for AppImage)"
+    install_nvim_tarball "official" "$official_tarball" "$TMP" && return 0
+    install_nvim_appimage "official" "$official_appimage" "$TMP" && return 0
+
+    if [ "$ARCH" = "x86_64" ]; then
+        echo "  Falling back to Neovim's legacy glibc 2.17 build..."
+        install_nvim_tarball "legacy" "$legacy_tarball" "$TMP" && return 0
+    elif [ -n "$glibc_version" ] && ! version_at_least "$glibc_version" "2.31"; then
+        echo "  Warning: old-glibc Neovim fallback is only published for x86_64."
+    fi
+
+    echo "  Warning: could not install Neovim"
     echo "  Try: ./setup.sh --use-modules   (if on an HPC cluster with an nvim module)"
     return 1
 }
@@ -1186,13 +1287,7 @@ setup_main() {
     FORCE=false
     DRY_RUN=false
     FAILURES=()
-    NVIM_MODULE=""
-    CLAUDE_MODULE=""
-    CODEX_MODULE=""
-    GH_MODULE=""
-    NODE_MODULE=""
-    UV_MODULE=""
-    BTOP_MODULE=""
+    reset_module_vars
 
     for arg in "$@"; do
         case "$arg" in

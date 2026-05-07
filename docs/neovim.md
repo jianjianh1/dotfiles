@@ -4,6 +4,8 @@ Source: [`nvim/`](../nvim/) directory, symlinked to `~/.config/nvim/`.
 
 Uses [lazy.nvim](https://github.com/folke/lazy.nvim) for plugin management. For the plugin-free Vim config, see [vim.md](vim.md).
 
+`setup.sh` installs Neovim on Linux from the official release tarball into `~/.local/opt/nvim` and links `~/.local/bin/nvim`. On old x86_64 glibc systems, it falls back to Neovim's legacy glibc 2.17 release tarball instead of the AppImage path.
+
 ---
 
 ## Architecture

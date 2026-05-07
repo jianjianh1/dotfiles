@@ -90,7 +90,7 @@ Both `bashrc_exports` and `bashrc_aliases` are sourced from `~/.bashrc` (lines a
 | `claude` | Claude Code CLI |
 | `codex` | Codex CLI |
 
-All tools install to `~/.local/bin/`. Installed via GitHub releases (no root required).
+All tools install to `~/.local/bin/`. Installed via GitHub releases (no root required). On Linux, Neovim uses the official release tarball under `~/.local/opt/nvim` with a `~/.local/bin/nvim` symlink; old x86_64 glibc systems use Neovim's legacy glibc 2.17 release tarball.
 
 ---
 

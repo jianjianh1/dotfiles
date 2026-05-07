@@ -73,12 +73,14 @@ test_manifest_controls_uninstall() (
     trap 'rm -rf "$tmp"' EXIT
 
     export HOME="$tmp/home"
-    mkdir -p "$HOME/.server-configs-generated" "$HOME/.local/bin" "$HOME/.codex"
+    mkdir -p "$HOME/.server-configs-generated" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin" "$HOME/.codex"
     INSTALL_MANIFEST="$HOME/.server-configs-generated/install-manifest.txt"
 
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/gh"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/rg"
-    chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/opt/nvim/bin/nvim"
+    ln -s "$HOME/.local/opt/nvim/bin/nvim" "$HOME/.local/bin/nvim"
+    chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg" "$HOME/.local/opt/nvim/bin/nvim"
     printf 'config = true\n' > "$HOME/.codex/config.toml"
 
     # shellcheck source=uninstall.sh
@@ -95,6 +97,12 @@ test_manifest_controls_uninstall() (
 
     remove_tracked_path "$HOME/.codex/config.toml"
     [ ! -e "$HOME/.codex/config.toml" ] || fail "tracked config copy was not removed"
+
+    manifest_add_path "$HOME/.local/bin/nvim"
+    manifest_add_path "$HOME/.local/opt/nvim"
+    remove_nvim
+    [ ! -e "$HOME/.local/bin/nvim" ] || fail "tracked nvim symlink was not removed"
+    [ ! -e "$HOME/.local/opt/nvim" ] || fail "tracked nvim opt dir was not removed"
 )
 
 test_scripts_source_without_side_effects() (
@@ -300,7 +308,9 @@ test_chpc_module_loads_initialize_module_command() (
     # shellcheck source=setup.sh
     . "$DIR/setup.sh"
     mkdir -p "$GENERATED_DIR"
+    # shellcheck disable=SC2034 # render_bash_compat reads module variables indirectly.
     CLAUDE_MODULE="claude-code"
+    # shellcheck disable=SC2034 # render_bash_compat reads module variables indirectly.
     CODEX_MODULE="codex"
     render_bash_compat
 
@@ -316,6 +326,32 @@ test_chpc_module_loads_initialize_module_command() (
         fail "Claude module load should come after module initialization"
     [ "$init_line" -lt "$codex_line" ] ||
         fail "Codex module load should come after module initialization"
+)
+
+test_module_var_reset_clears_stale_values() (
+    local tmp bash_compat
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    mkdir -p "$HOME"
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+    mkdir -p "$GENERATED_DIR"
+
+    CLAUDE_MODULE="stale-claude"
+    CODEX_MODULE="stale-codex"
+    reset_module_vars
+    [ -z "${CLAUDE_MODULE:-}" ] || fail "reset_module_vars did not clear CLAUDE_MODULE"
+    [ -z "${CODEX_MODULE:-}" ] || fail "reset_module_vars did not clear CODEX_MODULE"
+
+    render_bash_compat
+    bash_compat="$GENERATED_DIR/bashrc_compat"
+    if grep -q 'module load stale-' "$bash_compat"; then
+        fail "stale module values leaked into bash compat config"
+    fi
 )
 
 test_chpc_mcp_skip_and_override() (
@@ -354,24 +390,125 @@ test_chpc_mcp_skip_and_override() (
         fail "CHPC MCP env override did not continue past CHPC guard"
 )
 
+test_nvim_manifest_records_only_owned_layout() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME"
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+    mkdir -p "$GENERATED_DIR" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin"
+    : > "$INSTALL_MANIFEST"
+
+    record_nvim_manifest
+    if [ -s "$INSTALL_MANIFEST" ]; then
+        fail "record_nvim_manifest should not track unowned nvim paths"
+    fi
+
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/opt/nvim/bin/nvim"
+    chmod +x "$HOME/.local/opt/nvim/bin/nvim"
+    ln -s "$HOME/.local/opt/nvim/bin/nvim" "$HOME/.local/bin/nvim"
+
+    record_nvim_manifest
+    manifest_contains_path "$HOME/.local/bin/nvim" ||
+        fail "record_nvim_manifest did not track owned nvim symlink"
+    manifest_contains_path "$HOME/.local/opt/nvim" ||
+        fail "record_nvim_manifest did not track owned nvim opt dir"
+)
+
+test_nvim_install_selects_legacy_and_arm_assets() (
+    local tmp calls
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    mkdir -p "$HOME"
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+    FORCE=true
+    CHPC_USE_MODULES=false
+
+    is_macos() { return 1; }
+    is_chpc() { return 1; }
+
+    calls="$tmp/old-glibc-calls"
+    machine_arch() { printf 'x86_64'; }
+    nvim_glibc_version() { printf '2.17'; }
+    install_nvim_tarball() {
+        printf 'tarball %s %s\n' "$1" "$2" >> "$calls"
+        case "$2" in
+            *neovim-releases*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    install_nvim_appimage() {
+        printf 'appimage %s %s\n' "$1" "$2" >> "$calls"
+        return 1
+    }
+
+    install_nvim >/dev/null 2>&1 ||
+        fail "old-glibc nvim install should use legacy tarball"
+    grep -q 'neovim-releases' "$calls" ||
+        fail "old-glibc nvim install did not use legacy release repo"
+    if grep -q 'appimage' "$calls"; then
+        fail "old-glibc nvim install should skip AppImage"
+    fi
+
+    calls="$tmp/arm-calls"
+    machine_arch() { printf 'aarch64'; }
+    nvim_glibc_version() { :; }
+    install_nvim_tarball() {
+        printf 'tarball %s %s\n' "$1" "$2" >> "$calls"
+        case "$2" in
+            *nvim-linux-arm64.tar.gz) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    install_nvim_appimage() {
+        printf 'appimage %s %s\n' "$1" "$2" >> "$calls"
+        return 1
+    }
+
+    install_nvim >/dev/null 2>&1 ||
+        fail "aarch64 nvim install should use arm64 release asset"
+    grep -q 'nvim-linux-arm64.tar.gz' "$calls" ||
+        fail "aarch64 nvim install did not use arm64 release asset"
+)
+
 test_pre_commit_no_staged_files() (
     git -C "$DIR" diff --cached --quiet || return 0
     "$DIR/.githooks/pre-commit" || fail "pre-commit failed with no staged files"
 )
 
+run_test() {
+    local name="$1"
+
+    if ! "$name"; then
+        fail "$name failed"
+    fi
+}
+
 main() {
-    test_remote_bash_lc_quote
-    test_portable_helpers
-    test_backup_helpers_fail_loudly
-    test_manifest_controls_uninstall
-    test_scripts_source_without_side_effects
-    test_deploy_sources_without_prompting
-    test_auth_state_helpers
-    test_setup_dry_run_is_non_mutating
-    test_chpc_config_rendering_is_safe_without_tools
-    test_chpc_module_loads_initialize_module_command
-    test_chpc_mcp_skip_and_override
-    test_pre_commit_no_staged_files
+    run_test test_remote_bash_lc_quote
+    run_test test_portable_helpers
+    run_test test_backup_helpers_fail_loudly
+    run_test test_manifest_controls_uninstall
+    run_test test_scripts_source_without_side_effects
+    run_test test_deploy_sources_without_prompting
+    run_test test_auth_state_helpers
+    run_test test_setup_dry_run_is_non_mutating
+    run_test test_chpc_config_rendering_is_safe_without_tools
+    run_test test_chpc_module_loads_initialize_module_command
+    run_test test_module_var_reset_clears_stale_values
+    run_test test_chpc_mcp_skip_and_override
+    run_test test_nvim_manifest_records_only_owned_layout
+    run_test test_nvim_install_selects_legacy_and_arm_assets
+    run_test test_pre_commit_no_staged_files
     echo "All regression tests passed."
 }
 

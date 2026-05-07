@@ -187,6 +187,7 @@ remove_codex() {
 remove_nvim() {
     echo "Removing Neovim..."
     remove_bin nvim
+    remove_tracked_path "$HOME/.local/opt/nvim"
 }
 
 remove_node() {
@@ -221,6 +222,7 @@ remove_dirs() {
     remove_dir_if_empty "$HOME/.local/share/codex"
     remove_dir_if_empty "$HOME/.local/share"
     remove_dir_if_empty "$HOME/.local/include"
+    remove_dir_if_empty "$HOME/.local/opt"
     remove_dir_if_empty "$HOME/.local/lib"
     remove_dir_if_empty "$HOME/.local/bin"
     remove_dir_if_empty "$HOME/.local"
