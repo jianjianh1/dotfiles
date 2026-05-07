@@ -427,7 +427,7 @@ render_claude_settings_target() {
     if is_chpc; then
         cat > "$GENERATED_DIR/claude_settings.json" <<'EOF'
 {
-  "defaultMode": "default",
+  "permissions": { "defaultMode": "default" },
   "skipDangerousModePermissionPrompt": false,
   "sandbox": { "enabled": true, "failIfUnavailable": false, "autoAllowBashIfSandboxed": true },
   "enableAllProjectMcpServers": false,

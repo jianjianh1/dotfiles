@@ -12,6 +12,7 @@
   },
   "includeGitInstructions": true,
   "permissions": {
+    "defaultMode": "auto",
     "allow": [],
     "deny": [
       "Read(./.env)",
@@ -66,5 +67,5 @@
   "editorMode": "vim",
   "showTurnDuration": true,
   "terminalProgressBarEnabled": true,
-  "defaultMode": "bypassPermissions"
+  "skipAutoPermissionPrompt": true
 }

@@ -8,9 +8,9 @@ plan_mode_reasoning_effort = "xhigh"
 # Git attribution
 commit_attribution = ""
 
-# Bypass approvals and sandbox (equivalent to --dangerously-bypass-approvals-and-sandbox)
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
+# Auto mode — workspace-write sandbox, prompt only on failure
+approval_policy = "on-failure"
+sandbox_mode = "workspace-write"
 
 # Shell — inherit all env vars so tools like gh, npm, etc. work
 [shell_environment_policy]

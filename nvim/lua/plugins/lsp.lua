@@ -20,13 +20,10 @@ return {
             "saghen/blink.cmp",
         },
         config = function()
-            local lspconfig = require("lspconfig")
             local capabilities = require("blink.cmp").get_lsp_capabilities()
 
-            lspconfig.pyright.setup({ capabilities = capabilities })
-            lspconfig.clangd.setup({ capabilities = capabilities })
-            lspconfig.lua_ls.setup({
-                capabilities = capabilities,
+            vim.lsp.config("*", { capabilities = capabilities })
+            vim.lsp.config("lua_ls", {
                 settings = {
                     Lua = {
                         workspace = { checkThirdParty = false },
@@ -34,6 +31,8 @@ return {
                     },
                 },
             })
+
+            vim.lsp.enable({ "pyright", "clangd", "lua_ls" })
 
             vim.api.nvim_create_autocmd("LspAttach", {
                 group = vim.api.nvim_create_augroup("lsp-attach", { clear = true }),
