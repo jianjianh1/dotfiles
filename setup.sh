@@ -24,6 +24,7 @@ GH_MODULE_CANDIDATES=("gh")
 NODE_MODULE_CANDIDATES=("nodejs")
 UV_MODULE_CANDIDATES=("uv")
 BTOP_MODULE_CANDIDATES=("btop")
+NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
@@ -885,6 +886,10 @@ install_nvim() {
         brew_install neovim nvim
         return $?
     fi
+    if is_chpc && $CHPC_USE_MODULES; then
+        try_chpc_module_load nvim "Neovim" NVIM_MODULE "${NVIM_MODULE_CANDIDATES[@]}"
+        return
+    fi
     if command -v nvim &>/dev/null && ! $FORCE; then
         local current_version
         current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
@@ -896,24 +901,7 @@ install_nvim() {
         echo "Upgrading nvim from v${current_version}..."
     fi
 
-    # Strategy 1: Try loading an environment module (common on HPC clusters)
-    if ensure_module_command; then
-        local mod
-        for mod in nvim/0.11.2 nvim; do
-            if module load "$mod" 2>/dev/null && command -v nvim &>/dev/null; then
-                local mod_version
-                mod_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
-                if version_at_least "${mod_version}" "0.9.0"; then
-                    echo "  nvim available via module: NVIM v${mod_version}"
-                    NVIM_MODULE="$mod"
-                    hash -r
-                    return 0
-                fi
-            fi
-        done
-    fi
-
-    # Strategy 2: Download AppImage from GitHub releases
+    # Download AppImage from GitHub releases
     echo "Installing Neovim..."
     local ARCH
     ARCH="$(machine_arch)"
@@ -971,7 +959,7 @@ install_nvim() {
     done
 
     echo "  Warning: could not install Neovim (glibc too old for AppImage)"
-    echo "  Try: module load nvim   (if on an HPC cluster)"
+    echo "  Try: ./setup.sh --use-modules   (if on an HPC cluster with an nvim module)"
     return 1
 }
 

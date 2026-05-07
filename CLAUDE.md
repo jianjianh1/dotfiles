@@ -78,7 +78,7 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
   - **Oil replaces netrw** (`vim.g.loaded_netrw = 1`). `<leader>e` and `-` open Oil.
   - **`<leader>m` differs between vim and nvim**: vim runs `!glow %` (terminal); nvim triggers `MarkdownPreviewToggle` (browser) on markdown files.
   - After editing plugin specs, regenerate the lock: `nvim --headless '+Lazy! sync' +qa`.
-  - Setup installs nvim via (in order): `module load`, AppImage (skipped on glibc < 2.28), tarball to `~/.local/`.
+  - Setup installs nvim via AppImage (skipped on glibc < 2.28). Pass `--use-modules` on CHPC to prefer `module load` instead.
 - **tmux prefix** is `Ctrl-a` (not the default `Ctrl-b`).
 - **Indentation**: vimrc defaults to 4-space tabs; web filetypes (html/css/js/ts/json/yaml) use 2-space via autocmd. Neovim adds `lua` to the 2-space list.
 - Glow is used for markdown preview in vim (`<leader>m`).
@@ -87,7 +87,7 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 
 `is_chpc()` in `lib/common.sh` detects CHPC systems via hostname (`*.chpc.utah.edu`) or path (`/uufs/chpc.utah.edu`). When on CHPC, `setup.sh` automatically:
 
-- Installs gh, Node.js, uv, btop, Claude Code, and Codex via direct binary download (same as non-CHPC)
+- Installs gh, Node.js, uv, btop, Neovim, Claude Code, and Codex via direct binary download (same as non-CHPC)
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates CHPC-safe agent settings even if the CLIs are not currently installed or loaded
 - Uses approval-required, sandboxed defaults (`default` mode for Claude, `untrusted`/`workspace-write` for Codex)
@@ -102,6 +102,7 @@ GH_MODULE_CANDIDATES=("gh")                          # check with: module spider
 NODE_MODULE_CANDIDATES=("nodejs")                     # check with: module spider nodejs
 UV_MODULE_CANDIDATES=("uv")                           # check with: module spider uv
 BTOP_MODULE_CANDIDATES=("btop")                       # check with: module spider btop
+NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")          # check with: module spider nvim
 ```
 
 The CHPC-safe configs are written to `~/.server-configs-generated/` (not the repo files). Run `setup.sh` on CHPC to regenerate them. After MCP approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
