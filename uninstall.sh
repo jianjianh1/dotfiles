@@ -165,7 +165,7 @@ remove_bashrc_lines() {
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin chpc-allocs; do
         remove_bin "$bin"
     done
 }

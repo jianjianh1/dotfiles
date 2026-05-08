@@ -1257,6 +1257,20 @@ install_plugins() {
     "$DIR/install_claude_plugins.sh"
 }
 
+install_chpc_allocs() {
+    if ! is_chpc; then
+        echo "  Skipping chpc-allocs (not on CHPC)"
+        return 0
+    fi
+    if [ ! -f "$DIR/chpc-allocs.py" ]; then
+        echo "  Skipping chpc-allocs (source missing)"
+        return 1
+    fi
+    chmod +x "$DIR/chpc-allocs.py" 2>/dev/null || true
+    backup_and_link "$DIR/chpc-allocs.py" "$BIN_DIR/chpc-allocs" || return 1
+    manifest_add_path "$BIN_DIR/chpc-allocs"
+}
+
 link_core_configs() {
     mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" || return 1
     backup_and_link "$DIR/vimrc" "$HOME/.vimrc" || return 1
@@ -1355,6 +1369,7 @@ setup_main() {
     run_step "tpm"          install_tpm
     run_step "claude"       install_claude
     run_step "codex"        install_codex
+    run_step "chpc-allocs"  install_chpc_allocs
 
     run_step "compat configs" render_compat_configs
 
