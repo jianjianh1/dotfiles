@@ -89,8 +89,8 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 
 - Installs gh, Node.js, uv, btop, Neovim, Claude Code, and Codex via direct binary download (same as non-CHPC)
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
-- Generates CHPC-safe agent settings even if the CLIs are not currently installed or loaded
-- Uses approval-required, sandboxed defaults (`default` mode for Claude, `untrusted`/`workspace-write` for Codex)
+- Generates agent settings even if the CLIs are not currently installed or loaded
+- Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC
 - Skips MCP server installation by default (`install_claude_plugins.sh` — needs CHPC approval first)
 
 **Module name placeholders** (used with `--use-modules`) — update in `setup.sh` after confirming on CHPC:

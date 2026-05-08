@@ -8,9 +8,9 @@ plan_mode_reasoning_effort = "xhigh"
 # Git attribution
 commit_attribution = ""
 
-# Auto mode — workspace-write sandbox, prompt only on failure
-approval_policy = "on-failure"
-sandbox_mode = "workspace-write"
+# No-restriction mode — all actions auto-approved, no sandbox
+approval_policy = "never"
+sandbox_mode = "none"
 
 # Shell — inherit all env vars so tools like gh, npm, etc. work
 [shell_environment_policy]
