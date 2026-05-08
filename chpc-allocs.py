@@ -140,7 +140,7 @@ class AllocationRow:
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
-        self.wait_seconds: Optional[int] = None
+        self.wait_by_shape: Dict[str, Optional[int]] = {}
 
     @property
     def is_default(self) -> bool:
@@ -151,6 +151,7 @@ class AllocationRow:
         wide: bool = False,
         include_avail: bool = False,
         include_wait: bool = True,
+        shape: Optional["ProbeShape"] = None,
     ) -> Dict[str, str]:
         data = {
             "cluster": self.cluster,
@@ -185,7 +186,13 @@ class AllocationRow:
             )
         if include_avail:
             if include_wait:
-                data["wait"] = _format_wait(self.wait_seconds)
+                if shape is not None:
+                    data["shape"] = shape.label
+                    wait_secs = self.wait_by_shape.get(shape.label)
+                else:
+                    data["shape"] = ""
+                    wait_secs = None
+                data["wait"] = _format_wait(wait_secs)
             data["free_nodes"] = self.free_nodes
             data["free_cpus"] = self.free_cpus
             data["free_gpus"] = self.free_gpus
@@ -216,6 +223,8 @@ Examples:
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
   chpc-allocs --gpus a100:4 --cpus 16 --time 4:00:00  # tune probe to your job
+  chpc-allocs --shape a100:1 --shape a100:4 --shape h100nvl:1   # compare shapes
+  chpc-allocs --shape 'a100:4,mem=32G,time=24h' --shape 'cpu:32,mem=128G,time=12h'
   chpc-allocs --wait-for a100:4            # focused: a100x4 wait across allocs
   chpc-allocs --wait-for cpu:32            # focused: 32-core CPU wait
   chpc-allocs --no-wait                    # skip sbatch --test-only probe (faster)
@@ -388,6 +397,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Wall time for the wait probe (HH:MM:SS, D-HH:MM:SS, or Nd). "
         "Default: 00:01:00. Larger values bias toward partitions with "
         "long-running headroom.",
+    )
+    parser.add_argument(
+        "--shape", action="append", metavar="SPEC",
+        help="Probe an additional job shape. Repeatable. Each SPEC is "
+        "comma-separated; positional shorthands ('a100:4', 'cpu:32', '32') "
+        "or key=value tokens (cpus=, mem=, time=, gpus=, nodes=). Examples: "
+        "'a100:4', 'a100:4,mem=32G,time=24h', 'cpu:32,mem=128G,time=12h', "
+        "'cpus=8,mem=16G,gpus=h100nvl:1,time=4h'. With multiple --shape "
+        "flags the output expands to one row per (allocation, shape). "
+        "Without --shape, the single shape comes from --cpus/--mem/--gpus/"
+        "--time/--nodes.",
     )
     parser.add_argument(
         "--wait-for", metavar="SPEC",
@@ -746,6 +766,32 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
     return result
 
 
+def _format_wall_short(value: str) -> str:
+    """Render wall time compactly: '24:00:00' -> '24h', '00:01:00' -> '1m'.
+
+    Falls back to the raw value when it can't be parsed.
+    """
+    seconds = parse_wall_seconds(value)
+    if seconds is None or seconds <= 0:
+        return value
+    # Prefer days only when >= 48h to keep '24h' rendering as '24h'.
+    if seconds >= 2 * 86400 and seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0 and seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 60:
+        return f"{seconds}s"
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours}h{minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
+
+
 class ProbeShape:
     """Shape of the hypothetical job used for `sbatch --test-only` wait probing.
 
@@ -770,6 +816,23 @@ class ProbeShape:
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
         self.time = time
+        self.label = self._compute_label()
+
+    def _compute_label(self) -> str:
+        wall = _format_wall_short(self.time)
+        if self.gpu_type or self.gpu_count is not None:
+            gtype = self.gpu_type or "gpu"
+            count = self.gpu_count if self.gpu_count is not None else 1
+            core = f"{gtype}:{count}@{wall}"
+        else:
+            core = f"cpu:{self.cpus}@{wall}"
+        parts = [core]
+        if self.mem:
+            parts.append(self.mem)
+        label = ",".join(parts)
+        if self.nodes > 1:
+            label = f"{self.nodes}n*{label}"
+        return label
 
     def gres_for(self, row: "AllocationRow") -> Optional[str]:
         """Return the --gres value for this row, or None to omit the flag."""
@@ -831,6 +894,77 @@ def parse_gpu_spec(spec: str) -> Tuple[Optional[str], int]:
     return (s, 1)
 
 
+def parse_shape_spec(spec: str) -> ProbeShape:
+    """Parse a --shape SPEC into a ProbeShape.
+
+    Tokens (comma-separated, any order):
+      cpus=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
+    Positional shorthands (first one wins for that slot):
+      cpu:N        -> cpus=N (CPU shape, no GPU)
+      <type>:N     -> gpus=<type>:N
+      <type>       -> gpus=<type> (count 1)
+      N (digits)   -> cpus=N
+
+    Examples:
+      'a100:4'                    -> 1 a100, 1 CPU, 1-min wall
+      'a100:4,mem=32G,time=24h'   -> 4 a100, 32G mem, 24-hour wall
+      'cpu:32,mem=128G,time=12h'  -> 32 CPUs (CPU job), 128G, 12h
+      'cpus=8,mem=16G,gpus=h100nvl:1,time=4h'
+    """
+    s = (spec or "").strip()
+    err = f"invalid --shape spec: {spec!r}"
+    if not s:
+        raise CommandError(err)
+    cpus = 1
+    mem: Optional[str] = None
+    nodes = 1
+    time = "00:01:00"
+    gpu_type: Optional[str] = None
+    gpu_count: Optional[int] = None
+
+    for raw in s.split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        if "=" in tok:
+            key, _, val = tok.partition("=")
+            key = key.strip().lower()
+            val = val.strip()
+            if not val:
+                raise CommandError(f"empty value for {key!r} in {err}")
+            if key == "cpus":
+                cpus = _parse_positive_int(val, err)
+            elif key == "mem":
+                mem = val
+            elif key == "nodes":
+                nodes = _parse_positive_int(val, err)
+            elif key == "time":
+                if parse_wall_seconds(val) is None:
+                    raise CommandError(f"invalid time value {val!r} in {err}")
+                time = val
+            elif key == "gpus":
+                gpu_type, gpu_count = parse_gpu_spec(val)
+            else:
+                raise CommandError(f"unknown key {key!r} in {err}")
+        else:
+            low = tok.lower()
+            if low.startswith("cpu:"):
+                cpus = _parse_positive_int(low[4:], err)
+            elif low.isdigit():
+                cpus = _parse_positive_int(low, err)
+            else:
+                gpu_type, gpu_count = parse_gpu_spec(tok)
+
+    return ProbeShape(
+        nodes=nodes,
+        cpus=cpus,
+        mem=mem,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
+        time=time,
+    )
+
+
 def apply_wait_for_shorthand(args: argparse.Namespace) -> None:
     """Translate `--wait-for SPEC` into the matching probe-shape + filter flags.
 
@@ -865,6 +999,7 @@ def apply_wait_for_shorthand(args: argparse.Namespace) -> None:
 # Matches the relevant part of `sbatch --test-only`'s stderr line:
 # "sbatch: Job 12345 to start at 2026-05-08T03:00:00 using 1 processors on nodes ..."
 _TEST_ONLY_RE = re.compile(r"to start at (\S+)")
+_WALL_COMPACT_RE = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 
 
 def parse_test_only_stderr(text: str) -> Optional[datetime]:
@@ -956,22 +1091,25 @@ def predict_wait(
 
 def predict_wait_times(
     rows: List["AllocationRow"],
+    shapes: Optional[List[ProbeShape]] = None,
     max_workers: int = 8,
-    shape: Optional[ProbeShape] = None,
 ) -> None:
-    """Populate `row.wait_seconds` for every row, in parallel."""
+    """Populate `row.wait_by_shape[shape.label]` for every (row, shape), in parallel."""
     if not rows or shutil.which("sbatch") is None:
         return
-    if shape is None:
-        shape = ProbeShape()
+    if not shapes:
+        shapes = [ProbeShape()]
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(predict_wait, row, shape=shape): row for row in rows}
+        futures = {}
+        for row in rows:
+            for shape in shapes:
+                futures[pool.submit(predict_wait, row, shape=shape)] = (row, shape)
         for future in as_completed(futures):
-            row = futures[future]
+            row, shape = futures[future]
             try:
-                row.wait_seconds = future.result()
+                row.wait_by_shape[shape.label] = future.result()
             except Exception:
-                row.wait_seconds = None
+                row.wait_by_shape[shape.label] = None
 
 
 def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
@@ -1247,6 +1385,11 @@ def parse_wall_seconds(value: str) -> Optional[int]:
         return 10**15
     if value.endswith("d") and value[:-1].isdigit():
         return int(value[:-1]) * 86400
+    if ":" not in value and "-" not in value:
+        compact = _WALL_COMPACT_RE.fullmatch(value)
+        if compact and any(compact.groups()):
+            h, m, s = (int(g) if g else 0 for g in compact.groups())
+            return h * 3600 + m * 60 + s
     day_part = 0
     time_part = value
     if "-" in value:
@@ -1338,7 +1481,24 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
 _WAIT_SENTINEL = 10**12  # sorts unknown waits to the end (still < float('inf') headaches)
 
 
-def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[AllocationRow]:
+def expand_rows_by_shape(
+    rows: List["AllocationRow"],
+    shapes: Optional[List[ProbeShape]],
+) -> List[Tuple["AllocationRow", Optional[ProbeShape]]]:
+    """Cross-product rows × shapes into one pair per output record.
+
+    When `shapes` is None or empty, each row pairs with `None` (no-wait mode).
+    """
+    if not shapes:
+        return [(row, None) for row in rows]
+    return [(row, shape) for row in rows for shape in shapes]
+
+
+def sort_pairs(
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    sort_spec: str,
+    reverse: bool,
+) -> List[Tuple[AllocationRow, Optional[ProbeShape]]]:
     keys = [key.strip().lower() for key in sort_spec.split(",") if key.strip()] or list(DEFAULT_SORT)
     allowed = {
         "cluster",
@@ -1351,18 +1511,23 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
         "usage",
         "tags",
         "wait",
+        "shape",
         "premium",
     }
     unknown = [key for key in keys if key not in allowed]
     if unknown:
         raise CommandError("unknown sort key(s): " + ", ".join(unknown))
 
-    def key_for(row: AllocationRow) -> Tuple[object, ...]:
+    def key_for(pair: Tuple[AllocationRow, Optional[ProbeShape]]) -> Tuple[object, ...]:
+        row, shape = pair
         values = []
         data = row.to_dict()
         for key in keys:
             if key == "wait":
-                values.append(_WAIT_SENTINEL if row.wait_seconds is None else row.wait_seconds)
+                wait = row.wait_by_shape.get(shape.label) if shape is not None else None
+                values.append(_WAIT_SENTINEL if wait is None else wait)
+            elif key == "shape":
+                values.append(shape.label if shape is not None else "")
             elif key == "premium":
                 values.append(0 if any_glob_match(row.gpu_types, PREMIUM_GPUS) else 1)
             elif key == "wall":
@@ -1375,16 +1540,22 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
                 values.append(data.get(key, ""))
         return tuple(values)
 
-    return sorted(rows, key=key_for, reverse=reverse)
+    return sorted(pairs, key=key_for, reverse=reverse)
 
 
 _AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage", "tags")
 
 
 def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -> List[str]:
+    sentinel_shape = ProbeShape() if include_wait else None
     return list(
         AllocationRow("", "", "", "", "", "")
-        .to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
+        .to_dict(
+            wide=wide,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            shape=sentinel_shape,
+        )
         .keys()
     )
 
@@ -1433,7 +1604,7 @@ def _wrap_gpu_list(text: str, width: int) -> List[str]:
 
 
 def table_output(
-    rows: List[AllocationRow],
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
@@ -1442,8 +1613,13 @@ def table_output(
     term_width: Optional[int] = None,
 ) -> str:
     records = [
-        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
-        for row in rows
+        row.to_dict(
+            wide=wide,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            shape=shape,
+        )
+        for row, shape in pairs
     ]
     all_columns = (
         list(records[0].keys())
@@ -1525,14 +1701,19 @@ def table_output(
 
 
 def csv_output(
-    rows: List[AllocationRow],
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
 ) -> str:
     records = [
-        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
-        for row in rows
+        row.to_dict(
+            wide=wide,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            shape=shape,
+        )
+        for row, shape in pairs
     ]
     columns = (
         list(records[0].keys())
@@ -1547,15 +1728,20 @@ def csv_output(
 
 
 def json_output(
-    rows: List[AllocationRow],
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
     include_help: bool = False,
 ) -> str:
     records = [
-        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
-        for row in rows
+        row.to_dict(
+            wide=wide,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            shape=shape,
+        )
+        for row, shape in pairs
     ]
     if not include_help:
         return json.dumps(records, indent=2, sort_keys=True)
@@ -1569,8 +1755,13 @@ def json_output(
                 "qos": "QOS to pass via --qos; partition is usually the same name",
                 "partition": "partition name (with --wide); pass via --partition",
                 "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
-                "wait": "predicted seconds until job start from `sbatch --test-only`; "
-                        "'now' means startable immediately, '?' / null means probe skipped or unknown",
+                "shape": "probed job shape: '<gpu>:<count>@<wall>[,<mem>]' or "
+                        "'cpu:<cpus>@<wall>[,<mem>]'. The 'wait' value on this row "
+                        "is for THIS shape on THIS allocation. With multiple --shape "
+                        "flags, each (allocation, shape) pair gets its own row.",
+                "wait": "predicted seconds until job start from `sbatch --test-only` "
+                        "for the shape on this row; 'now' means startable immediately, "
+                        "'?' / null means probe skipped or unknown",
                 "free_nodes": "live free/total node count from sinfo",
                 "free_cpus": "live free/total CPU count from sinfo",
                 "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
@@ -1584,13 +1775,16 @@ def json_output(
                 "usage": "RawUsage from sshare (lower = less recent consumption)",
             },
             "notes": [
-                "Rows are sorted by 'wait,premium,cluster,qos' by default: "
-                "lowest predicted wait first, then premium-GPU rows ahead of "
-                "non-premium, then alphabetical.",
+                "Rows are sorted by 'wait,shape,premium,cluster,qos' by default: "
+                "lowest predicted wait first, then grouped by shape, then "
+                "premium-GPU rows ahead of non-premium, then alphabetical.",
                 "Premium GPUs are the substring matches in `_help.premium_gpus` "
                 "against `gpu_types` (case-insensitive).",
                 "freecycle/guest QOS rows are preemptable; jobs there should "
                 "use --requeue and checkpoint.",
+                "With multiple --shape flags the output is in long format: one "
+                "row per (allocation, shape) pair. The `shape` column tells "
+                "you which shape was probed for that wait.",
             ],
         },
         "rows": records,
@@ -1625,8 +1819,8 @@ def run_self_test() -> int:
     assert "gpu" in row.tags
     assert "default" in row.tags
     assert "cluster" in row.to_dict()
-    assert csv_output([row], False).startswith("cluster,account,qos")
-    assert json.loads(json_output([row], False))[0]["account"] == "soc-gpu-np"
+    assert csv_output([(row, None)], False).startswith("cluster,account,qos")
+    assert json.loads(json_output([(row, None)], False))[0]["account"] == "soc-gpu-np"
 
     cluster, partition, bucket = parse_gres_line(
         "notchpeak|notchpeak-gpu|gpu:a100:4,gpu:2080ti:8(IDX:0-7)"
@@ -1660,8 +1854,8 @@ def run_self_test() -> int:
     parser = _build_parser()
     args_mixed = parser.parse_args(["--format", "JSON"])
     assert args_mixed.format == "json"
-    sorted_mixed = sort_rows([row], "Cluster,QOS", reverse=False)
-    assert sorted_mixed and sorted_mixed[0].cluster == "notchpeak"
+    sorted_mixed = sort_pairs([(row, None)], "Cluster,QOS", reverse=False)
+    assert sorted_mixed and sorted_mixed[0][0].cluster == "notchpeak"
     # Help text wires examples + case-insensitivity note.
     rendered = parser.format_help()
     assert "Examples:" in rendered
@@ -1771,7 +1965,7 @@ def run_self_test() -> int:
         "rtxpr4000bl:1/43, rtxpr6000bl:5/36, h200_1g.18gb:55/56"
     )
     rendered = table_output(
-        [avail_row], wide=False, include_avail=True, tty=True, term_width=60
+        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=60
     )
     rendered_lines = rendered.splitlines()
     # Header + rule + first data line + at least one indented continuation.
@@ -1782,7 +1976,7 @@ def run_self_test() -> int:
         repr(continuation)
     # When piped (tty=False) we get a single physical line per row.
     rendered_piped = table_output(
-        [avail_row], wide=False, include_avail=True, tty=False, term_width=60
+        [(avail_row, None)], wide=False, include_avail=True, tty=False, term_width=60
     )
     assert len(rendered_piped.splitlines()) == 3  # header + rule + one row
 
@@ -1806,7 +2000,7 @@ def run_self_test() -> int:
     second.free_cpus = "100/640"
     second.free_gpus = avail_row.free_gpus  # long, will wrap
     rendered_two = table_output(
-        [avail_row, second], wide=False, include_avail=True, tty=True, term_width=60
+        [(avail_row, None), (second, None)], wide=False, include_avail=True, tty=True, term_width=60
     )
     assert "\n\n" in rendered_two, "expected blank line between wrapping records"
 
@@ -1837,17 +2031,22 @@ def run_self_test() -> int:
         AllocationRow("c", "a3", "u", "", "q3", "q3"),
         AllocationRow("c", "a4", "u", "", "q4", "q4"),
     ]
-    rows_for_sort[0].wait_seconds = 7200
-    rows_for_sort[1].wait_seconds = 0
-    rows_for_sort[2].wait_seconds = None
-    rows_for_sort[3].wait_seconds = 3600
-    sorted_by_wait = sort_rows(rows_for_sort, "wait", reverse=False)
-    assert [r.wait_seconds for r in sorted_by_wait] == [0, 3600, 7200, None]
+    probe_default = ProbeShape()
+    rows_for_sort[0].wait_by_shape[probe_default.label] = 7200
+    rows_for_sort[1].wait_by_shape[probe_default.label] = 0
+    rows_for_sort[2].wait_by_shape[probe_default.label] = None
+    rows_for_sort[3].wait_by_shape[probe_default.label] = 3600
+    pairs_for_sort = [(row, probe_default) for row in rows_for_sort]
+    sorted_by_wait = sort_pairs(pairs_for_sort, "wait", reverse=False)
+    assert [r.wait_by_shape[probe_default.label] for r, _ in sorted_by_wait] == [0, 3600, 7200, None]
 
-    # Wait column shows up in to_dict only when include_avail=True.
-    avail_row.wait_seconds = 0
-    assert avail_row.to_dict(include_avail=True)["wait"] == "now"
+    # Wait/shape columns show up in to_dict only when include_avail=True and a shape is supplied.
+    avail_row.wait_by_shape[probe_default.label] = 0
+    rendered_dict = avail_row.to_dict(include_avail=True, shape=probe_default)
+    assert rendered_dict["wait"] == "now"
+    assert rendered_dict["shape"] == probe_default.label
     assert "wait" not in avail_row.to_dict()
+    assert "shape" not in avail_row.to_dict()
 
     # parse_gpu_spec: type+count, count-only, type-only, error cases.
     assert parse_gpu_spec("a100:4") == ("a100", 4)
@@ -1940,20 +2139,53 @@ def run_self_test() -> int:
     prem_rows[1].gpu_types = ("a100", "a100_80gb_pcie")
     prem_rows[2].gpu_types = ("rtx2080ti",)
     prem_rows[3].gpu_types = ("h100nvl",)
-    by_premium = sort_rows(prem_rows, "premium,qos", reverse=False)
-    assert [r.qos for r in by_premium] == ["q-a100", "q-h100", "q-rtx", "q-v100"], \
-        [r.qos for r in by_premium]
-    by_premium_rev = sort_rows(prem_rows, "premium,qos", reverse=True)
-    assert by_premium_rev[0].qos == "q-v100"
+    prem_pairs = [(row, None) for row in prem_rows]
+    by_premium = sort_pairs(prem_pairs, "premium,qos", reverse=False)
+    assert [r.qos for r, _ in by_premium] == ["q-a100", "q-h100", "q-rtx", "q-v100"], \
+        [r.qos for r, _ in by_premium]
+    by_premium_rev = sort_pairs(prem_pairs, "premium,qos", reverse=True)
+    assert by_premium_rev[0][0].qos == "q-v100"
 
-    payload = json.loads(json_output(prem_rows, wide=True, include_help=True))
+    payload = json.loads(json_output(prem_pairs, wide=True, include_help=True))
     assert isinstance(payload, dict)
     assert set(payload.keys()) == {"_help", "rows"}
     assert payload["_help"]["premium_gpus"] == list(PREMIUM_GPUS)
     assert "schema_version" in payload["_help"]
     assert "fields" in payload["_help"]
-    assert len(payload["rows"]) == len(prem_rows)
-    assert isinstance(json.loads(json_output(prem_rows, wide=False)), list)
+    assert "shape" in payload["_help"]["fields"]
+    assert len(payload["rows"]) == len(prem_pairs)
+    assert isinstance(json.loads(json_output(prem_pairs, wide=False)), list)
+
+    # parse_shape_spec round-trip + label format.
+    sh = parse_shape_spec("a100:4,mem=32G,time=24h")
+    assert sh.gpu_type == "a100" and sh.gpu_count == 4
+    assert sh.mem == "32G" and sh.time == "24h"
+    assert sh.label == "a100:4@24h,32G", sh.label
+    sh = parse_shape_spec("cpu:8,time=4h")
+    assert sh.cpus == 8 and sh.gpu_type is None and sh.gpu_count is None
+    assert sh.label == "cpu:8@4h", sh.label
+    sh = parse_shape_spec("a100")
+    assert sh.gpu_type == "a100" and sh.gpu_count == 1
+    sh = parse_shape_spec("32")
+    assert sh.cpus == 32 and sh.gpu_type is None
+    sh = parse_shape_spec("cpus=8,mem=16G,gpus=h100nvl:1,time=4h")
+    assert sh.cpus == 8 and sh.gpu_type == "h100nvl" and sh.gpu_count == 1
+    assert sh.label == "h100nvl:1@4h,16G", sh.label
+    # Multi-node prefix.
+    sh = parse_shape_spec("nodes=2,cpus=4,time=1h")
+    assert sh.nodes == 2 and sh.label == "2n*cpu:4@1h", sh.label
+    # Wall short-format edges.
+    assert _format_wall_short("00:01:00") == "1m"
+    assert _format_wall_short("3-00:00:00") == "3d"
+    assert _format_wall_short("01:30:00") == "1h30m"
+    # Bad shape specs raise.
+    for bad in ("", "cpus=", "time=banana", "weird=1", "cpus=0"):
+        try:
+            parse_shape_spec(bad)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
 
     parser_fmt = _build_parser()
     args_no_fmt = parser_fmt.parse_args([])
@@ -2029,15 +2261,21 @@ def main(argv: Sequence[str]) -> int:
         partition_avail=partition_avail,
     )
     rows = filter_rows(rows, args)
+    shapes: List[ProbeShape] = []
     if include_wait:
-        predict_wait_times(rows, shape=shape)
+        if args.shape:
+            shapes = [parse_shape_spec(s) for s in args.shape]
+        else:
+            shapes = [shape]
+        predict_wait_times(rows, shapes=shapes)
+    pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = (
-            "wait,premium,cluster,qos" if include_wait
+            "wait,shape,premium,cluster,qos" if include_wait
             else "premium,cluster,account,qos"
         )
-    rows = sort_rows(rows, sort_spec, args.reverse)
+    pairs = sort_pairs(pairs, sort_spec, args.reverse)
 
     # Resolve --format default: table on a TTY, json (wide) when piped or
     # redirected. Explicit --format always wins. JSON output (auto or
@@ -2052,19 +2290,19 @@ def main(argv: Sequence[str]) -> int:
             wide = True
 
     if args.sbatch:
-        output = sbatch_output(rows)
+        output = sbatch_output([row for row, _ in pairs])
     elif fmt == "csv":
-        output = csv_output(rows, wide, include_avail=include_avail, include_wait=include_wait)
+        output = csv_output(pairs, wide, include_avail=include_avail, include_wait=include_wait)
     elif fmt == "json":
         output = json_output(
-            rows,
+            pairs,
             wide,
             include_avail=include_avail,
             include_wait=include_wait,
             include_help=True,
         )
     else:
-        output = table_output(rows, wide, include_avail=include_avail, include_wait=include_wait)
+        output = table_output(pairs, wide, include_avail=include_avail, include_wait=include_wait)
 
     print(output)
     return 0
