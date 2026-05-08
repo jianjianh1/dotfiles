@@ -55,6 +55,5 @@
   "autoConnectIde": true,
   "editorMode": "vim",
   "showTurnDuration": true,
-  "terminalProgressBarEnabled": true,
-  "skipAutoPermissionPrompt": true
+  "terminalProgressBarEnabled": true
 }

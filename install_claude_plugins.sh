@@ -92,6 +92,12 @@ FAILURES=()
 . "$DIR/lib/common.sh"
 install_plugin() { run_step "$@"; }
 
+install_and_enable_plugin() {
+    local plugin="$1" market="${2:-claude-plugins-official}"
+    install_plugin "$plugin" claude_plugin_cmd install "$plugin@$market"
+    install_plugin "$plugin-enable" claude_plugin_cmd enable "$plugin@$market"
+}
+
 cleanup_stale_codex_plugin_state() {
     local settings_file="$HOME/.claude/settings.json"
 
@@ -217,37 +223,37 @@ if ! $CLAUDE_HAS_PLUGIN_CMD; then
 else
 
 # Integrations
-install_plugin "github" claude_plugin_cmd install github@claude-plugins-official
-install_plugin "linear" claude_plugin_cmd install linear@claude-plugins-official
-install_plugin "sentry" claude_plugin_cmd install sentry@claude-plugins-official
-install_plugin "notion" claude_plugin_cmd install notion@claude-plugins-official
-install_plugin "slack" claude_plugin_cmd install slack@claude-plugins-official
+install_and_enable_plugin github
+install_and_enable_plugin linear
+install_and_enable_plugin sentry
+install_and_enable_plugin notion
+install_and_enable_plugin slack
 
 # Codex (OpenAI) — add marketplace then install
 cleanup_stale_codex_plugin_state
 if $CLAUDE_HAS_PLUGIN_MARKETPLACE; then
     install_plugin "codex-marketplace" claude_plugin_cmd marketplace add openai/codex-plugin-cc
-    install_plugin "codex" claude_plugin_cmd install codex@openai-codex
+    install_and_enable_plugin codex openai-codex
 else
     echo "  Skipping Codex marketplace plugin (plugin marketplace subcommand unavailable)"
 fi
 
 # Development workflows
-install_plugin "commit-commands" claude_plugin_cmd install commit-commands@claude-plugins-official
-install_plugin "pr-review-toolkit" claude_plugin_cmd install pr-review-toolkit@claude-plugins-official
+install_and_enable_plugin commit-commands
+install_and_enable_plugin pr-review-toolkit
 
 # Development tools
-install_plugin "agent-sdk-dev" claude_plugin_cmd install agent-sdk-dev@claude-plugins-official
+install_and_enable_plugin agent-sdk-dev
 
 # Code intelligence (LSPs)
-install_plugin "clangd-lsp" claude_plugin_cmd install clangd-lsp@claude-plugins-official
-install_plugin "pyright-lsp" claude_plugin_cmd install pyright-lsp@claude-plugins-official
-install_plugin "typescript-lsp" claude_plugin_cmd install typescript-lsp@claude-plugins-official
-install_plugin "gopls-lsp" claude_plugin_cmd install gopls-lsp@claude-plugins-official
-install_plugin "rust-analyzer-lsp" claude_plugin_cmd install rust-analyzer-lsp@claude-plugins-official
+install_and_enable_plugin clangd-lsp
+install_and_enable_plugin pyright-lsp
+install_and_enable_plugin typescript-lsp
+install_and_enable_plugin gopls-lsp
+install_and_enable_plugin rust-analyzer-lsp
 
 # Output styles
-install_plugin "explanatory-output-style" claude_plugin_cmd install explanatory-output-style@claude-plugins-official
+install_and_enable_plugin explanatory-output-style
 fi
 
 # --- Summary ---
