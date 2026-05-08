@@ -12,9 +12,12 @@ import csv
 import fnmatch
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from io import StringIO
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -132,12 +135,18 @@ class AllocationRow:
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
+        self.wait_seconds: Optional[int] = None
 
     @property
     def is_default(self) -> bool:
         return bool(self.default_qos) and self.qos == self.default_qos
 
-    def to_dict(self, wide: bool = False, include_avail: bool = False) -> Dict[str, str]:
+    def to_dict(
+        self,
+        wide: bool = False,
+        include_avail: bool = False,
+        include_wait: bool = True,
+    ) -> Dict[str, str]:
         data = {
             "cluster": self.cluster,
             "account": self.account,
@@ -170,6 +179,8 @@ class AllocationRow:
                 }
             )
         if include_avail:
+            if include_wait:
+                data["wait"] = _format_wait(self.wait_seconds)
             data["free_nodes"] = self.free_nodes
             data["free_cpus"] = self.free_cpus
             data["free_gpus"] = self.free_gpus
@@ -198,8 +209,10 @@ Examples:
   chpc-allocs --gpu-type h100nvl --no-freecycle --no-guest
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
-  chpc-allocs                              # default now includes free_nodes/free_cpus/free_gpus
-  chpc-allocs --no-avail                   # skip the live sinfo call (faster, static columns only)
+  chpc-allocs                              # default: ranked by predicted wait time
+  chpc-allocs --no-wait                    # skip sbatch --test-only probe (faster)
+  chpc-allocs --no-avail                   # skip live sinfo too (legacy view)
+  chpc-allocs --sort cluster,qos           # restore alphabetical ordering
   chpc-allocs --gpu-type a100              # only a100-bearing rows + live free counts
   chpc-allocs --list-gpus                  # cluster/partition GPU inventory (free/total)
   chpc-allocs --list-cpus                  # cluster/partition feature inventory + free
@@ -310,9 +323,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show extra columns including partition, gpu_types, TRES limits, and flags.",
     )
     parser.add_argument(
-        "--sort", default="cluster,account,qos", metavar="KEYS",
+        "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Valid: "
-        "cluster, account, qos, default, wall, priority, fairshare, usage, tags.",
+        "wait, cluster, account, qos, default, wall, priority, fairshare, "
+        "usage, tags. Default sort is 'wait,cluster,qos' when wait is "
+        "available, else 'cluster,account,qos'.",
     )
     parser.add_argument(
         "--reverse", action="store_true",
@@ -332,6 +347,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # Hidden no-op kept for backward compatibility — availability is now the default.
     parser.add_argument(
         "--avail", action="store_true", help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-wait", action="store_true",
+        help="Skip the sbatch --test-only probe; omits the 'wait' column. "
+        "Default behavior runs one probe per allocation in parallel (~1s).",
     )
     parser.add_argument(
         "--sbatch", action="store_true",
@@ -680,6 +700,107 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             free = max(0, total - used) if free_node else 0
             bucket.add_gpu(gtype, free, total)
     return result
+
+
+# Matches the relevant part of `sbatch --test-only`'s stderr line:
+# "sbatch: Job 12345 to start at 2026-05-08T03:00:00 using 1 processors on nodes ..."
+_TEST_ONLY_RE = re.compile(r"to start at (\S+)")
+
+
+def parse_test_only_stderr(text: str) -> Optional[datetime]:
+    """Extract the predicted start datetime from `sbatch --test-only` stderr.
+
+    Returns None when SLURM produced an allocation failure or unexpected output.
+    """
+    match = _TEST_ONLY_RE.search(text or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _format_wait(seconds: Optional[int]) -> str:
+    """Render a wait-time delta compactly. None → '?'; 0 → 'now'; etc."""
+    if seconds is None:
+        return "?"
+    if seconds <= 60:
+        return "now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        if minutes:
+            return f"{hours}h{minutes}m"
+        return f"{hours}h"
+    days, hours = divmod(hours, 24)
+    if hours:
+        return f"{days}d{hours}h"
+    return f"{days}d"
+
+
+def predict_wait(row: "AllocationRow", timeout: float = 10.0) -> Optional[int]:
+    """Return seconds-until-start for a 1-CPU (+1 GPU on GPU rows) probe job,
+    or None if SLURM rejects the probe / can't predict.
+
+    Iterates through `_candidate_partitions(row)` because some QOS names don't
+    match the partition (e.g. `granite-freecycle` QOS lives on `granite`
+    partition; the existing helper produces both candidates in order).
+    """
+    sbatch = shutil.which("sbatch")
+    if not sbatch or not row.account or not row.qos:
+        return None
+    candidates = [c for c in _candidate_partitions(row) if c]
+    if not candidates:
+        return None
+    for partition in candidates:
+        args = [
+            sbatch,
+            "--test-only",
+            "-M", row.cluster,
+            "-A", row.account,
+            "-p", partition,
+            "-q", row.qos,
+            "-N", "1",
+            "-n", "1",
+            "-t", "00:01:00",
+        ]
+        if "gpu" in row.tags:
+            args.append("--gres=gpu:1")
+        args.append("--wrap=true")
+        try:
+            result = subprocess.run(
+                args,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        # `--test-only` prints to stderr regardless of success.
+        start = parse_test_only_stderr(result.stderr) or parse_test_only_stderr(result.stdout)
+        if start is not None:
+            delta = (start - datetime.now()).total_seconds()
+            return max(0, int(delta))
+    return None
+
+
+def predict_wait_times(rows: List["AllocationRow"], max_workers: int = 8) -> None:
+    """Populate `row.wait_seconds` for every row, in parallel."""
+    if not rows or shutil.which("sbatch") is None:
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(predict_wait, row): row for row in rows}
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                row.wait_seconds = future.result()
+            except Exception:
+                row.wait_seconds = None
 
 
 def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
@@ -1043,6 +1164,9 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
     return result
 
 
+_WAIT_SENTINEL = 10**12  # sorts unknown waits to the end (still < float('inf') headaches)
+
+
 def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[AllocationRow]:
     keys = [key.strip().lower() for key in sort_spec.split(",") if key.strip()] or list(DEFAULT_SORT)
     allowed = {
@@ -1055,6 +1179,7 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
         "fairshare",
         "usage",
         "tags",
+        "wait",
     }
     unknown = [key for key in keys if key not in allowed]
     if unknown:
@@ -1064,7 +1189,9 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
         values = []
         data = row.to_dict()
         for key in keys:
-            if key == "wall":
+            if key == "wait":
+                values.append(_WAIT_SENTINEL if row.wait_seconds is None else row.wait_seconds)
+            elif key == "wall":
                 values.append(parse_wall_seconds(row.qos_info.max_wall) or -1)
             elif key in {"priority", "fairshare", "usage"}:
                 values.append(parse_float(data.get(key, "")) if parse_float(data.get(key, "")) is not None else -1.0)
@@ -1080,10 +1207,10 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
 _AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage", "tags")
 
 
-def _empty_columns(wide: bool, include_avail: bool) -> List[str]:
+def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -> List[str]:
     return list(
         AllocationRow("", "", "", "", "", "")
-        .to_dict(wide=wide, include_avail=include_avail)
+        .to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
         .keys()
     )
 
@@ -1135,12 +1262,20 @@ def table_output(
     rows: List[AllocationRow],
     wide: bool,
     include_avail: bool = False,
+    include_wait: bool = True,
     *,
     tty: Optional[bool] = None,
     term_width: Optional[int] = None,
 ) -> str:
-    records = [row.to_dict(wide=wide, include_avail=include_avail) for row in rows]
-    all_columns = list(records[0].keys()) if records else _empty_columns(wide, include_avail)
+    records = [
+        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
+        for row in rows
+    ]
+    all_columns = (
+        list(records[0].keys())
+        if records
+        else _empty_columns(wide, include_avail, include_wait)
+    )
     columns = _select_table_columns(all_columns, wide, include_avail)
 
     if tty is None:
@@ -1215,9 +1350,21 @@ def table_output(
     return "\n".join(lines)
 
 
-def csv_output(rows: List[AllocationRow], wide: bool, include_avail: bool = False) -> str:
-    records = [row.to_dict(wide=wide, include_avail=include_avail) for row in rows]
-    columns = list(records[0].keys()) if records else _empty_columns(wide, include_avail)
+def csv_output(
+    rows: List[AllocationRow],
+    wide: bool,
+    include_avail: bool = False,
+    include_wait: bool = True,
+) -> str:
+    records = [
+        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
+        for row in rows
+    ]
+    columns = (
+        list(records[0].keys())
+        if records
+        else _empty_columns(wide, include_avail, include_wait)
+    )
     stream = StringIO()
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
@@ -1225,9 +1372,17 @@ def csv_output(rows: List[AllocationRow], wide: bool, include_avail: bool = Fals
     return stream.getvalue().rstrip("\n")
 
 
-def json_output(rows: List[AllocationRow], wide: bool, include_avail: bool = False) -> str:
+def json_output(
+    rows: List[AllocationRow],
+    wide: bool,
+    include_avail: bool = False,
+    include_wait: bool = True,
+) -> str:
     return json.dumps(
-        [row.to_dict(wide=wide, include_avail=include_avail) for row in rows],
+        [
+            row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
+            for row in rows
+        ],
         indent=2,
         sort_keys=True,
     )
@@ -1445,6 +1600,45 @@ def run_self_test() -> int:
     )
     assert "\n\n" in rendered_two, "expected blank line between wrapping records"
 
+    # Wait-time formatter.
+    assert _format_wait(None) == "?"
+    assert _format_wait(0) == "now"
+    assert _format_wait(45) == "now"
+    assert _format_wait(180) == "3m"
+    assert _format_wait(7200) == "2h"
+    assert _format_wait(3900) == "1h5m"
+    assert _format_wait(90060) == "1d1h"
+    assert _format_wait(86400 * 3) == "3d"
+
+    # Test-only stderr parser.
+    sample = (
+        "sbatch: Job 12704030 to start at 2026-05-08T03:00:00 using "
+        "1 processors on nodes notch001 in partition notchpeak-gpu"
+    )
+    parsed = parse_test_only_stderr(sample)
+    assert parsed == datetime(2026, 5, 8, 3, 0, 0)
+    assert parse_test_only_stderr("allocation failure: invalid account") is None
+    assert parse_test_only_stderr("") is None
+
+    # Sort by wait: None pushes to the end; 0 first, then 3600, 7200.
+    rows_for_sort = [
+        AllocationRow("c", "a1", "u", "", "q1", "q1"),
+        AllocationRow("c", "a2", "u", "", "q2", "q2"),
+        AllocationRow("c", "a3", "u", "", "q3", "q3"),
+        AllocationRow("c", "a4", "u", "", "q4", "q4"),
+    ]
+    rows_for_sort[0].wait_seconds = 7200
+    rows_for_sort[1].wait_seconds = 0
+    rows_for_sort[2].wait_seconds = None
+    rows_for_sort[3].wait_seconds = 3600
+    sorted_by_wait = sort_rows(rows_for_sort, "wait", reverse=False)
+    assert [r.wait_seconds for r in sorted_by_wait] == [0, 3600, 7200, None]
+
+    # Wait column shows up in to_dict only when include_avail=True.
+    avail_row.wait_seconds = 0
+    assert avail_row.to_dict(include_avail=True)["wait"] == "now"
+    assert "wait" not in avail_row.to_dict()
+
     print("self-test passed")
     return 0
 
@@ -1470,6 +1664,7 @@ def main(argv: Sequence[str]) -> int:
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
     rows = show_associations(user=user, all_visible=args.all_visible)
     include_avail = not args.no_avail
+    include_wait = include_avail and not args.no_wait
     partition_avail = show_partition_availability() if include_avail else None
     # When availability data is loaded, derive the gpu-types map from it instead
     # of making a second sinfo call. Matches the shape show_partition_gpus returns.
@@ -1492,16 +1687,21 @@ def main(argv: Sequence[str]) -> int:
         partition_avail=partition_avail,
     )
     rows = filter_rows(rows, args)
-    rows = sort_rows(rows, args.sort, args.reverse)
+    if include_wait:
+        predict_wait_times(rows)
+    sort_spec = args.sort
+    if sort_spec is None:
+        sort_spec = "wait,cluster,qos" if include_wait else "cluster,account,qos"
+    rows = sort_rows(rows, sort_spec, args.reverse)
 
     if args.sbatch:
         output = sbatch_output(rows)
     elif args.format == "csv":
-        output = csv_output(rows, args.wide, include_avail=include_avail)
+        output = csv_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
     elif args.format == "json":
-        output = json_output(rows, args.wide, include_avail=include_avail)
+        output = json_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
     else:
-        output = table_output(rows, args.wide, include_avail=include_avail)
+        output = table_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
 
     print(output)
     return 0
