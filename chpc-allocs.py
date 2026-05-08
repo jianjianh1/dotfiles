@@ -198,8 +198,9 @@ Examples:
   chpc-allocs --gpu-type h100nvl --no-freecycle --no-guest
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
-  chpc-allocs --avail                      # add free_nodes/free_cpus/free_gpus columns
-  chpc-allocs --avail --gpu-type a100      # only a100-bearing rows + live free counts
+  chpc-allocs                              # default now includes free_nodes/free_cpus/free_gpus
+  chpc-allocs --no-avail                   # skip the live sinfo call (faster, static columns only)
+  chpc-allocs --gpu-type a100              # only a100-bearing rows + live free counts
   chpc-allocs --list-gpus                  # cluster/partition GPU inventory (free/total)
   chpc-allocs --list-cpus                  # cluster/partition feature inventory + free
   chpc-allocs --wide --format csv > allocs.csv
@@ -322,11 +323,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the sshare lookup (faster, but FairShare/Usage columns will be empty).",
     )
     parser.add_argument(
-        "--avail", action="store_true",
-        help="Add live free_nodes/free_cpus/free_gpus columns sourced from sinfo. "
-        "Counts only nodes in idle/mix states as contributing free capacity. "
-        "In table mode, hides priority/fairshare/usage/default/tags to keep "
-        "rows narrow (use --wide to bring them back). CSV/JSON include all keys.",
+        "--no-avail", action="store_true",
+        help="Skip the live availability sinfo call; omits the free_nodes/"
+        "free_cpus/free_gpus columns. Default is to include them. In table "
+        "mode they replace priority/fairshare/usage/default/tags (use --wide "
+        "to bring those back).",
+    )
+    # Hidden no-op kept for backward compatibility — availability is now the default.
+    parser.add_argument(
+        "--avail", action="store_true", help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--sbatch", action="store_true",
@@ -1464,9 +1469,10 @@ def main(argv: Sequence[str]) -> int:
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
     rows = show_associations(user=user, all_visible=args.all_visible)
-    partition_avail = show_partition_availability() if args.avail else None
-    # When --avail is set, derive the gpu-types map from availability instead of
-    # making a second sinfo call. Matches the shape show_partition_gpus returns.
+    include_avail = not args.no_avail
+    partition_avail = show_partition_availability() if include_avail else None
+    # When availability data is loaded, derive the gpu-types map from it instead
+    # of making a second sinfo call. Matches the shape show_partition_gpus returns.
     if partition_avail is not None and (args.gpu_type or args.wide):
         partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
@@ -1491,11 +1497,11 @@ def main(argv: Sequence[str]) -> int:
     if args.sbatch:
         output = sbatch_output(rows)
     elif args.format == "csv":
-        output = csv_output(rows, args.wide, include_avail=args.avail)
+        output = csv_output(rows, args.wide, include_avail=include_avail)
     elif args.format == "json":
-        output = json_output(rows, args.wide, include_avail=args.avail)
+        output = json_output(rows, args.wide, include_avail=include_avail)
     else:
-        output = table_output(rows, args.wide, include_avail=args.avail)
+        output = table_output(rows, args.wide, include_avail=include_avail)
 
     print(output)
     return 0
