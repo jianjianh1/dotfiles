@@ -210,6 +210,9 @@ Examples:
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
   chpc-allocs                              # default: ranked by predicted wait time
+  chpc-allocs --gpus a100:4 --cpus 16 --time 4:00:00  # tune probe to your job
+  chpc-allocs --wait-for a100:4            # focused: a100x4 wait across allocs
+  chpc-allocs --wait-for cpu:32            # focused: 32-core CPU wait
   chpc-allocs --no-wait                    # skip sbatch --test-only probe (faster)
   chpc-allocs --no-avail                   # skip live sinfo too (legacy view)
   chpc-allocs --sort cluster,qos           # restore alphabetical ordering
@@ -352,6 +355,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-wait", action="store_true",
         help="Skip the sbatch --test-only probe; omits the 'wait' column. "
         "Default behavior runs one probe per allocation in parallel (~1s).",
+    )
+    parser.add_argument(
+        "--cpus", type=int, metavar="N", default=1,
+        help="CPUs per task for the wait probe (default: 1). Increasing this "
+        "yields a more realistic 'wait' for jobs that need many cores.",
+    )
+    parser.add_argument(
+        "--mem", metavar="SIZE",
+        help="Memory request for the wait probe (e.g. 16G, 128G). Default: unset.",
+    )
+    parser.add_argument(
+        "--nodes", type=int, metavar="N", default=1,
+        help="Node count for the wait probe (default: 1).",
+    )
+    parser.add_argument(
+        "--gpus", metavar="SPEC",
+        help="GPU shape for the wait probe. Forms: 'a100:4' (type+count), "
+        "'4' (any type, that count), 'a100' (1 of that type). Default on GPU "
+        "rows is 'gpu:1'; CPU rows are unaffected. Rows whose gpu_types don't "
+        "include the requested type skip the probe (wait shows '?').",
+    )
+    parser.add_argument(
+        "--time", metavar="DURATION", default="00:01:00",
+        help="Wall time for the wait probe (HH:MM:SS, D-HH:MM:SS, or Nd). "
+        "Default: 00:01:00. Larger values bias toward partitions with "
+        "long-running headroom.",
+    )
+    parser.add_argument(
+        "--wait-for", metavar="SPEC",
+        help="Shorthand: focus the run on a specific job shape. "
+        "'a100:4' -> --gpus a100:4 + --gpu-type a100; "
+        "'gpu:4'  -> --gpus 4 + --gpu; "
+        "'cpu:32' -> --cpus 32 + --cpu; "
+        "'32'     -> same as cpu:32.",
     )
     parser.add_argument(
         "--sbatch", action="store_true",
@@ -702,6 +739,122 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
     return result
 
 
+class ProbeShape:
+    """Shape of the hypothetical job used for `sbatch --test-only` wait probing.
+
+    Defaults reproduce the historical behavior: 1 node, 1 CPU, 1-minute wall,
+    `--gres=gpu:1` on GPU rows, no GRES on CPU rows. When the user supplies
+    flags (--cpus/--mem/--nodes/--gpus/--time), this carries them into the
+    probe so the predicted wait reflects the actual job they intend to run.
+    """
+
+    def __init__(
+        self,
+        nodes: int = 1,
+        cpus: int = 1,
+        mem: Optional[str] = None,
+        gpu_type: Optional[str] = None,
+        gpu_count: Optional[int] = None,
+        time: str = "00:01:00",
+    ) -> None:
+        self.nodes = nodes
+        self.cpus = cpus
+        self.mem = mem
+        self.gpu_type = gpu_type.lower() if gpu_type else None
+        self.gpu_count = gpu_count
+        self.time = time
+
+    def gres_for(self, row: "AllocationRow") -> Optional[str]:
+        """Return the --gres value for this row, or None to omit the flag."""
+        if "gpu" not in row.tags:
+            return None
+        count = self.gpu_count if self.gpu_count is not None else 1
+        if self.gpu_type:
+            return f"gpu:{self.gpu_type}:{count}"
+        return f"gpu:{count}"
+
+    def to_sbatch_args(self, row: "AllocationRow") -> List[str]:
+        args = ["-N", str(self.nodes), "-n", str(self.cpus), "-t", self.time]
+        if self.mem:
+            args.append(f"--mem={self.mem}")
+        gres = self.gres_for(row)
+        if gres:
+            args.append(f"--gres={gres}")
+        return args
+
+    def should_skip(self, row: "AllocationRow") -> bool:
+        """True when this shape can't possibly run on this row (skip the probe)."""
+        gpu_requested = self.gpu_type is not None or self.gpu_count is not None
+        if not gpu_requested:
+            return False
+        if "gpu" not in row.tags:
+            return True
+        if self.gpu_type and row.gpu_types:
+            # Empty row.gpu_types just means metadata wasn't loaded.
+            return not any_glob_match(row.gpu_types, [self.gpu_type])
+        return False
+
+
+def _parse_positive_int(text: str, error: str) -> int:
+    if not text or not text.isdigit() or int(text) <= 0:
+        raise CommandError(error)
+    return int(text)
+
+
+def parse_gpu_spec(spec: str) -> Tuple[Optional[str], int]:
+    """Parse a --gpus value into (gpu_type, count).
+
+    Forms:
+      'a100:4' -> ('a100', 4)
+      '4'      -> (None, 4)       # any GPU type
+      'a100'   -> ('a100', 1)
+    """
+    err = f"invalid --gpus spec: {spec!r}"
+    s = (spec or "").strip().lower()
+    if not s:
+        raise CommandError(err)
+    if ":" in s:
+        type_, _, count = s.partition(":")
+        type_ = type_.strip()
+        if not type_:
+            raise CommandError(err)
+        return (type_, _parse_positive_int(count.strip(), err))
+    if s.isdigit():
+        return (None, _parse_positive_int(s, err))
+    return (s, 1)
+
+
+def apply_wait_for_shorthand(args: argparse.Namespace) -> None:
+    """Translate `--wait-for SPEC` into the matching probe-shape + filter flags.
+
+    Forms:
+      cpu:N or bare N  -> --cpus N + --cpu
+      gpu:N            -> --gpus N + --gpu       (any GPU type)
+      TYPE[:N]         -> --gpus TYPE[:N] + adds TYPE to --gpu-type
+    """
+    spec = getattr(args, "wait_for", None)
+    if not spec:
+        return
+    s = spec.strip().lower()
+    err = f"invalid --wait-for spec: {spec!r}"
+    if not s:
+        raise CommandError(err)
+    if s.startswith("cpu:") or s.isdigit():
+        args.cpus = _parse_positive_int(s[4:] if s.startswith("cpu:") else s, err)
+        args.cpu = True
+        return
+    if s.startswith("gpu:"):
+        args.gpus = str(_parse_positive_int(s[4:], err))
+        args.gpu = True
+        return
+    try:
+        gtype, _count = parse_gpu_spec(s)
+    except CommandError:
+        raise CommandError(err) from None
+    args.gpus = s
+    args.gpu_type = (args.gpu_type or []) + [gtype]
+
+
 # Matches the relevant part of `sbatch --test-only`'s stderr line:
 # "sbatch: Job 12345 to start at 2026-05-08T03:00:00 using 1 processors on nodes ..."
 _TEST_ONLY_RE = re.compile(r"to start at (\S+)")
@@ -741,14 +894,23 @@ def _format_wait(seconds: Optional[int]) -> str:
     return f"{days}d"
 
 
-def predict_wait(row: "AllocationRow", timeout: float = 10.0) -> Optional[int]:
-    """Return seconds-until-start for a 1-CPU (+1 GPU on GPU rows) probe job,
-    or None if SLURM rejects the probe / can't predict.
+def predict_wait(
+    row: "AllocationRow",
+    timeout: float = 10.0,
+    shape: Optional[ProbeShape] = None,
+) -> Optional[int]:
+    """Return seconds-until-start for a probe job shaped like `shape`
+    (default: 1 CPU + 1 GPU on GPU rows + 1-minute wall), or None if SLURM
+    rejects the probe / can't predict.
 
     Iterates through `_candidate_partitions(row)` because some QOS names don't
     match the partition (e.g. `granite-freecycle` QOS lives on `granite`
     partition; the existing helper produces both candidates in order).
     """
+    if shape is None:
+        shape = ProbeShape()
+    if shape.should_skip(row):
+        return None
     sbatch = shutil.which("sbatch")
     if not sbatch or not row.account or not row.qos:
         return None
@@ -763,12 +925,8 @@ def predict_wait(row: "AllocationRow", timeout: float = 10.0) -> Optional[int]:
             "-A", row.account,
             "-p", partition,
             "-q", row.qos,
-            "-N", "1",
-            "-n", "1",
-            "-t", "00:01:00",
         ]
-        if "gpu" in row.tags:
-            args.append("--gres=gpu:1")
+        args.extend(shape.to_sbatch_args(row))
         args.append("--wrap=true")
         try:
             result = subprocess.run(
@@ -789,12 +947,18 @@ def predict_wait(row: "AllocationRow", timeout: float = 10.0) -> Optional[int]:
     return None
 
 
-def predict_wait_times(rows: List["AllocationRow"], max_workers: int = 8) -> None:
+def predict_wait_times(
+    rows: List["AllocationRow"],
+    max_workers: int = 8,
+    shape: Optional[ProbeShape] = None,
+) -> None:
     """Populate `row.wait_seconds` for every row, in parallel."""
     if not rows or shutil.which("sbatch") is None:
         return
+    if shape is None:
+        shape = ProbeShape()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(predict_wait, row): row for row in rows}
+        futures = {pool.submit(predict_wait, row, shape=shape): row for row in rows}
         for future in as_completed(futures):
             row = futures[future]
             try:
@@ -1639,6 +1803,87 @@ def run_self_test() -> int:
     assert avail_row.to_dict(include_avail=True)["wait"] == "now"
     assert "wait" not in avail_row.to_dict()
 
+    # parse_gpu_spec: type+count, count-only, type-only, error cases.
+    assert parse_gpu_spec("a100:4") == ("a100", 4)
+    assert parse_gpu_spec("4") == (None, 4)
+    assert parse_gpu_spec("a100") == ("a100", 1)
+    assert parse_gpu_spec("A100:8") == ("a100", 8)
+    for bad in ("", "  ", ":4", "a100:", "a100:0", "0", "a100:x"):
+        try:
+            parse_gpu_spec(bad)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"parse_gpu_spec({bad!r}) should have raised")
+
+    # ProbeShape.gres_for: defaults preserve historic 'gpu:1' on GPU rows,
+    # nothing on CPU rows; user-supplied counts/types render correctly.
+    gpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    gpu_row.tags = ("gpu",)
+    gpu_row.gpu_types = ("v100",)
+    cpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    cpu_row.tags = ("cpu",)
+    assert ProbeShape().gres_for(gpu_row) == "gpu:1"
+    assert ProbeShape().gres_for(cpu_row) is None
+    assert ProbeShape(gpu_count=4).gres_for(gpu_row) == "gpu:4"
+    assert ProbeShape(gpu_type="a100", gpu_count=4).gres_for(gpu_row) == "gpu:a100:4"
+    assert ProbeShape(gpu_type="a100").gres_for(gpu_row) == "gpu:a100:1"
+    assert ProbeShape(gpu_type="a100", gpu_count=4).gres_for(cpu_row) is None
+
+    # to_sbatch_args: time/nodes/cpus/mem flow through; gres only when applicable.
+    args_built = ProbeShape(nodes=2, cpus=8, mem="32G", time="04:00:00").to_sbatch_args(gpu_row)
+    assert "-N" in args_built and args_built[args_built.index("-N") + 1] == "2"
+    assert "-n" in args_built and args_built[args_built.index("-n") + 1] == "8"
+    assert "-t" in args_built and args_built[args_built.index("-t") + 1] == "04:00:00"
+    assert "--mem=32G" in args_built
+    assert "--gres=gpu:1" in args_built
+    assert "--gres=gpu:a100:4" in ProbeShape(gpu_type="a100", gpu_count=4).to_sbatch_args(gpu_row)
+    assert all(a != "--mem=" for a in ProbeShape().to_sbatch_args(gpu_row))
+
+    # should_skip: typed GPU request against mismatched/empty/matching rows.
+    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(gpu_row) is True
+    assert ProbeShape(gpu_type="v100", gpu_count=4).should_skip(gpu_row) is False
+    empty_gpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    empty_gpu_row.tags = ("gpu",)
+    # Empty gpu_types means metadata wasn't loaded: don't skip.
+    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(empty_gpu_row) is False
+    # CPU row + GPU request (typed or untyped): always skip.
+    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(cpu_row) is True
+    assert ProbeShape(gpu_count=4).should_skip(cpu_row) is True
+    # Untyped count-only on a GPU row still probes (any GPU is fine).
+    assert ProbeShape(gpu_count=4).should_skip(gpu_row) is False
+    # Default probe never skips.
+    assert ProbeShape().should_skip(gpu_row) is False
+    assert ProbeShape().should_skip(cpu_row) is False
+    # predict_wait honors should_skip even with sbatch on PATH.
+    assert predict_wait(gpu_row, shape=ProbeShape(gpu_type="a100", gpu_count=4)) is None
+
+    # apply_wait_for_shorthand: each form maps to the right flag combo.
+    parser = _build_parser()
+    a = parser.parse_args(["--wait-for", "a100:4"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "a100:4" and "a100" in (a.gpu_type or [])
+    a = parser.parse_args(["--wait-for", "gpu:4"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "4" and a.gpu is True
+    a = parser.parse_args(["--wait-for", "cpu:32"])
+    apply_wait_for_shorthand(a)
+    assert a.cpus == 32 and a.cpu is True
+    a = parser.parse_args(["--wait-for", "32"])
+    apply_wait_for_shorthand(a)
+    assert a.cpus == 32 and a.cpu is True
+    a = parser.parse_args(["--wait-for", "a100"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "a100" and "a100" in (a.gpu_type or [])
+    for bad in ("cpu:0", "gpu:abc", "cpu:", "gpu:0", "a100:0"):
+        a = parser.parse_args(["--wait-for", bad])
+        try:
+            apply_wait_for_shorthand(a)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"apply_wait_for_shorthand({bad!r}) should have raised")
+
     print("self-test passed")
     return 0
 
@@ -1647,12 +1892,30 @@ def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     if args.self_test:
         return run_self_test()
+    apply_wait_for_shorthand(args)
     if args.gpu and args.cpu:
         raise CommandError("--gpu and --cpu cannot be used together")
     if args.freecycle and args.no_freecycle:
         raise CommandError("--freecycle and --no-freecycle cannot be used together")
     if args.guest and args.no_guest:
         raise CommandError("--guest and --no-guest cannot be used together")
+    if args.cpus <= 0:
+        raise CommandError(f"--cpus must be > 0: {args.cpus}")
+    if args.nodes <= 0:
+        raise CommandError(f"--nodes must be > 0: {args.nodes}")
+    if parse_wall_seconds(args.time) is None:
+        raise CommandError(f"invalid --time value: {args.time}")
+    gpu_type, gpu_count = (None, None)
+    if args.gpus:
+        gpu_type, gpu_count = parse_gpu_spec(args.gpus)
+    shape = ProbeShape(
+        nodes=args.nodes,
+        cpus=args.cpus,
+        mem=args.mem,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
+        time=args.time,
+    )
 
     if args.list_gpus:
         print(format_gpu_summary(show_partition_availability()))
@@ -1688,7 +1951,7 @@ def main(argv: Sequence[str]) -> int:
     )
     rows = filter_rows(rows, args)
     if include_wait:
-        predict_wait_times(rows)
+        predict_wait_times(rows, shape=shape)
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = "wait,cluster,qos" if include_wait else "cluster,account,qos"
