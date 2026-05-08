@@ -57,6 +57,11 @@ SHARE_FIELDS = [
 
 DEFAULT_SORT = ("cluster", "account", "qos")
 
+# GPU types treated as "premium" for default sort ranking. Substring-matched
+# case-insensitively against row.gpu_types so e.g. "a100" matches both "a100"
+# and "a100_80gb_pcie", and "h100" matches "h100nvl".
+PREMIUM_GPUS = ("a100", "h100", "h200", "a6000")
+
 
 class QOSInfo:
     def __init__(
@@ -202,21 +207,20 @@ case-insensitive substrings, so --cluster NOTCH matches notchpeak.
 
 EPILOG = """\
 Examples:
-  chpc-allocs                              # all of your allocations
+  chpc-allocs                              # all allocs; premium GPUs (a100/h100/h200/a6000) ranked first
+  chpc-allocs | jq '.rows[]'               # piped: auto JSON (wide) with _help legend
   chpc-allocs --cluster notchpeak --gpu    # GPU rows on notchpeak only
   chpc-allocs --gpu-type a100 --sbatch     # a100 + a100_80gb_pcie + MIG slices
   chpc-allocs --gpu-type 'h*'              # any Hopper / H-series
   chpc-allocs --gpu-type h100nvl --no-freecycle --no-guest
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
-  chpc-allocs                              # default: ranked by predicted wait time
   chpc-allocs --gpus a100:4 --cpus 16 --time 4:00:00  # tune probe to your job
   chpc-allocs --wait-for a100:4            # focused: a100x4 wait across allocs
   chpc-allocs --wait-for cpu:32            # focused: 32-core CPU wait
   chpc-allocs --no-wait                    # skip sbatch --test-only probe (faster)
   chpc-allocs --no-avail                   # skip live sinfo too (legacy view)
-  chpc-allocs --sort cluster,qos           # restore alphabetical ordering
-  chpc-allocs --gpu-type a100              # only a100-bearing rows + live free counts
+  chpc-allocs --sort cluster,qos           # restore alphabetical ordering (drop premium tier)
   chpc-allocs --list-gpus                  # cluster/partition GPU inventory (free/total)
   chpc-allocs --list-cpus                  # cluster/partition feature inventory + free
   chpc-allocs --wide --format csv > allocs.csv
@@ -318,8 +322,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format", type=_lower_choice, choices=("table", "csv", "json"),
-        default="table", metavar="{table,csv,json}",
-        help="Output format (case-insensitive). Default: table.",
+        default=None, metavar="{table,csv,json}",
+        help="Output format (case-insensitive). Default: table on a TTY, "
+        "json (wide, with _help legend) when stdout is piped or redirected.",
     )
     parser.add_argument(
         "--wide", action="store_true",
@@ -328,9 +333,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Valid: "
-        "wait, cluster, account, qos, default, wall, priority, fairshare, "
-        "usage, tags. Default sort is 'wait,cluster,qos' when wait is "
-        "available, else 'cluster,account,qos'.",
+        "wait, premium, cluster, account, qos, default, wall, priority, "
+        "fairshare, usage, tags. The 'premium' key ranks rows whose "
+        "gpu_types include a100/h100/h200/a6000 first. Default sort is "
+        "'wait,premium,cluster,qos' when wait is available, else "
+        "'premium,cluster,account,qos'.",
     )
     parser.add_argument(
         "--reverse", action="store_true",
@@ -1344,6 +1351,7 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
         "usage",
         "tags",
         "wait",
+        "premium",
     }
     unknown = [key for key in keys if key not in allowed]
     if unknown:
@@ -1355,6 +1363,8 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
         for key in keys:
             if key == "wait":
                 values.append(_WAIT_SENTINEL if row.wait_seconds is None else row.wait_seconds)
+            elif key == "premium":
+                values.append(0 if any_glob_match(row.gpu_types, PREMIUM_GPUS) else 1)
             elif key == "wall":
                 values.append(parse_wall_seconds(row.qos_info.max_wall) or -1)
             elif key in {"priority", "fairshare", "usage"}:
@@ -1541,15 +1551,51 @@ def json_output(
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
+    include_help: bool = False,
 ) -> str:
-    return json.dumps(
-        [
-            row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
-            for row in rows
-        ],
-        indent=2,
-        sort_keys=True,
-    )
+    records = [
+        row.to_dict(wide=wide, include_avail=include_avail, include_wait=include_wait)
+        for row in rows
+    ]
+    if not include_help:
+        return json.dumps(records, indent=2, sort_keys=True)
+    payload = {
+        "_help": {
+            "schema_version": 1,
+            "premium_gpus": list(PREMIUM_GPUS),
+            "fields": {
+                "cluster": "SLURM cluster name (e.g. notchpeak, granite)",
+                "account": "account to pass via --account",
+                "qos": "QOS to pass via --qos; partition is usually the same name",
+                "partition": "partition name (with --wide); pass via --partition",
+                "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
+                "wait": "predicted seconds until job start from `sbatch --test-only`; "
+                        "'now' means startable immediately, '?' / null means probe skipped or unknown",
+                "free_nodes": "live free/total node count from sinfo",
+                "free_cpus": "live free/total CPU count from sinfo",
+                "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
+                "gpu_types": "GPU types exposed by the partition (with --wide)",
+                "cpu_features": "node feature tags for the partition (with --wide)",
+                "tags": "quality flags: gpu, cpu, freecycle (preemptable), "
+                        "guest (preemptable on idle owner nodes), reservation, default",
+                "default": "'yes' if this QOS is the default for the assoc",
+                "priority": "QOS priority (higher = sooner-scheduled)",
+                "fairshare": "FairShare from sshare (higher = better standing)",
+                "usage": "RawUsage from sshare (lower = less recent consumption)",
+            },
+            "notes": [
+                "Rows are sorted by 'wait,premium,cluster,qos' by default: "
+                "lowest predicted wait first, then premium-GPU rows ahead of "
+                "non-premium, then alphabetical.",
+                "Premium GPUs are the substring matches in `_help.premium_gpus` "
+                "against `gpu_types` (case-insensitive).",
+                "freecycle/guest QOS rows are preemptable; jobs there should "
+                "use --requeue and checkpoint.",
+            ],
+        },
+        "rows": records,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def sbatch_output(rows: List[AllocationRow]) -> str:
@@ -1884,6 +1930,37 @@ def run_self_test() -> int:
         else:
             raise AssertionError(f"apply_wait_for_shorthand({bad!r}) should have raised")
 
+    prem_rows = [
+        AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
+        AllocationRow("notchpeak", "x", "u", "", "q-a100", "q-a100"),
+        AllocationRow("notchpeak", "x", "u", "", "q-rtx",  "q-rtx"),
+        AllocationRow("notchpeak", "x", "u", "", "q-h100", "q-h100"),
+    ]
+    prem_rows[0].gpu_types = ("v100",)
+    prem_rows[1].gpu_types = ("a100", "a100_80gb_pcie")
+    prem_rows[2].gpu_types = ("rtx2080ti",)
+    prem_rows[3].gpu_types = ("h100nvl",)
+    by_premium = sort_rows(prem_rows, "premium,qos", reverse=False)
+    assert [r.qos for r in by_premium] == ["q-a100", "q-h100", "q-rtx", "q-v100"], \
+        [r.qos for r in by_premium]
+    by_premium_rev = sort_rows(prem_rows, "premium,qos", reverse=True)
+    assert by_premium_rev[0].qos == "q-v100"
+
+    payload = json.loads(json_output(prem_rows, wide=True, include_help=True))
+    assert isinstance(payload, dict)
+    assert set(payload.keys()) == {"_help", "rows"}
+    assert payload["_help"]["premium_gpus"] == list(PREMIUM_GPUS)
+    assert "schema_version" in payload["_help"]
+    assert "fields" in payload["_help"]
+    assert len(payload["rows"]) == len(prem_rows)
+    assert isinstance(json.loads(json_output(prem_rows, wide=False)), list)
+
+    parser_fmt = _build_parser()
+    args_no_fmt = parser_fmt.parse_args([])
+    assert args_no_fmt.format is None
+    args_explicit = parser_fmt.parse_args(["--format", "table"])
+    assert args_explicit.format == "table"
+
     print("self-test passed")
     return 0
 
@@ -1929,9 +2006,11 @@ def main(argv: Sequence[str]) -> int:
     include_avail = not args.no_avail
     include_wait = include_avail and not args.no_wait
     partition_avail = show_partition_availability() if include_avail else None
-    # When availability data is loaded, derive the gpu-types map from it instead
-    # of making a second sinfo call. Matches the shape show_partition_gpus returns.
-    if partition_avail is not None and (args.gpu_type or args.wide):
+    # When availability data is loaded, derive the gpu-types map from it for
+    # free (no second sinfo call) — needed by the implicit 'premium' sort tier
+    # so a100/h100/h200/a6000 rows surface even without --gpu-type/--wide.
+    # Matches the shape show_partition_gpus returns.
+    if partition_avail is not None:
         partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
             for c, parts in partition_avail.items()
@@ -1954,17 +2033,38 @@ def main(argv: Sequence[str]) -> int:
         predict_wait_times(rows, shape=shape)
     sort_spec = args.sort
     if sort_spec is None:
-        sort_spec = "wait,cluster,qos" if include_wait else "cluster,account,qos"
+        sort_spec = (
+            "wait,premium,cluster,qos" if include_wait
+            else "premium,cluster,account,qos"
+        )
     rows = sort_rows(rows, sort_spec, args.reverse)
+
+    # Resolve --format default: table on a TTY, json (wide) when piped or
+    # redirected. Explicit --format always wins. JSON output (auto or
+    # explicit) carries a top-level `_help` legend describing the fields.
+    fmt = args.format
+    wide = args.wide
+    if fmt is None and not args.sbatch:
+        if sys.stdout.isatty():
+            fmt = "table"
+        else:
+            fmt = "json"
+            wide = True
 
     if args.sbatch:
         output = sbatch_output(rows)
-    elif args.format == "csv":
-        output = csv_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
-    elif args.format == "json":
-        output = json_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
+    elif fmt == "csv":
+        output = csv_output(rows, wide, include_avail=include_avail, include_wait=include_wait)
+    elif fmt == "json":
+        output = json_output(
+            rows,
+            wide,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            include_help=True,
+        )
     else:
-        output = table_output(rows, args.wide, include_avail=include_avail, include_wait=include_wait)
+        output = table_output(rows, wide, include_avail=include_avail, include_wait=include_wait)
 
     print(output)
     return 0
