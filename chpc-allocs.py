@@ -100,14 +100,43 @@ def classify_cpu_vendor(features) -> str:
         return "amd"
     return ""
 
-# Probe-shape defaults. Used both as the argparse defaults for the legacy
-# single-shape flags and as the baseline for the implicit default shape set
-# built when no shape flags are passed.
+# Probe-shape defaults. Used as the argparse defaults for the legacy
+# single-shape flags and to detect when the user has overridden any of them.
 DEFAULT_PROBE_CPUS = 1
 DEFAULT_PROBE_NODES = 1
 DEFAULT_PROBE_TIME = "01:00:00"
-DEFAULT_SHAPESET_CPUS = 8
-DEFAULT_SHAPESET_GPU_LIMIT = 6
+
+# Implicit default shape set, built when no shape flags are passed. Four
+# tiers covering the typical HPC research lifecycle:
+#   1. dev      — compile / build / kernel correctness
+#   2. middle   — small experiments, scaling tests
+#   3. research — single-node CPU runs, single-GPU fine-tuning
+#   4. premium  — full-node CPU, multi-GPU DDP training
+# Each shape is probed at multiple walltimes (curated per tier) so the
+# user sees how queue pressure scales with wallclock request length.
+# Shapes are gated on accessibility — a probe only emits if the user has
+# a row exposing the required vendor or GPU type.
+DEV_WALLTIMES = ("00:30:00", "01:00:00", "04:00:00", "12:00:00")
+DEV_CPU_CORES = 4
+DEV_GPU_PATTERN = "2080ti"
+
+MID_WALLTIMES = ("01:00:00", "04:00:00", "12:00:00", "1-00:00:00")  # 1h, 4h, 12h, 24h
+MID_CPU_CORES = 16
+MID_GPU_PATTERNS = ("v100", "3090")
+
+RESEARCH_WALLTIMES = (
+    "01:00:00", "02:00:00", "04:00:00", "12:00:00", "1-00:00:00", "3-00:00:00",
+)  # 1h, 2h, 4h, 12h, 24h, 72h
+RESEARCH_CPU_CORES = 32
+RESEARCH_GPU_PATTERNS = ("a100", "h100", "h200")
+
+PREMIUM_WALLTIMES = ("08:00:00", "1-00:00:00", "3-00:00:00", "7-00:00:00")  # 8h, 24h, 72h, 7d
+PREMIUM_CPU_AMD_CORES = 64  # full Granite Genoa node
+PREMIUM_GPU_SHAPES = (
+    ("a100", 4),
+    ("h100", 4),
+    ("a6000", 4),
+)
 
 
 class QOSInfo:
@@ -263,9 +292,14 @@ case-insensitive substrings, so --cluster NOTCH matches notchpeak.
 
 EPILOG = """\
 Examples:
-  chpc-allocs                              # all allocs; one row per (alloc, default shape):
-                                           # cpu-intel / cpu-amd baselines (when accessible)
-                                           # + one shape per premium GPU you can access
+  chpc-allocs                              # all allocs; default 4-tier probe set,
+                                           # each shape probed at multiple walltimes
+                                           # (small to large experiments):
+                                           #   dev      (cpu:4, 2080ti:1                    @30m, 1h, 4h, 12h)
+                                           #   middle   (cpu:16, v100:1, 3090:1             @1h, 4h, 12h, 24h)
+                                           #   research (cpu-intel/amd:32, a100/h100/h200:1 @1h, 2h, 4h, 12h, 24h, 72h)
+                                           #   premium  (cpu-amd:64, a100/h100/a6000:4      @8h, 24h, 72h, 7d)
+                                           # shapes silently drop if the hardware is inaccessible
   chpc-allocs | jq '.rows[]'               # piped: auto JSON (wide) with _help legend
   chpc-allocs --cluster notchpeak --gpu    # GPU rows on notchpeak only
   chpc-allocs --gpu-type a100 --sbatch     # a100 + a100_80gb_pcie + MIG slices
@@ -1063,45 +1097,109 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     )
 
 
+def _has_vendor(vendors: Set[str], vendor: str) -> bool:
+    """True if `vendor` or 'mixed' is in the precomputed vendor set."""
+    return vendor in vendors or "mixed" in vendors
+
+
+def _shortest_matching_gpu(
+    gpu_types: Set[str], pattern: str
+) -> Optional[str]:
+    """Return the shortest GPU type in `gpu_types` matching `pattern`.
+
+    Substring match. Picking the shortest name avoids MIG-slice noise
+    (e.g. prefers 'h200' over 'h200_1g.18gb'). Returns None if nothing
+    matches.
+    """
+    matches = [gt for gt in gpu_types if pattern in gt]
+    if not matches:
+        return None
+    return min(matches, key=lambda s: (len(s), s))
+
+
 def default_shape_set(
     rows: List["AllocationRow"],
-    *,
-    time: str = DEFAULT_PROBE_TIME,
-    cpus: int = DEFAULT_SHAPESET_CPUS,
-    gpu_limit: int = DEFAULT_SHAPESET_GPU_LIMIT,
 ) -> List[ProbeShape]:
     """Build the implicit shape set used when no shape flags are given.
 
-    Emits one CPU baseline per detected vendor on the user's accessible rows:
-    `cpu-intel:N@time` and/or `cpu-amd:N@time`. Each carries an
-    sbatch `--constraint=` listing that vendor's microarch tokens, so the
-    probe lands on the matching hardware. Falls back to a generic
-    `cpu:N@time` baseline only when neither vendor was detected.
+    Four tiers, each probing every shape across a curated walltime spread
+    so the user sees queue-pressure scaling with wallclock length:
 
-    For each PREMIUM_GPUS pattern that matches a concrete GPU type on the
-    user's accessible rows, picks the shortest matching concrete name and
-    adds one `<type>:1@time` shape. Picking the shortest name avoids noise
-    from MIG slices (e.g. for the `h200` pattern, prefers `h200` over
-    `h200_1g.18gb`). Concrete type names come from sinfo so
-    `--gres=gpu:<type>:1` resolves. Capped at `gpu_limit` GPU shapes.
+    Tier 1 — dev (walltimes: 30m, 1h, 4h, 12h):
+      * `cpu:4` — generic, for compilation/build
+      * `<2080ti>:1` — small-GPU correctness check (if accessible)
+
+    Tier 2 — middle (walltimes: 1h, 4h, 12h, 24h):
+      * `cpu:16` — mid-sized parallel test/run
+      * `v100:1`, `3090:1` — small experiments (if accessible)
+
+    Tier 3 — research (walltimes: 1h, 2h, 4h, 12h, 24h, 72h):
+      * `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
+        (one per detected vendor; each carries an sbatch `--constraint=`
+        listing that vendor's microarch tokens)
+      * `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
+
+    Tier 4 — premium (walltimes: 8h, 24h, 72h, 7d):
+      * `cpu-amd:64` — full Granite Genoa node
+      * `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
+
+    For each GPU pattern, the shortest matching concrete type from sinfo
+    is picked so `--gres=gpu:<type>:N` resolves cleanly.
     """
     shapes: List[ProbeShape] = []
-    vendors_present = {row.cpu_vendor for row in rows}
-    if "intel" in vendors_present or "mixed" in vendors_present:
-        shapes.append(ProbeShape(cpus=cpus, time=time, cpu_vendor="intel"))
-    if "amd" in vendors_present or "mixed" in vendors_present:
-        shapes.append(ProbeShape(cpus=cpus, time=time, cpu_vendor="amd"))
-    if not shapes:
-        shapes.append(ProbeShape(cpus=cpus, time=time))
-    discovered: Set[str] = {gt.lower() for row in rows for gt in row.gpu_types}
-    for pattern in PREMIUM_GPUS:
-        matches = [gt for gt in discovered if pattern in gt]
-        if not matches:
-            continue
-        canonical = min(matches, key=lambda s: (len(s), s))
-        shapes.append(ProbeShape(gpu_type=canonical, gpu_count=1, time=time))
-        if len(shapes) - 1 >= gpu_limit:
-            break
+    vendors = {row.cpu_vendor for row in rows}
+    gpu_types = {gt.lower() for row in rows for gt in row.gpu_types}
+
+    # Tier 1 — dev
+    for wall in DEV_WALLTIMES:
+        shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
+    dev_gpu = _shortest_matching_gpu(gpu_types, DEV_GPU_PATTERN)
+    if dev_gpu:
+        for wall in DEV_WALLTIMES:
+            shapes.append(ProbeShape(gpu_type=dev_gpu, gpu_count=1, time=wall))
+
+    # Tier 2 — middle
+    for wall in MID_WALLTIMES:
+        shapes.append(ProbeShape(cpus=MID_CPU_CORES, time=wall))
+    for pattern in MID_GPU_PATTERNS:
+        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+        if gpu_type:
+            for wall in MID_WALLTIMES:
+                shapes.append(ProbeShape(gpu_type=gpu_type, gpu_count=1, time=wall))
+
+    # Tier 3 — research
+    if _has_vendor(vendors, "intel"):
+        for wall in RESEARCH_WALLTIMES:
+            shapes.append(ProbeShape(
+                cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
+            ))
+    if _has_vendor(vendors, "amd"):
+        for wall in RESEARCH_WALLTIMES:
+            shapes.append(ProbeShape(
+                cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
+            ))
+    for pattern in RESEARCH_GPU_PATTERNS:
+        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+        if gpu_type:
+            for wall in RESEARCH_WALLTIMES:
+                shapes.append(ProbeShape(
+                    gpu_type=gpu_type, gpu_count=1, time=wall
+                ))
+
+    # Tier 4 — premium
+    if _has_vendor(vendors, "amd"):
+        for wall in PREMIUM_WALLTIMES:
+            shapes.append(ProbeShape(
+                cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
+            ))
+    for pattern, count in PREMIUM_GPU_SHAPES:
+        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+        if gpu_type:
+            for wall in PREMIUM_WALLTIMES:
+                shapes.append(ProbeShape(
+                    gpu_type=gpu_type, gpu_count=count, time=wall
+                ))
+
     return shapes
 
 
@@ -1981,14 +2079,21 @@ def json_output(
                 "With multiple --shape flags the output is in long format: one "
                 "row per (allocation, shape) pair. The `shape` column tells "
                 "you which shape was probed for that wait.",
-                "Without any shape flags, the implicit default probes one "
-                "CPU baseline per accessible vendor ('cpu-intel:8@1h' and/or "
-                "'cpu-amd:8@1h', falling back to plain 'cpu:8@1h' when neither "
-                "vendor is detected) plus one shape per premium GPU type "
-                "(a100/h100/h200/a6000) the user can access. Vendor-tagged CPU "
-                "shapes pass `--constraint=` to sbatch so the probe lands on "
-                "matching hardware. Pairs where the shape can't run on the row "
-                "are dropped from output.",
+                "Without any shape flags, the implicit default probes a "
+                "four-tier set covering the typical HPC research lifecycle, "
+                "each shape probed at multiple walltimes (small to large "
+                "experiments) so the user sees queue-pressure scaling with "
+                "wallclock length: dev (cpu:4, 2080ti:1 @30m,1h,4h,12h), "
+                "middle (cpu:16, v100:1, 3090:1 @1h,4h,12h,24h), research "
+                "(cpu-intel:32, cpu-amd:32, a100:1, h100:1, h200:1 "
+                "@1h,2h,4h,12h,24h,72h), premium (cpu-amd:64, a100:4, h100:4, "
+                "a6000:4 @8h,24h,72h,7d). Each shape is gated on "
+                "accessibility — vendor CPU shapes only emit if that vendor "
+                "is detected on the user's rows; GPU shapes only emit if "
+                "the user has a row exposing that GPU type. Vendor-tagged "
+                "CPU shapes pass `--constraint=` to sbatch so the probe "
+                "lands on matching hardware. Pairs where the shape can't "
+                "run on the row are dropped from output.",
             ],
         },
         "rows": records,
@@ -2398,32 +2503,113 @@ def run_self_test() -> int:
     assert _to_sbatch_wall("01:30:00") == "01:30:00"
     assert _to_sbatch_wall("garbage") == "garbage"
 
-    # default_shape_set: cpu baseline + one shape per discovered premium GPU type.
-    a100_row = AllocationRow("notchpeak", "x", "u", "", "q-a100", "q-a100")
-    a100_row.gpu_types = ("a100", "a100_80gb_pcie")
-    h100_row = AllocationRow("notchpeak", "x", "u", "", "q-h100", "q-h100")
-    h100_row.gpu_types = ("h100nvl",)
-    cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
-    cpu_only_row.gpu_types = ()
-    shapes = default_shape_set([a100_row, h100_row, cpu_only_row])
+    # default_shape_set: four-tier probe set; each shape probed at multiple
+    # walltimes; each emission gated on accessibility.
+    # Case A — full accessibility: Intel + AMD CPUs and 2080ti, v100, 3090,
+    # a100, h100, h200, a6000 GPUs.
+    intel_a100_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-a100", "q-a100",
+        cpu_features=("skl", "csl"),
+    )
+    intel_a100_row.gpu_types = ("a100", "a100_80gb_pcie", "v100", "2080ti")
+    intel_h100_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-h100", "q-h100",
+        cpu_features=("emr",),
+    )
+    intel_h100_row.gpu_types = ("h100nvl", "3090", "a6000")
+    amd_row = AllocationRow(
+        "granite", "x", "u", "", "q-amd", "q-amd",
+        cpu_features=("zen4", "gen"),
+    )
+    amd_row.gpu_types = ("h200",)
+    shapes = default_shape_set([intel_a100_row, intel_h100_row, amd_row])
     labels = [s.label for s in shapes]
-    assert labels[0] == "cpu:8@1h", labels
-    # Dedup picks the shortest matching concrete type per premium pattern, so
-    # 'a100' wins over 'a100_80gb_pcie' for the 'a100' pattern.
-    assert "a100:1@1h" in labels and "h100nvl:1@1h" in labels, labels
-    assert "a100_80gb_pcie:1@1h" not in labels, labels
-    # MIG-slice noise is avoided when a shorter premium-matching name is present.
-    h200_row = AllocationRow("granite", "x", "u", "", "q-h200", "q-h200")
+    expected_full = {
+        # dev (30m, 1h, 4h, 12h)
+        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
+        "2080ti:1@30m", "2080ti:1@1h", "2080ti:1@4h", "2080ti:1@12h",
+        # middle (1h, 4h, 12h, 24h)
+        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+        "v100:1@1h", "v100:1@4h", "v100:1@12h", "v100:1@24h",
+        "3090:1@1h", "3090:1@4h", "3090:1@12h", "3090:1@24h",
+        # research (1h, 2h, 4h, 12h, 24h, 72h → 3d label)
+        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
+        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
+        "cpu-amd:32@1h", "cpu-amd:32@2h", "cpu-amd:32@4h",
+        "cpu-amd:32@12h", "cpu-amd:32@24h", "cpu-amd:32@3d",
+        "a100:1@1h", "a100:1@2h", "a100:1@4h",
+        "a100:1@12h", "a100:1@24h", "a100:1@3d",
+        "h100nvl:1@1h", "h100nvl:1@2h", "h100nvl:1@4h",
+        "h100nvl:1@12h", "h100nvl:1@24h", "h100nvl:1@3d",
+        "h200:1@1h", "h200:1@2h", "h200:1@4h",
+        "h200:1@12h", "h200:1@24h", "h200:1@3d",
+        # premium (8h, 24h, 72h → 3d, 7d)
+        "cpu-amd:64@8h", "cpu-amd:64@24h", "cpu-amd:64@3d", "cpu-amd:64@7d",
+        "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
+        "h100nvl:4@8h", "h100nvl:4@24h", "h100nvl:4@3d", "h100nvl:4@7d",
+        "a6000:4@8h", "a6000:4@24h", "a6000:4@3d", "a6000:4@7d",
+    }
+    assert set(labels) == expected_full, sorted(set(labels) ^ expected_full)
+    # Dedup picks the shortest matching concrete type per pattern (a100 over
+    # a100_80gb_pcie; h100nvl is the shortest 'h100' match here).
+    assert "a100_80gb_pcie:1@4h" not in labels, labels
+    # Tier ordering: dev → mid → research → premium; within tier, walltimes
+    # appear in declared order (shorter first).
+    tier_indices = {label: idx for idx, label in enumerate(labels)}
+    assert tier_indices["cpu:4@30m"] < tier_indices["cpu:4@12h"]
+    assert tier_indices["cpu:4@12h"] < tier_indices["cpu:16@1h"]
+    assert tier_indices["cpu:16@24h"] < tier_indices["cpu-intel:32@1h"]
+    assert tier_indices["cpu-intel:32@1h"] < tier_indices["cpu-intel:32@3d"]
+    assert tier_indices["cpu-intel:32@3d"] < tier_indices["cpu-amd:64@8h"]
+    assert tier_indices["a100:1@1h"] < tier_indices["a100:4@8h"]
+    assert tier_indices["a100:4@8h"] < tier_indices["a100:4@7d"]
+
+    # MIG-slice noise: shortest match wins over MIG variants.
+    h200_row = AllocationRow(
+        "granite", "x", "u", "", "q-h200", "q-h200",
+        cpu_features=("zen4",),
+    )
     h200_row.gpu_types = ("h200", "h200_1g.18gb", "h200_2g.35gb", "h200nvl")
     h200_labels = [s.label for s in default_shape_set([h200_row])]
-    assert "h200:1@1h" in h200_labels, h200_labels
-    assert "h200_1g.18gb:1@1h" not in h200_labels, h200_labels
-    # Cap respected.
-    capped = default_shape_set([a100_row, h100_row], gpu_limit=1)
-    assert len(capped) == 2  # cpu baseline + 1 gpu
-    # CPU-only universe yields just the baseline.
-    cpu_only = default_shape_set([cpu_only_row])
-    assert [s.label for s in cpu_only] == ["cpu:8@1h"]
+    # h200 lives in research tier now (walltimes 1h, 2h, 4h, 12h, 24h, 72h).
+    for wall in ("1h", "2h", "4h", "12h", "24h", "3d"):  # 72h → "3d"
+        assert f"h200:1@{wall}" in h200_labels, (wall, h200_labels)
+    assert "h200_1g.18gb:1@4h" not in h200_labels, h200_labels
+    # h200 NOT in premium tier (no @8h or @7d entry).
+    assert "h200:1@8h" not in h200_labels, h200_labels
+    assert "h200:1@7d" not in h200_labels, h200_labels
+
+    # Case B — minimal accessibility: Intel CPU + a100 only. Each tier gated
+    # independently; no AMD vendor → no cpu-amd shapes; no 2080ti/v100/3090/
+    # h100/h200/a6000 → only a100 GPU shapes emit, at all four walltimes.
+    minimal_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-min", "q-min",
+        cpu_features=("skl",),
+    )
+    minimal_row.gpu_types = ("a100",)
+    minimal = [s.label for s in default_shape_set([minimal_row])]
+    assert set(minimal) == {
+        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
+        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
+        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
+        "a100:1@1h", "a100:1@2h", "a100:1@4h",
+        "a100:1@12h", "a100:1@24h", "a100:1@3d",
+        "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
+    }, sorted(minimal)
+
+    # Case C — vendor-less rows: CPU dev + middle shapes still emit (they're
+    # vendor-agnostic) but research/premium vendor-tagged shapes are dropped.
+    cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
+    cpu_only_row.gpu_types = ()
+    cpu_only = [s.label for s in default_shape_set([cpu_only_row])]
+    assert cpu_only == [
+        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
+        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+    ], cpu_only
+
+    # Aliases for the downstream expand_rows_by_shape test below.
+    a100_row = intel_a100_row
 
     # _user_supplied_shape_flags detects each shape-related override.
     parser = _build_parser()
