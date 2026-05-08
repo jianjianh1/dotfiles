@@ -105,7 +105,7 @@ BTOP_MODULE_CANDIDATES=("btop")                       # check with: module spide
 NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")          # check with: module spider nvim
 ```
 
-The CHPC-safe configs are written to `~/.server-configs-generated/` (not the repo files). Run `setup.sh` on CHPC to regenerate them. After MCP approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
+CHPC uses the same repo `claude_settings.json` / `codex_config.toml` as other hosts; only version-adaptive compat files (tmux/vim/gitconfig/bashrc) land in `~/.server-configs-generated/`. After MCP approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
 
 ## Do Not
 

@@ -8,9 +8,9 @@ plan_mode_reasoning_effort = "xhigh"
 # Git attribution
 commit_attribution = ""
 
-# No-restriction mode — all actions auto-approved, no sandbox
+# No-restriction mode — all actions auto-approved, full access
 approval_policy = "never"
-sandbox_mode = "none"
+sandbox_mode = "danger-full-access"
 
 # Shell — inherit all env vars so tools like gh, npm, etc. work
 [shell_environment_policy]

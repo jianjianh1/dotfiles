@@ -206,4 +206,4 @@ These only activate if the tool is installed:
 
 ### Compat Layer
 
-`~/.server-configs-generated/bashrc_compat` is sourced at the end of both files. It may define additional aliases for tools like `claude` and `codex` with flags appropriate to the installed version.
+`~/.server-configs-generated/bashrc_compat` is sourced at the end of both files. It carries a load-once guard and any environment-module load lines emitted by `setup.sh` (e.g. `module load claude-code`) when tools were satisfied via Lmod.

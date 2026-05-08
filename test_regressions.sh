@@ -254,8 +254,8 @@ test_setup_dry_run_is_non_mutating() (
         fail "setup.sh --dry-run created generated state"
 )
 
-test_chpc_config_rendering_is_safe_without_tools() (
-    local tmp claude_cfg codex_cfg bash_compat
+test_chpc_config_rendering_uses_repo_files() (
+    local tmp
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
 
@@ -269,31 +269,24 @@ test_chpc_config_rendering_is_safe_without_tools() (
     mkdir -p "$GENERATED_DIR"
     render_compat_configs
 
-    claude_cfg="$GENERATED_DIR/claude_settings.json"
-    codex_cfg="$GENERATED_DIR/codex_config.toml"
-    bash_compat="$GENERATED_DIR/bashrc_compat"
+    [ "$CLAUDE_SETTINGS_MODE" = "repo" ] ||
+        fail "CHPC Claude settings should use the repo file directly (got mode '$CLAUDE_SETTINGS_MODE')"
+    [ "$CLAUDE_SETTINGS_SRC" = "$DIR/claude_settings.json" ] ||
+        fail "CHPC Claude settings src should be the repo file (got '$CLAUDE_SETTINGS_SRC')"
+    [ "$CODEX_CONFIG_MODE" = "repo" ] ||
+        fail "CHPC Codex config should use the repo file directly (got mode '$CODEX_CONFIG_MODE')"
+    [ "$CODEX_CONFIG_SRC" = "$DIR/codex_config.toml" ] ||
+        fail "CHPC Codex config src should be the repo file (got '$CODEX_CONFIG_SRC')"
 
-    [ "$CLAUDE_SETTINGS_MODE" = "chpc" ] ||
-        fail "CHPC Claude settings should be generated even when claude is missing"
-    [ "$CODEX_CONFIG_MODE" = "chpc" ] ||
-        fail "CHPC Codex config should be generated even when codex is missing"
+    grep -q '"defaultMode": "bypassPermissions"' "$DIR/claude_settings.json" ||
+        fail "Repo Claude settings should use bypassPermissions per no-restriction defaults"
+    grep -q '"enabled": false' "$DIR/claude_settings.json" ||
+        fail "Repo Claude settings should disable sandboxing per no-restriction defaults"
 
-    grep -q '"defaultMode": "default"' "$claude_cfg" ||
-        fail "CHPC Claude settings should use default permission mode"
-    grep -q '"skipDangerousModePermissionPrompt": false' "$claude_cfg" ||
-        fail "CHPC Claude settings should not skip dangerous prompts"
-    grep -q '"sandbox": { "enabled": true' "$claude_cfg" ||
-        fail "CHPC Claude settings should enable sandboxing"
-
-    grep -q 'approval_policy = "untrusted"' "$codex_cfg" ||
-        fail "CHPC Codex config should require approval for untrusted commands"
-    grep -q 'sandbox_mode = "workspace-write"' "$codex_cfg" ||
-        fail "CHPC Codex config should use a valid workspace sandbox mode"
-
-    grep -q "alias claude='claude'" "$bash_compat" ||
-        fail "CHPC bash compat should not add dangerous Claude alias flags"
-    grep -q "alias codex='codex'" "$bash_compat" ||
-        fail "CHPC bash compat should not add dangerous Codex alias flags"
+    grep -q 'approval_policy = "never"' "$DIR/codex_config.toml" ||
+        fail "Repo Codex config should auto-approve per no-restriction defaults"
+    grep -q 'sandbox_mode = "danger-full-access"' "$DIR/codex_config.toml" ||
+        fail "Repo Codex config should use danger-full-access per no-restriction defaults"
 )
 
 test_chpc_module_loads_initialize_module_command() (
@@ -502,7 +495,7 @@ main() {
     run_test test_deploy_sources_without_prompting
     run_test test_auth_state_helpers
     run_test test_setup_dry_run_is_non_mutating
-    run_test test_chpc_config_rendering_is_safe_without_tools
+    run_test test_chpc_config_rendering_uses_repo_files
     run_test test_chpc_module_loads_initialize_module_command
     run_test test_module_var_reset_clears_stale_values
     run_test test_chpc_mcp_skip_and_override

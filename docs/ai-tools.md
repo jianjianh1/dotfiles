@@ -142,9 +142,9 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 trust_level = "trusted"
 ```
 
-### CHPC Generated Overrides
+### CHPC behavior
 
-When `setup.sh` detects CHPC, it copies generated safe configs from `~/.server-configs-generated/` instead of these repo defaults. Claude uses `defaultMode = "default"` with sandboxing enabled. Codex uses `approval_policy = "untrusted"` and `sandbox_mode = "workspace-write"`.
+`setup.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.server-configs-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
 
 ---
 
