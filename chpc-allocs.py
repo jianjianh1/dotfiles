@@ -62,6 +62,44 @@ DEFAULT_SORT = ("cluster", "account", "qos")
 # and "a100_80gb_pcie", and "h100" matches "h100nvl".
 PREMIUM_GPUS = ("a100", "h100", "h200", "a6000")
 
+# CPU microarchitecture tokens grouped by vendor. Substring-matched
+# case-insensitively against row.cpu_features (sinfo lowercases features).
+# `zen` covers zen1..zen5 via substring match; no need to enumerate them.
+INTEL_CPU_FEATURES = (
+    "skl", "csl", "icx", "spr", "emr", "cpx",
+    "bro", "hsw", "ivy", "snb", "knl",
+)
+AMD_CPU_FEATURES = ("zen", "nap", "rom", "mil", "gen")
+
+_INTEL_CONSTRAINT_EXPR = "|".join(INTEL_CPU_FEATURES)
+_AMD_CONSTRAINT_EXPR = "|".join(AMD_CPU_FEATURES)
+
+
+def classify_cpu_vendor(features) -> str:
+    """Map a row's cpu_features to 'intel', 'amd', 'mixed', or '' (unknown).
+
+    A feature token counts as Intel/AMD if any vendor pattern is a substring
+    of it (e.g. 'zen4' -> AMD, 'emr' -> Intel). Tokens matching neither are
+    ignored. 'mixed' when both vendors appear in the same set.
+    """
+    has_intel = False
+    has_amd = False
+    for feat in features or ():
+        f = feat.lower()
+        if not has_intel and any(p in f for p in INTEL_CPU_FEATURES):
+            has_intel = True
+        if not has_amd and any(p in f for p in AMD_CPU_FEATURES):
+            has_amd = True
+        if has_intel and has_amd:
+            break
+    if has_intel and has_amd:
+        return "mixed"
+    if has_intel:
+        return "intel"
+    if has_amd:
+        return "amd"
+    return ""
+
 # Probe-shape defaults. Used both as the argparse defaults for the legacy
 # single-shape flags and as the baseline for the implicit default shape set
 # built when no shape flags are passed.
@@ -146,6 +184,7 @@ class AllocationRow:
         self.tags = tags
         self.gpu_types = gpu_types
         self.cpu_features = cpu_features
+        self.cpu_vendor = classify_cpu_vendor(cpu_features)
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
@@ -172,6 +211,7 @@ class AllocationRow:
             "fairshare": self.share_info.fairshare if self.share_info else "",
             "usage": self.share_info.raw_usage if self.share_info else "",
             "tags": ",".join(self.tags),
+            "cpu_vendor": self.cpu_vendor,
         }
         if wide:
             data.update(
@@ -224,13 +264,16 @@ case-insensitive substrings, so --cluster NOTCH matches notchpeak.
 EPILOG = """\
 Examples:
   chpc-allocs                              # all allocs; one row per (alloc, default shape):
-                                           # cpu:8@1h baseline + one shape per premium GPU you can access
+                                           # cpu-intel / cpu-amd baselines (when accessible)
+                                           # + one shape per premium GPU you can access
   chpc-allocs | jq '.rows[]'               # piped: auto JSON (wide) with _help legend
   chpc-allocs --cluster notchpeak --gpu    # GPU rows on notchpeak only
   chpc-allocs --gpu-type a100 --sbatch     # a100 + a100_80gb_pcie + MIG slices
   chpc-allocs --gpu-type 'h*'              # any Hopper / H-series
   chpc-allocs --gpu-type h100nvl --no-freecycle --no-guest
-  chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
+  chpc-allocs --cpu-type intel             # all Intel CPU partitions (any microarch)
+  chpc-allocs --cpu-type amd                # all AMD CPU partitions (zen*, gen, mil, ...)
+  chpc-allocs --cpu-type emr               # Intel Emerald Rapids only
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
   chpc-allocs --gpus a100:4 --cpus 16 --time 4:00:00  # tune probe to your job
   chpc-allocs --shape a100:1 --shape a100:4 --shape h100nvl:1   # compare shapes
@@ -294,7 +337,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cpu-type", action="append", metavar="PATTERN",
         help="Filter by sinfo Features (CPU/node architecture tokens), e.g. "
         "skl, csl, mil (notchpeak), gen (Genoa), emr (Emerald Rapids). "
-        "Same glob rules as --gpu-type. Repeatable; matches any. See --list-cpus.",
+        "Bare 'intel' / 'amd' are vendor shorthands matching the full set of "
+        "Intel/AMD microarch tokens. Same glob rules as --gpu-type otherwise. "
+        "Repeatable; matches any. See --list-cpus.",
     )
     parser.add_argument(
         "--list-gpus", action="store_true",
@@ -352,11 +397,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Valid: "
-        "wait, premium, cluster, account, qos, default, wall, priority, "
-        "fairshare, usage, tags. The 'premium' key ranks rows whose "
-        "gpu_types include a100/h100/h200/a6000 first. Default sort is "
-        "'wait,premium,cluster,qos' when wait is available, else "
-        "'premium,cluster,account,qos'.",
+        "wait, shape, premium, vendor, cluster, account, qos, default, wall, "
+        "priority, fairshare, usage, tags. The 'premium' key ranks rows whose "
+        "gpu_types include a100/h100/h200/a6000 first; the 'vendor' key ranks "
+        "Intel CPUs before AMD before mixed/unknown. Default sort is "
+        "'wait,shape,premium,vendor,cluster,qos' when wait is available, else "
+        "'premium,vendor,cluster,account,qos'.",
     )
     parser.add_argument(
         "--reverse", action="store_true",
@@ -840,6 +886,7 @@ class ProbeShape:
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
         time: str = DEFAULT_PROBE_TIME,
+        cpu_vendor: Optional[str] = None,
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
@@ -847,6 +894,7 @@ class ProbeShape:
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
         self.time = time
+        self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
         self.label = self._compute_label()
 
     def _compute_label(self) -> str:
@@ -855,6 +903,8 @@ class ProbeShape:
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
             core = f"{gtype}:{count}@{wall}"
+        elif self.cpu_vendor:
+            core = f"cpu-{self.cpu_vendor}:{self.cpus}@{wall}"
         else:
             core = f"cpu:{self.cpus}@{wall}"
         parts = [core]
@@ -881,10 +931,27 @@ class ProbeShape:
         gres = self.gres_for(row)
         if gres:
             args.append(f"--gres={gres}")
+        constraint = self._constraint_expr()
+        if constraint:
+            args.append(f"--constraint={constraint}")
         return args
+
+    def _constraint_expr(self) -> Optional[str]:
+        """Return a `--constraint=` value pinning the probe to a CPU vendor."""
+        if self.cpu_vendor == "intel":
+            return _INTEL_CONSTRAINT_EXPR
+        if self.cpu_vendor == "amd":
+            return _AMD_CONSTRAINT_EXPR
+        return None
 
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
+        if self.cpu_vendor:
+            # Allow unknown ('') or mixed rows so we don't drop probes when
+            # feature metadata is incomplete; skip only on clear mismatch.
+            row_vendor = row.cpu_vendor
+            if row_vendor and row_vendor != "mixed" and row_vendor != self.cpu_vendor:
+                return True
         gpu_requested = self.gpu_type is not None or self.gpu_count is not None
         if not gpu_requested:
             return False
@@ -1005,15 +1072,27 @@ def default_shape_set(
 ) -> List[ProbeShape]:
     """Build the implicit shape set used when no shape flags are given.
 
-    Always includes a `cpu:N@time` baseline. For each PREMIUM_GPUS pattern
-    that matches a concrete GPU type on the user's accessible rows, picks
-    the shortest matching concrete name and adds one `<type>:1@time` shape.
-    Picking the shortest name avoids noise from MIG slices (e.g. for the
-    `h200` pattern, prefers `h200` over `h200_1g.18gb`). Concrete type names
-    come from sinfo so `--gres=gpu:<type>:1` resolves. Capped at `gpu_limit`
-    GPU shapes.
+    Emits one CPU baseline per detected vendor on the user's accessible rows:
+    `cpu-intel:N@time` and/or `cpu-amd:N@time`. Each carries an
+    sbatch `--constraint=` listing that vendor's microarch tokens, so the
+    probe lands on the matching hardware. Falls back to a generic
+    `cpu:N@time` baseline only when neither vendor was detected.
+
+    For each PREMIUM_GPUS pattern that matches a concrete GPU type on the
+    user's accessible rows, picks the shortest matching concrete name and
+    adds one `<type>:1@time` shape. Picking the shortest name avoids noise
+    from MIG slices (e.g. for the `h200` pattern, prefers `h200` over
+    `h200_1g.18gb`). Concrete type names come from sinfo so
+    `--gres=gpu:<type>:1` resolves. Capped at `gpu_limit` GPU shapes.
     """
-    shapes: List[ProbeShape] = [ProbeShape(cpus=cpus, time=time)]
+    shapes: List[ProbeShape] = []
+    vendors_present = {row.cpu_vendor for row in rows}
+    if "intel" in vendors_present or "mixed" in vendors_present:
+        shapes.append(ProbeShape(cpus=cpus, time=time, cpu_vendor="intel"))
+    if "amd" in vendors_present or "mixed" in vendors_present:
+        shapes.append(ProbeShape(cpus=cpus, time=time, cpu_vendor="amd"))
+    if not shapes:
+        shapes.append(ProbeShape(cpus=cpus, time=time))
     discovered: Set[str] = {gt.lower() for row in rows for gt in row.gpu_types}
     for pattern in PREMIUM_GPUS:
         matches = [gt for gt in discovered if pattern in gt]
@@ -1359,6 +1438,7 @@ def attach_metadata(
         row.share_info = share_info.get(row.account)
         row.gpu_types = resolve_row_gpu_types(row, partition_gpus)
         row.cpu_features = resolve_row_features(row, partition_features)
+        row.cpu_vendor = classify_cpu_vendor(row.cpu_features)
         row.tags = classify(row)
         if partition_avail is not None:
             attach_row_availability(row, partition_avail)
@@ -1454,6 +1534,28 @@ def any_glob_match(values: Iterable[str], patterns: Iterable[str]) -> bool:
     return False
 
 
+def _matches_cpu_type_filter(row: "AllocationRow", patterns: Iterable[str]) -> bool:
+    """--cpu-type matcher with `intel`/`amd` shorthand for vendor groups.
+
+    Bare `intel` or `amd` matches when classify_cpu_vendor() returns that
+    vendor (or 'mixed'). Other patterns fall through to the existing
+    fnmatch-based feature-token matcher.
+    """
+    vendor = row.cpu_vendor
+    other: List[str] = []
+    for pat in patterns:
+        p = (pat or "").lower()
+        if p == "intel":
+            if vendor in ("intel", "mixed"):
+                return True
+        elif p == "amd":
+            if vendor in ("amd", "mixed"):
+                return True
+        else:
+            other.append(pat)
+    return any_glob_match(row.cpu_features, other)
+
+
 def parse_wall_seconds(value: str) -> Optional[int]:
     value = (value or "").strip().lower()
     if not value:
@@ -1527,7 +1629,7 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
             continue
         if args.gpu_type and not any_glob_match(row.gpu_types, args.gpu_type):
             continue
-        if args.cpu_type and not any_glob_match(row.cpu_features, args.cpu_type):
+        if args.cpu_type and not _matches_cpu_type_filter(row, args.cpu_type):
             continue
         if args.freecycle and "freecycle" not in tags:
             continue
@@ -1598,6 +1700,7 @@ def sort_pairs(
         "wait",
         "shape",
         "premium",
+        "vendor",
     }
     unknown = [key for key in keys if key not in allowed]
     if unknown:
@@ -1615,6 +1718,8 @@ def sort_pairs(
                 values.append(shape.label if shape is not None else "")
             elif key == "premium":
                 values.append(0 if any_glob_match(row.gpu_types, PREMIUM_GPUS) else 1)
+            elif key == "vendor":
+                values.append({"intel": 0, "amd": 1, "mixed": 2}.get(row.cpu_vendor, 3))
             elif key == "wall":
                 values.append(parse_wall_seconds(row.qos_info.max_wall) or -1)
             elif key in {"priority", "fairshare", "usage"}:
@@ -1834,6 +1939,8 @@ def json_output(
         "_help": {
             "schema_version": 1,
             "premium_gpus": list(PREMIUM_GPUS),
+            "intel_cpu_features": list(INTEL_CPU_FEATURES),
+            "amd_cpu_features": list(AMD_CPU_FEATURES),
             "fields": {
                 "cluster": "SLURM cluster name (e.g. notchpeak, granite)",
                 "account": "account to pass via --account",
@@ -1852,6 +1959,9 @@ def json_output(
                 "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
                 "cpu_features": "node feature tags for the partition (with --wide)",
+                "cpu_vendor": "derived from cpu_features: 'intel', 'amd', "
+                        "'mixed', or '' when unknown. Filter via --cpu-type "
+                        "intel|amd; sort tier 'vendor' ranks intel<amd<mixed<unknown.",
                 "tags": "quality flags: gpu, cpu, freecycle (preemptable), "
                         "guest (preemptable on idle owner nodes), reservation, default",
                 "default": "'yes' if this QOS is the default for the assoc",
@@ -1860,9 +1970,10 @@ def json_output(
                 "usage": "RawUsage from sshare (lower = less recent consumption)",
             },
             "notes": [
-                "Rows are sorted by 'wait,shape,premium,cluster,qos' by default: "
+                "Rows are sorted by 'wait,shape,premium,vendor,cluster,qos' by default: "
                 "lowest predicted wait first, then grouped by shape, then "
-                "premium-GPU rows ahead of non-premium, then alphabetical.",
+                "premium-GPU rows ahead of non-premium, then Intel CPUs ahead of AMD, "
+                "then alphabetical.",
                 "Premium GPUs are the substring matches in `_help.premium_gpus` "
                 "against `gpu_types` (case-insensitive).",
                 "freecycle/guest QOS rows are preemptable; jobs there should "
@@ -1870,10 +1981,14 @@ def json_output(
                 "With multiple --shape flags the output is in long format: one "
                 "row per (allocation, shape) pair. The `shape` column tells "
                 "you which shape was probed for that wait.",
-                "Without any shape flags, the implicit default probes a CPU "
-                "baseline (cpu:8@1h) plus one shape per premium GPU type "
-                "(a100/h100/h200/a6000) the user can access. Pairs where the "
-                "shape can't run on the row are dropped from output.",
+                "Without any shape flags, the implicit default probes one "
+                "CPU baseline per accessible vendor ('cpu-intel:8@1h' and/or "
+                "'cpu-amd:8@1h', falling back to plain 'cpu:8@1h' when neither "
+                "vendor is detected) plus one shape per premium GPU type "
+                "(a100/h100/h200/a6000) the user can access. Vendor-tagged CPU "
+                "shapes pass `--constraint=` to sbatch so the probe lands on "
+                "matching hardware. Pairs where the shape can't run on the row "
+                "are dropped from output.",
             ],
         },
         "rows": records,
@@ -2400,7 +2515,12 @@ def main(argv: Sequence[str]) -> int:
         partition_gpus = show_partition_gpus()
     else:
         partition_gpus = {}
-    partition_features = show_partition_features() if (args.cpu_type or args.wide) else {}
+    # cpu_vendor classification + Intel/AMD baseline shapes both rely on
+    # partition features, so fetch them unless explicitly opted out.
+    partition_features = (
+        {} if args.no_avail and not (args.cpu_type or args.wide)
+        else show_partition_features()
+    )
     attach_metadata(
         rows,
         include_usage=(not args.no_usage and not args.all_visible),
@@ -2423,8 +2543,8 @@ def main(argv: Sequence[str]) -> int:
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = (
-            "wait,shape,premium,cluster,qos" if include_wait
-            else "premium,cluster,account,qos"
+            "wait,shape,premium,vendor,cluster,qos" if include_wait
+            else "premium,vendor,cluster,account,qos"
         )
     pairs = sort_pairs(pairs, sort_spec, args.reverse)
 
