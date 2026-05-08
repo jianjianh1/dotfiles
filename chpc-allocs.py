@@ -129,12 +129,15 @@ class AllocationRow:
         self.tags = tags
         self.gpu_types = gpu_types
         self.cpu_features = cpu_features
+        self.free_nodes = ""
+        self.free_cpus = ""
+        self.free_gpus = ""
 
     @property
     def is_default(self) -> bool:
         return bool(self.default_qos) and self.qos == self.default_qos
 
-    def to_dict(self, wide: bool = False) -> Dict[str, str]:
+    def to_dict(self, wide: bool = False, include_avail: bool = False) -> Dict[str, str]:
         data = {
             "cluster": self.cluster,
             "account": self.account,
@@ -166,6 +169,10 @@ class AllocationRow:
                     "tres_run_mins": self.share_info.tres_run_mins if self.share_info else "",
                 }
             )
+        if include_avail:
+            data["free_nodes"] = self.free_nodes
+            data["free_cpus"] = self.free_cpus
+            data["free_gpus"] = self.free_gpus
         return data
 
 
@@ -191,8 +198,10 @@ Examples:
   chpc-allocs --gpu-type h100nvl --no-freecycle --no-guest
   chpc-allocs --cpu-type emr               # Intel Emerald Rapids partitions
   chpc-allocs --cpu-type gen --gpu-type h100nvl --sbatch
-  chpc-allocs --list-gpus                  # cluster/partition GPU inventory
-  chpc-allocs --list-cpus                  # cluster/partition feature inventory
+  chpc-allocs --avail                      # add free_nodes/free_cpus/free_gpus columns
+  chpc-allocs --avail --gpu-type a100      # only a100-bearing rows + live free counts
+  chpc-allocs --list-gpus                  # cluster/partition GPU inventory (free/total)
+  chpc-allocs --list-cpus                  # cluster/partition feature inventory + free
   chpc-allocs --wide --format csv > allocs.csv
   chpc-allocs --min-wall 7-00:00:00        # only QOS allowing >= 1 week jobs
   chpc-allocs --all-visible --account sadayappan
@@ -311,6 +320,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-usage", action="store_true",
         help="Skip the sshare lookup (faster, but FairShare/Usage columns will be empty).",
+    )
+    parser.add_argument(
+        "--avail", action="store_true",
+        help="Add live free_nodes/free_cpus/free_gpus columns sourced from sinfo. "
+        "Counts only nodes in idle/mix states as contributing free capacity. "
+        "In table mode, hides priority/fairshare/usage/default/tags to keep "
+        "rows narrow (use --wide to bring them back). CSV/JSON include all keys.",
     )
     parser.add_argument(
         "--sbatch", action="store_true",
@@ -487,21 +503,43 @@ def show_usage(user: str) -> Dict[str, ShareInfo]:
     return shares
 
 
-def parse_gres_line(line: str) -> Tuple[str, str, Dict[str, int]]:
-    """Parse one `sinfo --clusters=all -h -O 'Cluster:|,PartitionName:|,Gres:1024'`
-    line into (cluster, partition, {type: count}).
+def _split_gres_entries(gres: str) -> List[str]:
+    """Split a GRES string on commas, ignoring commas inside parentheses.
 
-    GRES strings look like 'gpu:a100:8,gpu:2080ti:2', 'gpu:8' (untyped, mapped
-    to '_any_'), or 'gpu:a100:8(IDX:0-7)' (trailing flags stripped).
+    Needed because GresUsed can contain `(IDX:0,2-3)` where the IDX list itself
+    holds commas — naive `gres.split(",")` would shred those.
     """
-    fields = line.split("|", 2)
-    if len(fields) < 3:
-        return "", "", {}
-    cluster, partition, gres = (fields[0].strip(), fields[1].strip(), fields[2].strip())
+    parts: List[str] = []
+    depth = 0
+    buf: List[str] = []
+    for ch in gres:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
+def parse_gres_per_type(gres: str) -> Dict[str, int]:
+    """Parse a GRES string (Gres or GresUsed) into {gpu_type: count}.
+
+    Handles untyped 'gpu:8' (mapped to '_any_'), typed 'gpu:a100:8(IDX:0-7)'
+    (parenthetical flags stripped), and entries with commas inside parens.
+    Non-gpu entries (nsight, mps, ...) are ignored.
+    """
     bucket: Dict[str, int] = {}
-    if not partition or not gres or gres == "(null)":
-        return cluster, partition, bucket
-    for entry in gres.split(","):
+    if not gres or gres == "(null)":
+        return bucket
+    for entry in _split_gres_entries(gres):
         entry = entry.strip().lower()
         if not entry.startswith("gpu"):
             continue
@@ -517,7 +555,126 @@ def parse_gres_line(line: str) -> Tuple[str, str, Dict[str, int]]:
             bucket[gtype] = bucket.get(gtype, 0) + int(count)
         except ValueError:
             bucket.setdefault(gtype, 0)
-    return cluster, partition, bucket
+    return bucket
+
+
+def parse_gres_line(line: str) -> Tuple[str, str, Dict[str, int]]:
+    """Parse one `sinfo --clusters=all -h -O 'Cluster:|,PartitionName:|,Gres:1024'`
+    line into (cluster, partition, {type: count}).
+    """
+    fields = line.split("|", 2)
+    if len(fields) < 3:
+        return "", "", {}
+    cluster, partition, gres = (fields[0].strip(), fields[1].strip(), fields[2].strip())
+    if not partition:
+        return cluster, partition, {}
+    return cluster, partition, parse_gres_per_type(gres)
+
+
+def parse_cpus_state(value: str) -> Tuple[int, int]:
+    """Parse SLURM CPUsState 'alloc/idle/other/total' into (free, total).
+
+    'free' is the idle component. Returns (0, 0) on malformed input.
+    """
+    parts = (value or "").strip().split("/")
+    if len(parts) != 4:
+        return 0, 0
+    try:
+        return int(parts[1]), int(parts[3])
+    except ValueError:
+        return 0, 0
+
+
+# State suffixes per `man sinfo`: * not responding, ~ powered off, # powering up,
+# $ in reservation, @ pending reboot, ! powering down, ^ reboot issued, + planned,
+# - pending reboot (some versions). We treat any base==idle/mix as free, but a
+# trailing '*' (not responding) blocks job dispatch so it's never free.
+_NODE_STATE_SUFFIX_CHARS = "*~#$@!^+-"
+
+
+def is_free_node_state(state: str) -> bool:
+    s = (state or "").strip().lower()
+    if not s or s.endswith("*"):
+        return False
+    base = s.rstrip(_NODE_STATE_SUFFIX_CHARS)
+    return base in {"idle", "mix"}
+
+
+class PartitionAvail:
+    """Live capacity for one (cluster, partition): nodes/cpus/gpus as (free, total)."""
+
+    def __init__(self) -> None:
+        self.nodes_free = 0
+        self.nodes_total = 0
+        self.cpus_free = 0
+        self.cpus_total = 0
+        self.gpus: Dict[str, List[int]] = {}  # type -> [free, total]
+
+    def add_gpu(self, gtype: str, free: int, total: int) -> None:
+        slot = self.gpus.setdefault(gtype, [0, 0])
+        slot[0] += free
+        slot[1] += total
+
+
+def _strip_partition_marker(name: str) -> str:
+    """Sinfo marks a cluster's default partition with a trailing '*'."""
+    return name[:-1] if name.endswith("*") else name
+
+
+def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
+    """Return {cluster: {partition: PartitionAvail}} from a single per-node sinfo.
+
+    Counts nodes_total/cpus_total/gpus_total from configured capacity (every
+    listed node), but only credits a node's idle CPUs/GPUs as 'free' when the
+    node state is idle or mix (and not '*'/non-responding).
+    """
+    sinfo = require_tool("sinfo")
+    args = [
+        sinfo,
+        "--clusters=all",
+        "-h",
+        "-N",
+        "-O",
+        "Cluster:|,NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Gres:1024|,GresUsed:1024|",
+    ]
+    result: Dict[str, Dict[str, PartitionAvail]] = {}
+    try:
+        output = run_command(args)
+    except CommandError:
+        return result
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        # The Gres/GresUsed columns are 1024-wide so the line is fixed-width;
+        # split off the first 5 pipe-fields, the rest is the two GRES blobs.
+        fields = line.split("|")
+        if len(fields) < 7:
+            continue
+        cluster = fields[0].strip()
+        node = fields[1].strip()
+        partition = _strip_partition_marker(fields[2].strip())
+        state = fields[3].strip()
+        cpus_state = fields[4].strip()
+        gres_total = fields[5].strip()
+        gres_used = fields[6].strip()
+        if not cluster or not partition or not node:
+            continue
+        free_node = is_free_node_state(state)
+        cpus_idle, cpus_total = parse_cpus_state(cpus_state)
+        gpu_total = parse_gres_per_type(gres_total)
+        gpu_used = parse_gres_per_type(gres_used)
+
+        bucket = result.setdefault(cluster, {}).setdefault(partition, PartitionAvail())
+        bucket.nodes_total += 1
+        bucket.cpus_total += cpus_total
+        if free_node:
+            bucket.nodes_free += 1
+            bucket.cpus_free += cpus_idle
+        for gtype, total in gpu_total.items():
+            used = gpu_used.get(gtype, 0)
+            free = max(0, total - used) if free_node else 0
+            bucket.add_gpu(gtype, free, total)
+    return result
 
 
 def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
@@ -571,20 +728,25 @@ def resolve_row_gpu_types(
     return tuple(sorted(seen))
 
 
-def format_gpu_summary(partition_gpus: Dict[str, Dict[str, Dict[str, int]]]) -> str:
-    if not partition_gpus:
-        return "(no GPU partitions found)"
-    pairs: List[Tuple[str, str, Dict[str, int]]] = []
-    for cluster in partition_gpus:
-        for partition, types in partition_gpus[cluster].items():
-            pairs.append((cluster, partition, types))
+def format_gpu_summary(
+    partition_avail: Dict[str, Dict[str, PartitionAvail]],
+) -> str:
+    """Render cluster/partition GPU inventory as 'gtype:free/total'."""
+    pairs: List[Tuple[str, str, Dict[str, List[int]]]] = []
+    for cluster, parts in partition_avail.items():
+        for partition, bucket in parts.items():
+            if bucket.gpus:
+                pairs.append((cluster, partition, bucket.gpus))
     if not pairs:
         return "(no GPU partitions found)"
     cluster_w = max(len(c) for c, _, _ in pairs)
     partition_w = max(len(p) for _, p, _ in pairs)
     lines = []
-    for cluster, partition, types in sorted(pairs):
-        rendered = ", ".join(f"{gtype}:{count}" for gtype, count in sorted(types.items()))
+    for cluster, partition, gpus in sorted(pairs):
+        rendered = ", ".join(
+            f"{gtype}:{free}/{total}"
+            for gtype, (free, total) in sorted(gpus.items())
+        )
         lines.append(f"{cluster.ljust(cluster_w)}  {partition.ljust(partition_w)}  {rendered}")
     return "\n".join(lines)
 
@@ -633,7 +795,12 @@ def resolve_row_features(
     return tuple(sorted(seen))
 
 
-def format_cpu_summary(partition_features: Dict[str, Dict[str, Set[str]]]) -> str:
+def format_cpu_summary(
+    partition_features: Dict[str, Dict[str, Set[str]]],
+    partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
+) -> str:
+    """Render cluster/partition feature inventory; appends node/cpu free/total
+    when availability data is provided."""
     if not partition_features:
         return "(no partition features found)"
     pairs: List[Tuple[str, str, Set[str]]] = []
@@ -644,10 +811,22 @@ def format_cpu_summary(partition_features: Dict[str, Dict[str, Set[str]]]) -> st
         return "(no partition features found)"
     cluster_w = max(len(c) for c, _, _ in pairs)
     partition_w = max(len(p) for _, p, _ in pairs)
+
+    def _avail_for(cluster: str, partition: str) -> str:
+        if partition_avail is None:
+            return ""
+        bucket = partition_avail.get(cluster, {}).get(partition)
+        if bucket is None:
+            return ""
+        return f"  nodes:{bucket.nodes_free}/{bucket.nodes_total} cpus:{bucket.cpus_free}/{bucket.cpus_total}"
+
     lines = []
     for cluster, partition, feats in sorted(pairs):
         rendered = ",".join(sorted(feats))
-        lines.append(f"{cluster.ljust(cluster_w)}  {partition.ljust(partition_w)}  {rendered}")
+        lines.append(
+            f"{cluster.ljust(cluster_w)}  {partition.ljust(partition_w)}  "
+            f"{rendered}{_avail_for(cluster, partition)}"
+        )
     return "\n".join(lines)
 
 
@@ -657,6 +836,7 @@ def attach_metadata(
     user: str,
     partition_gpus: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None,
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
+    partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
 ) -> None:
     qos_info = show_qos(row.qos for row in rows)
     share_info = {} if include_usage is False else show_usage(user)
@@ -668,6 +848,44 @@ def attach_metadata(
         row.gpu_types = resolve_row_gpu_types(row, partition_gpus)
         row.cpu_features = resolve_row_features(row, partition_features)
         row.tags = classify(row)
+        if partition_avail is not None:
+            attach_row_availability(row, partition_avail)
+
+
+def attach_row_availability(
+    row: AllocationRow,
+    partition_avail: Dict[str, Dict[str, PartitionAvail]],
+) -> None:
+    """Roll up live availability across this row's candidate partitions."""
+    per_cluster = partition_avail.get(row.cluster, {})
+    nodes_free = nodes_total = 0
+    cpus_free = cpus_total = 0
+    gpus: Dict[str, List[int]] = {}
+    seen_partitions: Set[str] = set()
+    matched = False
+    for cand in _candidate_partitions(row):
+        bucket = per_cluster.get(cand)
+        if bucket is None or cand in seen_partitions:
+            continue
+        seen_partitions.add(cand)
+        matched = True
+        nodes_free += bucket.nodes_free
+        nodes_total += bucket.nodes_total
+        cpus_free += bucket.cpus_free
+        cpus_total += bucket.cpus_total
+        for gtype, (free, total) in bucket.gpus.items():
+            slot = gpus.setdefault(gtype, [0, 0])
+            slot[0] += free
+            slot[1] += total
+    if not matched:
+        return
+    row.free_nodes = f"{nodes_free}/{nodes_total}"
+    row.free_cpus = f"{cpus_free}/{cpus_total}"
+    if gpus:
+        row.free_gpus = ", ".join(
+            f"{gtype}:{free}/{total}"
+            for gtype, (free, total) in sorted(gpus.items())
+        )
 
 
 def classify(row: AllocationRow) -> Tuple[str, ...]:
@@ -854,29 +1072,147 @@ def sort_rows(rows: List[AllocationRow], sort_spec: str, reverse: bool) -> List[
     return sorted(rows, key=key_for, reverse=reverse)
 
 
-def table_output(rows: List[AllocationRow], wide: bool) -> str:
-    records = [row.to_dict(wide=wide) for row in rows]
-    columns = list(records[0].keys()) if records else list(AllocationRow("", "", "", "", "", "").to_dict(wide=wide).keys())
-    widths = {
+_AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage", "tags")
+
+
+def _empty_columns(wide: bool, include_avail: bool) -> List[str]:
+    return list(
+        AllocationRow("", "", "", "", "", "")
+        .to_dict(wide=wide, include_avail=include_avail)
+        .keys()
+    )
+
+
+def _select_table_columns(all_columns: List[str], wide: bool, include_avail: bool) -> List[str]:
+    """Pick which columns the table renderer should display.
+
+    `to_dict()` produces every key for CSV/JSON consumers; the table view drops
+    columns that crowd the layout. In `--avail` mode (without `--wide`),
+    priority/fairshare/usage/default/tags are hidden so free_nodes/free_cpus/
+    free_gpus have room to breathe.
+    """
+    if include_avail and not wide:
+        return [c for c in all_columns if c not in _AVAIL_COMPACT_HIDE]
+    return list(all_columns)
+
+
+def _wrap_gpu_list(text: str, width: int) -> List[str]:
+    """Wrap a 'gtype:f/t, gtype:f/t, ...' string to fit within `width` chars per line.
+
+    Splits on commas (preserving order), greedily packs tokens, and adds a
+    trailing ',' to every non-final line so the continuation is unambiguous.
+    Single tokens that exceed `width` go on their own line (no truncation).
+    """
+    if not text:
+        return [""]
+    tokens = [t.strip() for t in text.split(",") if t.strip()]
+    if not tokens:
+        return [""]
+    lines: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for tok in tokens:
+        sep_cost = 2 if current else 0  # ", "
+        # Reserve 1 char for the trailing ',' that closes a non-final line.
+        if current and current_len + sep_cost + len(tok) + 1 > width:
+            lines.append(", ".join(current) + ",")
+            current = [tok]
+            current_len = len(tok)
+        else:
+            current.append(tok)
+            current_len += sep_cost + len(tok)
+    if current:
+        lines.append(", ".join(current))
+    return lines
+
+
+def table_output(
+    rows: List[AllocationRow],
+    wide: bool,
+    include_avail: bool = False,
+    *,
+    tty: Optional[bool] = None,
+    term_width: Optional[int] = None,
+) -> str:
+    records = [row.to_dict(wide=wide, include_avail=include_avail) for row in rows]
+    all_columns = list(records[0].keys()) if records else _empty_columns(wide, include_avail)
+    columns = _select_table_columns(all_columns, wide, include_avail)
+
+    if tty is None:
+        tty = sys.stdout.isatty()
+    if term_width is None:
+        term_width = shutil.get_terminal_size((120, 24)).columns
+
+    # Wrap free_gpus only when it's the rightmost column AND we're rendering for a tty.
+    wrap_target: Optional[str] = None
+    if (
+        include_avail
+        and columns
+        and columns[-1] == "free_gpus"
+        and tty
+        and any(record.get("free_gpus") for record in records)
+    ):
+        wrap_target = "free_gpus"
+
+    base_widths = {
         column: max(
             len(column),
             max((len(record.get(column, "")) for record in records), default=0),
         )
         for column in columns
     }
+
+    if wrap_target:
+        prefix_cols = columns[:-1]
+        prefix_width = sum(base_widths[c] for c in prefix_cols) + 2 * len(prefix_cols)
+        wrap_width = max(40, term_width - prefix_width)
+        wrapped_cells = [_wrap_gpu_list(r.get(wrap_target, ""), wrap_width) for r in records]
+        target_w = max(
+            len(wrap_target),
+            max(
+                (max(len(line) for line in cell) for cell in wrapped_cells if cell),
+                default=0,
+            ),
+        )
+        widths = {**base_widths, wrap_target: target_w}
+    else:
+        wrapped_cells = None
+        widths = base_widths
+
     header = "  ".join(column.upper().ljust(widths[column]) for column in columns)
     rule = "  ".join("-" * widths[column] for column in columns)
     lines = [header, rule]
-    for record in records:
-        lines.append("  ".join(record.get(column, "").ljust(widths[column]) for column in columns))
+    # When any record wraps onto continuation lines, separate records with a
+    # blank line so the eye can tell where one row ends and the next begins.
+    separate_records = bool(
+        wrap_target and any(len(cell) > 1 for cell in (wrapped_cells or []))
+    )
+    for index, record in enumerate(records):
+        if separate_records and index > 0:
+            lines.append("")
+        if wrap_target:
+            cell_lines = wrapped_cells[index] or [""]
+            prefix_cols = columns[:-1]
+            prefix = "  ".join(record.get(c, "").ljust(widths[c]) for c in prefix_cols)
+            sep = "  " if prefix else ""
+            lines.append(prefix + sep + cell_lines[0])
+            indent = " " * (
+                sum(widths[c] for c in prefix_cols) + 2 * len(prefix_cols)
+            )
+            for cont in cell_lines[1:]:
+                lines.append(indent + cont)
+        else:
+            lines.append(
+                "  ".join(record.get(c, "").ljust(widths[c]) for c in columns)
+            )
     if not records:
         lines.append("(no matching allocations)")
     return "\n".join(lines)
 
 
-def csv_output(rows: List[AllocationRow], wide: bool) -> str:
-    records = [row.to_dict(wide=wide) for row in rows]
-    columns = list(records[0].keys()) if records else list(AllocationRow("", "", "", "", "", "").to_dict(wide=wide).keys())
+def csv_output(rows: List[AllocationRow], wide: bool, include_avail: bool = False) -> str:
+    records = [row.to_dict(wide=wide, include_avail=include_avail) for row in rows]
+    columns = list(records[0].keys()) if records else _empty_columns(wide, include_avail)
     stream = StringIO()
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
@@ -884,8 +1220,12 @@ def csv_output(rows: List[AllocationRow], wide: bool) -> str:
     return stream.getvalue().rstrip("\n")
 
 
-def json_output(rows: List[AllocationRow], wide: bool) -> str:
-    return json.dumps([row.to_dict(wide=wide) for row in rows], indent=2, sort_keys=True)
+def json_output(rows: List[AllocationRow], wide: bool, include_avail: bool = False) -> str:
+    return json.dumps(
+        [row.to_dict(wide=wide, include_avail=include_avail) for row in rows],
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def sbatch_output(rows: List[AllocationRow]) -> str:
@@ -930,8 +1270,10 @@ def run_self_test() -> int:
     assert bucket == {}
     assert parse_gres_line("malformed line")[1] == ""
 
-    summary = format_gpu_summary({"notchpeak": {"notchpeak-gpu": {"a100": 4}}})
-    assert "notchpeak-gpu" in summary and "a100:4" in summary
+    fake_avail = {"notchpeak": {"notchpeak-gpu": PartitionAvail()}}
+    fake_avail["notchpeak"]["notchpeak-gpu"].add_gpu("a100", 3, 4)
+    summary = format_gpu_summary(fake_avail)
+    assert "notchpeak-gpu" in summary and "a100:3/4" in summary
 
     fc_row = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
@@ -981,6 +1323,123 @@ def run_self_test() -> int:
     ) == ("gen", "h100nvl")
     cpu_summary = format_cpu_summary({"granite": {"granite-gpu": {"gen", "h100nvl"}}})
     assert "granite-gpu" in cpu_summary and "gen" in cpu_summary
+
+    # Live-availability parsing.
+    assert parse_cpus_state("96/0/0/96") == (0, 96)
+    assert parse_cpus_state("32/32/0/64") == (32, 64)
+    assert parse_cpus_state("garbage") == (0, 0)
+    assert is_free_node_state("idle")
+    assert is_free_node_state("mix")
+    assert is_free_node_state("mix-")  # pending reboot but still accepting
+    assert not is_free_node_state("alloc")
+    assert not is_free_node_state("idle*")  # not responding
+    assert not is_free_node_state("down")
+    assert not is_free_node_state("inval")
+
+    # Parens-aware GRES splitter handles commas inside (IDX:0,2-3).
+    assert _split_gres_entries("gpu:rtx6000:3(IDX:0,2-3),nsight:0") == [
+        "gpu:rtx6000:3(IDX:0,2-3)",
+        "nsight:0",
+    ]
+    assert parse_gres_per_type("gpu:rtx6000:3(IDX:0,2-3),nsight:0") == {"rtx6000": 3}
+    assert parse_gres_per_type("gpu:a100:8(IDX:0-7),nsight:8") == {"a100": 8}
+    assert parse_gres_per_type("gpu:rtx2000:0(IDX:N/A)") == {"rtx2000": 0}
+    assert parse_gres_per_type("(null)") == {}
+    assert parse_gres_per_type("gpu:8") == {"_any_": 8}
+
+    # Default-partition '*' marker is stripped.
+    assert _strip_partition_marker("granite*") == "granite"
+    assert _strip_partition_marker("granite-gpu") == "granite-gpu"
+
+    # End-to-end row enrichment with synthetic per-partition availability.
+    avail = {"granite": {"granite-gpu": PartitionAvail()}}
+    bucket = avail["granite"]["granite-gpu"]
+    bucket.nodes_total = 2
+    bucket.nodes_free = 1
+    bucket.cpus_total = 128
+    bucket.cpus_free = 32
+    bucket.add_gpu("h100nvl", 4, 16)
+    fc_row3 = AllocationRow(
+        "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
+    )
+    attach_row_availability(fc_row3, avail)
+    assert fc_row3.free_nodes == "1/2"
+    assert fc_row3.free_cpus == "32/128"
+    assert fc_row3.free_gpus == "h100nvl:4/16"
+    record = fc_row3.to_dict(include_avail=True)
+    assert record["free_nodes"] == "1/2"
+    assert record["free_gpus"] == "h100nvl:4/16"
+    assert "free_nodes" not in fc_row3.to_dict()  # opt-in only
+
+    # CPU summary appends nodes/cpus when availability is supplied.
+    cpu_summary_avail = format_cpu_summary(
+        {"granite": {"granite-gpu": {"gen", "h100nvl"}}}, avail
+    )
+    assert "nodes:1/2" in cpu_summary_avail
+    assert "cpus:32/128" in cpu_summary_avail
+
+    # GPU-list wrapper: single line when it fits, multi-line with trailing
+    # commas when it doesn't, oversized tokens never crash.
+    assert _wrap_gpu_list("a:1/2, b:0/4, c:3/3", 100) == ["a:1/2, b:0/4, c:3/3"]
+    assert _wrap_gpu_list("a:1/2, b:0/4, c:3/3", 8) == ["a:1/2,", "b:0/4,", "c:3/3"]
+    assert _wrap_gpu_list("", 80) == [""]
+    assert _wrap_gpu_list("verylongtoken:99/99, x:1/2", 5) == [
+        "verylongtoken:99/99,",
+        "x:1/2",
+    ]
+
+    # table_output wraps free_gpus into continuation lines when tty + narrow.
+    avail_row = AllocationRow(
+        "granite", "sadayappan", "me", "", "granite-gpu", "granite-gpu"
+    )
+    avail_row.qos_info = QOSInfo("granite-gpu")
+    avail_row.tags = classify(avail_row)
+    avail_row.free_nodes = "3/3"
+    avail_row.free_cpus = "96/192"
+    avail_row.free_gpus = (
+        "a100:1/4, h100nvl:0/8, l40s:0/16, rtx6000:3/13, "
+        "rtxpr4000bl:1/43, rtxpr6000bl:5/36, h200_1g.18gb:55/56"
+    )
+    rendered = table_output(
+        [avail_row], wide=False, include_avail=True, tty=True, term_width=60
+    )
+    rendered_lines = rendered.splitlines()
+    # Header + rule + first data line + at least one indented continuation.
+    assert len(rendered_lines) >= 4, rendered
+    continuation = rendered_lines[3]
+    assert continuation.startswith(" "), repr(continuation)
+    assert continuation.lstrip().startswith(("a100", "h100", "l40s", "rtx", "h200")), \
+        repr(continuation)
+    # When piped (tty=False) we get a single physical line per row.
+    rendered_piped = table_output(
+        [avail_row], wide=False, include_avail=True, tty=False, term_width=60
+    )
+    assert len(rendered_piped.splitlines()) == 3  # header + rule + one row
+
+    # Compact column set: --avail (no --wide) hides priority/fairshare/usage/default/tags.
+    full_cols = list(avail_row.to_dict(wide=False, include_avail=True).keys())
+    compact = _select_table_columns(full_cols, wide=False, include_avail=True)
+    assert "priority" not in compact and "fairshare" not in compact
+    assert "usage" not in compact and "default" not in compact and "tags" not in compact
+    assert "cluster" in compact and "free_gpus" in compact
+    # --wide brings them back.
+    wide_cols = _select_table_columns(full_cols, wide=True, include_avail=True)
+    assert "priority" in wide_cols and "tags" in wide_cols
+
+    # Two wrapping records must be separated by a blank line.
+    second = AllocationRow(
+        "granite", "sadayappan", "me", "", "granite-gpu-guest", "granite-gpu-guest"
+    )
+    second.qos_info = QOSInfo("granite-gpu-guest")
+    second.tags = classify(second)
+    second.free_nodes = "5/10"
+    second.free_cpus = "100/640"
+    second.free_gpus = avail_row.free_gpus  # long, will wrap
+    rendered_two = table_output(
+        [avail_row, second], wide=False, include_avail=True, tty=True, term_width=60
+    )
+    assert "\n\n" in rendered_two, "expected blank line between wrapping records"
+
     print("self-test passed")
     return 0
 
@@ -997,15 +1456,26 @@ def main(argv: Sequence[str]) -> int:
         raise CommandError("--guest and --no-guest cannot be used together")
 
     if args.list_gpus:
-        print(format_gpu_summary(show_partition_gpus()))
+        print(format_gpu_summary(show_partition_availability()))
         return 0
     if args.list_cpus:
-        print(format_cpu_summary(show_partition_features()))
+        print(format_cpu_summary(show_partition_features(), show_partition_availability()))
         return 0
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
     rows = show_associations(user=user, all_visible=args.all_visible)
-    partition_gpus = show_partition_gpus() if (args.gpu_type or args.wide) else {}
+    partition_avail = show_partition_availability() if args.avail else None
+    # When --avail is set, derive the gpu-types map from availability instead of
+    # making a second sinfo call. Matches the shape show_partition_gpus returns.
+    if partition_avail is not None and (args.gpu_type or args.wide):
+        partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
+            c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
+            for c, parts in partition_avail.items()
+        }
+    elif args.gpu_type or args.wide:
+        partition_gpus = show_partition_gpus()
+    else:
+        partition_gpus = {}
     partition_features = show_partition_features() if (args.cpu_type or args.wide) else {}
     attach_metadata(
         rows,
@@ -1013,6 +1483,7 @@ def main(argv: Sequence[str]) -> int:
         user=user,
         partition_gpus=partition_gpus,
         partition_features=partition_features,
+        partition_avail=partition_avail,
     )
     rows = filter_rows(rows, args)
     rows = sort_rows(rows, args.sort, args.reverse)
@@ -1020,11 +1491,11 @@ def main(argv: Sequence[str]) -> int:
     if args.sbatch:
         output = sbatch_output(rows)
     elif args.format == "csv":
-        output = csv_output(rows, args.wide)
+        output = csv_output(rows, args.wide, include_avail=args.avail)
     elif args.format == "json":
-        output = json_output(rows, args.wide)
+        output = json_output(rows, args.wide, include_avail=args.avail)
     else:
-        output = table_output(rows, args.wide)
+        output = table_output(rows, args.wide, include_avail=args.avail)
 
     print(output)
     return 0
