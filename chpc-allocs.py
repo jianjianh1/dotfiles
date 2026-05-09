@@ -2903,6 +2903,9 @@ def run_self_test() -> int:
 
 
 def main(argv: Sequence[str]) -> int:
+    if not argv:
+        _build_parser().print_help()
+        return 0
     args = parse_args(argv)
     if args.self_test:
         return run_self_test()
