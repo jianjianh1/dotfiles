@@ -9,6 +9,7 @@ can read; user names are never displayed in that mode.
 
 import argparse
 import csv
+import difflib
 import fnmatch
 import json
 import os
@@ -232,18 +233,32 @@ class AllocationRow:
         include_wait: bool = True,
         shape: Optional["ProbeShape"] = None,
     ) -> Dict[str, str]:
-        data = {
+        # Column order is intentional: identity → probe → "will it fit" →
+        # QOS metadata → wide diagnostics → live availability. Python dict
+        # insertion order propagates to the table/CSV/JSON renderers, so this
+        # is the single point of truth for column layout.
+        data: Dict[str, str] = {
             "cluster": self.cluster,
             "account": self.account,
             "qos": self.qos,
-            "default": "yes" if self.is_default else "",
-            "wall": self.qos_info.max_wall,
-            "priority": self.qos_info.priority,
-            "fairshare": self.share_info.fairshare if self.share_info else "",
-            "usage": self.share_info.raw_usage if self.share_info else "",
-            "tags": ",".join(self.tags),
-            "cpu_vendor": self.cpu_vendor,
         }
+        if include_avail and include_wait:
+            if shape is not None:
+                data["tier"] = _shape_tier(shape)
+                data["shape"] = shape.label
+                wait_secs = self.wait_by_shape.get(shape.label)
+            else:
+                data["tier"] = ""
+                data["shape"] = ""
+                wait_secs = None
+            data["wait"] = _format_wait(wait_secs)
+        data["wall"] = self.qos_info.max_wall
+        data["tags"] = ",".join(self.tags)
+        data["cpu_vendor"] = self.cpu_vendor
+        data["default"] = "yes" if self.is_default else ""
+        data["priority"] = self.qos_info.priority
+        data["fairshare"] = self.share_info.fairshare if self.share_info else ""
+        data["usage"] = self.share_info.raw_usage if self.share_info else ""
         if wide:
             data.update(
                 {
@@ -265,16 +280,6 @@ class AllocationRow:
                 }
             )
         if include_avail:
-            if include_wait:
-                if shape is not None:
-                    data["tier"] = _shape_tier(shape)
-                    data["shape"] = shape.label
-                    wait_secs = self.wait_by_shape.get(shape.label)
-                else:
-                    data["tier"] = ""
-                    data["shape"] = ""
-                    wait_secs = None
-                data["wait"] = _format_wait(wait_secs)
             data["free_nodes"] = self.free_nodes
             data["free_cpus"] = self.free_cpus
             data["free_gpus"] = self.free_gpus
@@ -556,6 +561,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit '#SBATCH --account=... --qos=...' blocks instead of a "
         "table. With --format=json, emits a JSON array of "
         "{cluster, account, qos, partition}.",
+    )
+    out.add_argument(
+        "--best", action="store_true",
+        help="Print only the lowest-wait runnable triple as a ready-to-paste "
+        "#SBATCH block plus a one-line summary. Requires wait data (incompatible "
+        "with --no-wait/--quick); also incompatible with --sbatch/--pivot. "
+        "With --format=json, emits a single object.",
     )
     out.add_argument(
         "--no-json-help", action="store_true",
@@ -1672,6 +1684,9 @@ def predict_wait(
 
 
 _PROGRESS_NOTICE_THRESHOLD = 24
+# Width for the rolling-counter clear-line write — wide enough to wipe
+# any "[chpc-allocs] probing N/M..." string we're likely to emit.
+_PROGRESS_CLEAR_WIDTH = 60
 
 
 def predict_wait_times(
@@ -1694,7 +1709,12 @@ def predict_wait_times(
     if not shapes:
         shapes = [ProbeShape()]
     pair_count = sum(1 for r in rows for s in shapes if not s.should_skip(r))
-    if verbose or (sys.stderr.isatty() and pair_count >= _PROGRESS_NOTICE_THRESHOLD):
+    threshold_hit = pair_count >= _PROGRESS_NOTICE_THRESHOLD
+    # Rolling counter would garble the per-row [v] narration verbose emits,
+    # so verbose runs keep the original static notice and skip rolling.
+    is_tty = sys.stderr.isatty()
+    use_rolling = is_tty and threshold_hit and not verbose
+    if verbose:
         print(
             f"[chpc-allocs] Probing {pair_count} (allocation × shape) wait times...",
             file=sys.stderr,
@@ -1704,12 +1724,22 @@ def predict_wait_times(
         for row in rows:
             for shape in shapes:
                 futures[pool.submit(predict_wait, row, shape=shape)] = (row, shape)
+        completed = 0
         for future in as_completed(futures):
             row, shape = futures[future]
             try:
                 row.wait_by_shape[shape.label] = future.result()
             except Exception:
                 row.wait_by_shape[shape.label] = None
+            completed += 1
+            if use_rolling:
+                sys.stderr.write(
+                    f"\r[chpc-allocs] probing {completed}/{pair_count}..."
+                )
+                sys.stderr.flush()
+    if use_rolling:
+        sys.stderr.write("\r" + " " * _PROGRESS_CLEAR_WIDTH + "\r")
+        sys.stderr.flush()
 
 
 def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
@@ -2182,6 +2212,15 @@ def _format_applied_filters(args: argparse.Namespace) -> List[str]:
     return bits
 
 
+def _is_default_output_mode(args: argparse.Namespace) -> bool:
+    """True when no output-mode flag (--sbatch/--best/--pivot) is active.
+
+    Each of those modes emits its own empty-set sentinel on stdout, so the
+    stderr hint would just duplicate the message.
+    """
+    return not (args.sbatch or args.best or args.pivot)
+
+
 def _zero_results_hint(args: argparse.Namespace) -> str:
     """Build a stderr hint shown when filtering left no rows.
 
@@ -2357,7 +2396,17 @@ def sort_pairs(
     }
     unknown = [key for key in keys if key not in allowed]
     if unknown:
-        raise CommandError("unknown sort key(s): " + ", ".join(unknown))
+        suggestions = []
+        for bad in unknown:
+            close = difflib.get_close_matches(bad, allowed, n=1, cutoff=0.6)
+            if close:
+                suggestions.append(f"{bad!r} (did you mean {close[0]!r}?)")
+            else:
+                suggestions.append(repr(bad))
+        raise CommandError(
+            "unknown sort key(s): " + ", ".join(suggestions) + "\n"
+            "  allowed: " + ", ".join(sorted(allowed))
+        )
 
     def key_for(pair: Tuple[AllocationRow, Optional[ProbeShape]]) -> Tuple[object, ...]:
         row, shape = pair
@@ -2446,6 +2495,91 @@ def _wrap_gpu_list(text: str, width: int) -> List[str]:
     return lines
 
 
+# ANSI styling — opt-out via NO_COLOR (https://no-color.org). Color is
+# applied only when stdout is a TTY at render time, so piped output stays
+# byte-identical to the pre-color era.
+_ANSI_RESET = "\x1b[0m"
+_ANSI_DIM = "\x1b[2m"
+_ANSI_BOLD = "\x1b[1m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_RED = "\x1b[31m"
+
+# A bare integer followed by m/h/d is enough to bucket _format_wait output
+# into <10m green / <1h yellow / >=1h red. "now" and "?" are handled
+# separately by _wait_color.
+_WAIT_TOKEN_RE = re.compile(r"^(\d+)([mhd])")
+
+
+def _color_enabled(tty: bool) -> bool:
+    """True when ANSI styling should be emitted.
+
+    Per no-color.org, NO_COLOR set to *any* non-empty value disables color.
+    """
+    if not tty:
+        return False
+    return not os.environ.get("NO_COLOR")
+
+
+def _paint(text: str, code: str, *, enable: bool) -> str:
+    if not enable or not code:
+        return text
+    return f"{code}{text}{_ANSI_RESET}"
+
+
+def _wait_color(raw: str) -> str:
+    """Pick an ANSI code for a wait-string token. Empty when no color applies."""
+    if raw == "?":
+        return _ANSI_DIM
+    if raw == "now":
+        return _ANSI_GREEN
+    match = _WAIT_TOKEN_RE.match(raw)
+    if not match:
+        return ""
+    value, unit = int(match.group(1)), match.group(2)
+    if unit == "m":
+        return _ANSI_GREEN if value < 10 else _ANSI_YELLOW
+    return _ANSI_RED
+
+
+def _tag_color(raw: str) -> str:
+    """Dim freecycle/guest tags — they're preemptable, worth flagging quietly."""
+    if "freecycle" in raw or "guest" in raw:
+        return _ANSI_DIM
+    return ""
+
+
+def _tier_color(tier: str) -> str:
+    """Style tier brackets in pivot/table headers."""
+    if tier == "dev":
+        return _ANSI_DIM
+    if tier == "premium":
+        return _ANSI_BOLD
+    return ""
+
+
+# Per-column colorer dispatch: map column name to a function that picks an
+# ANSI code from the raw cell value. Columns absent from the map render plain.
+_COLUMN_COLORERS = {
+    "wait": _wait_color,
+    "tags": _tag_color,
+}
+
+
+def _styled_cell(column: str, padded: str, raw: str, enable: bool) -> str:
+    """Wrap a *padded* cell in ANSI codes based on column semantics.
+
+    The padding is inside the styled span — spaces don't render visibly
+    regardless of foreground color, so this is safe.
+    """
+    if not enable:
+        return padded
+    colorer = _COLUMN_COLORERS.get(column)
+    if colorer is None:
+        return padded
+    return _paint(padded, colorer(raw), enable=enable)
+
+
 def table_output(
     pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     wide: bool,
@@ -2484,6 +2618,7 @@ def table_output(
         tty = sys.stdout.isatty()
     if term_width is None:
         term_width = shutil.get_terminal_size((120, 24)).columns
+    color = _color_enabled(tty)
 
     # Wrap free_gpus only when it's the rightmost column AND we're rendering for a tty.
     wrap_target: Optional[str] = None
@@ -2532,10 +2667,14 @@ def table_output(
     for index, record in enumerate(records):
         if separate_records and index > 0:
             lines.append("")
+        def cell(c: str) -> str:
+            value = record.get(c, "")
+            return _styled_cell(c, value.ljust(widths[c]), value, color)
+
         if wrap_target:
             cell_lines = wrapped_cells[index] or [""]
             prefix_cols = columns[:-1]
-            prefix = "  ".join(record.get(c, "").ljust(widths[c]) for c in prefix_cols)
+            prefix = "  ".join(cell(c) for c in prefix_cols)
             sep = "  " if prefix else ""
             lines.append(prefix + sep + cell_lines[0])
             indent = " " * (
@@ -2544,9 +2683,7 @@ def table_output(
             for cont in cell_lines[1:]:
                 lines.append(indent + cont)
         else:
-            lines.append(
-                "  ".join(record.get(c, "").ljust(widths[c]) for c in columns)
-            )
+            lines.append("  ".join(cell(c) for c in columns))
     if not records:
         lines.append("(no matching allocations)")
     return "\n".join(lines)
@@ -2671,6 +2808,53 @@ def json_output(
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def best_output(
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    fmt: str,
+) -> str:
+    """Render the lowest-wait pair as a paste-ready #SBATCH block (or JSON).
+
+    Assumes `pairs` is already sorted with the shortest wait first (the
+    default sort spec puts wait,shape ahead of identity). Falls back to a
+    `# no allocations matched` sentinel when filtering eliminated everything.
+    """
+    if not pairs:
+        if fmt == "json":
+            return json.dumps(None)
+        return "# no allocations matched"
+    row, shape = pairs[0]
+    wait_secs = row.wait_by_shape.get(shape.label) if shape else None
+    alternatives = len(pairs) - 1
+    if fmt == "json":
+        return json.dumps(
+            {
+                "cluster": row.cluster,
+                "account": row.account,
+                "partition": row.partition,
+                "qos": row.qos,
+                "time": shape.time if shape else "",
+                "predicted_wait_seconds": wait_secs,
+                "alternatives": alternatives,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    lines = [f"#SBATCH --account={row.account}"]
+    if row.partition:
+        lines.append(f"#SBATCH --partition={row.partition}")
+    if row.qos:
+        lines.append(f"#SBATCH --qos={row.qos}")
+    if shape and shape.time:
+        lines.append(f"#SBATCH --time={shape.time}")
+    suffix = (
+        f"  ({alternatives} alternative{'s' if alternatives != 1 else ''} — "
+        "drop --best to see them)"
+        if alternatives else ""
+    )
+    lines.append(f"# predicted wait: {_format_wait(wait_secs)}{suffix}")
+    return "\n".join(lines)
+
+
 def sbatch_output(rows: List[AllocationRow]) -> str:
     lines = []
     seen = set()
@@ -2712,6 +2896,8 @@ def sbatch_json_output(rows: List[AllocationRow]) -> str:
 
 def pivot_output(
     pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    *,
+    tty: Optional[bool] = None,
 ) -> str:
     """Render a (cluster, account, qos) × shape pivot table of wait times.
 
@@ -2766,13 +2952,39 @@ def pivot_output(
         max(len(headers[i]), max((len(r[i]) for r in body), default=0))
         for i in range(len(headers))
     ]
-    pad = lambda cells: "  ".join(
-        cells[i].ljust(widths[i]) for i in range(len(headers))
-    )
+    if tty is None:
+        tty = sys.stdout.isatty()
+    color = _color_enabled(tty)
+    n_id_cols = 3  # cluster, account, qos
     rule = "  ".join("-" * widths[i] for i in range(len(headers)))
-    lines = [pad(headers), rule]
+
+    def styled_header(i: int) -> str:
+        cell = headers[i].ljust(widths[i])
+        if not color or i < n_id_cols:
+            return cell
+        # shape-column header: pull tier from the parallel shape_labels list
+        label = shape_labels[i - n_id_cols]
+        tier = tier_by_label[label]
+        return _paint(cell, _tier_color(tier), enable=color)
+
+    def styled_body(row_cells: List[str]) -> str:
+        out = []
+        for i, raw in enumerate(row_cells):
+            cell = raw.ljust(widths[i])
+            # Shape columns carry wait values; reuse the table renderer's
+            # column-semantic dispatch by labelling them as "wait".
+            column = "wait" if i >= n_id_cols else ""
+            out.append(_styled_cell(column, cell, raw, color))
+        return "  ".join(out)
+
+    lines = ["  ".join(styled_header(i) for i in range(len(headers))), rule]
     for r in body:
-        lines.append(pad(r))
+        lines.append(styled_body(r))
+    legend = "(cells: predicted queue wait via sbatch --test-only; ? = unknown)"
+    if color:
+        legend = _paint(legend, _ANSI_DIM, enable=color)
+    lines.append("")
+    lines.append(legend)
     return "\n".join(lines)
 
 
@@ -3662,6 +3874,21 @@ def run_self_test() -> int:
     # No-shape pairs (no-wait mode) produce the same sentinel.
     assert pivot_output([(pivot_row, None)]) == "(no matching allocations)"
 
+    # best_output: text and JSON forms; alternatives count; empty fallback.
+    best_text = best_output([(pivot_row, s_a1), (pivot_row, s_a4)], "text")
+    assert "#SBATCH --account=research" in best_text
+    assert "#SBATCH --qos=q-piv" in best_text
+    assert "#SBATCH --time=01:00:00" in best_text
+    assert "predicted wait: now" in best_text
+    assert "1 alternative" in best_text and "drop --best" in best_text
+    best_json = json.loads(best_output([(pivot_row, s_a1), (pivot_row, s_a4)], "json"))
+    assert best_json["account"] == "research"
+    assert best_json["qos"] == "q-piv"
+    assert best_json["predicted_wait_seconds"] == 0
+    assert best_json["alternatives"] == 1
+    assert best_output([], "text") == "# no allocations matched"
+    assert json.loads(best_output([], "json")) is None
+
     # sbatch_json_output: deduplicated array of {cluster, account, qos, partition}.
     sbatch_row_a = AllocationRow("notchpeak", "research", "u", "notchpeak-gpu", "qa", "qa")
     sbatch_row_b = AllocationRow("granite", "mlres", "u", "granite-gpu", "qb", "qb")
@@ -3786,6 +4013,41 @@ def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool, bool]:
     return (fmt or "table"), wide, auto_switched
 
 
+# Legacy long-form flags kept around for muscle-memory scripts. argparse
+# silently accepts them (help=SUPPRESS); we emit a one-line stderr notice
+# so users discover the new spelling. Map: legacy → current.
+_LEGACY_ALIAS_MAP = {
+    "--freecycle": "--freecycle-only",
+    "--no-freecycle": "--exclude-freecycle",
+    "--guest": "--guest-only",
+    "--no-guest": "--exclude-guest",
+    "--show-unknown": "--show-all",
+    "--no-avail": "--no-availability",
+}
+
+
+def _warn_legacy_aliases(argv: Sequence[str], verbose: bool) -> None:
+    """Emit one stderr line per legacy alias used.
+
+    Notice is suppressed unless stderr is a TTY or --verbose is set, mirroring
+    _maybe_emit_format_auto_notice — keeps logged pipelines quiet but lets
+    interactive users discover the rename.
+    """
+    if not (verbose or sys.stderr.isatty()):
+        return
+    # split('=', 1)[0] handles '--no-avail=foo'-style tokens.
+    used = dict.fromkeys(
+        head for head in (token.split("=", 1)[0] for token in argv)
+        if head in _LEGACY_ALIAS_MAP
+    )
+    for alias in used:
+        replacement = _LEGACY_ALIAS_MAP[alias]
+        print(
+            f"[chpc-allocs] {alias} is a legacy alias; prefer {replacement}.",
+            file=sys.stderr,
+        )
+
+
 def _maybe_emit_format_auto_notice(auto_switched: bool, verbose: bool) -> None:
     """Print a stderr line when --format auto-switched to JSON.
 
@@ -3811,6 +4073,7 @@ def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     if args.self_test:
         return run_self_test()
+    _warn_legacy_aliases(argv, args.verbose)
     if args.quick:
         args.no_wait = True
         args.no_availability = True
@@ -3844,6 +4107,15 @@ def main(argv: Sequence[str]) -> int:
             "--pivot is only supported with --format=table\n"
             "  hint: drop --format, or post-process the long-format JSON/CSV with jq/awk"
         )
+    if args.best:
+        if args.no_wait:
+            raise CommandError(
+                "--best needs wait data; drop --no-wait/--quick"
+            )
+        if args.sbatch or args.pivot:
+            raise CommandError(
+                "--best is incompatible with --sbatch and --pivot"
+            )
     gpu_type, gpu_count = (None, None)
     if args.gpus:
         gpu_type, gpu_count = parse_gpu_spec(args.gpus)
@@ -3959,13 +4231,16 @@ def main(argv: Sequence[str]) -> int:
     pairs = sort_pairs(pairs, sort_spec, args.reverse)
 
     # If filtering left no rows, surface a hint so the user can self-debug.
-    if not pairs and not args.sbatch:
+    # Skip when an output-mode flag will produce its own empty-set message.
+    if not pairs and _is_default_output_mode(args):
         print(_zero_results_hint(args), file=sys.stderr)
 
     fmt, wide, auto_switched = _resolve_output_format(args)
     _maybe_emit_format_auto_notice(auto_switched, args.verbose)
 
-    if args.sbatch:
+    if args.best:
+        output = best_output(pairs, fmt)
+    elif args.sbatch:
         if fmt == "json":
             output = sbatch_json_output([row for row, _ in pairs])
         else:
