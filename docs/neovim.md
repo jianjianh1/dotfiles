@@ -465,5 +465,12 @@ nvim --headless '+Lazy! sync' +qa
 | nvim-surround | Surround text | VeryLazy | cs, ds, ys |
 | which-key.nvim | Keybinding popup | VeryLazy | `<leader>` + wait |
 | indent-blankline.nvim | Indent guides | BufReadPost | — |
+| blink.cmp | Completion engine | InsertEnter | default preset |
+| friendly-snippets | Snippet library | With blink.cmp | — |
+| conform.nvim | Formatter (format-on-save) | BufWritePre | `<leader>cf` |
+| trouble.nvim | Diagnostics / loclist / qflist UI | `:Trouble` | `<leader>xx/xb/xl/xq` |
+| mason.nvim | LSP/tool installer | `:Mason` | — |
+| mason-lspconfig.nvim | Bridge mason ↔ lspconfig | With mason | — |
+| nvim-lspconfig | LSP client config (pyright, clangd, lua_ls) | BufReadPre, BufNewFile | `gd`, `gr`, `gI`, `K`, `<leader>rn/ca/D`, `[d`, `]d` |
 | plenary.nvim | Utility library | Dependency | — |
 | nvim-web-devicons | File type icons | Dependency | — |
