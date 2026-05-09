@@ -293,20 +293,29 @@ class CommandError(RuntimeError):
 DESCRIPTION = """\
 Find CHPC SLURM account/QOS allocations and recommended SBATCH triples for
 the current user. Cross-references your account/QOS associations (sacctmgr)
-with live cluster GPU inventory (sinfo --clusters=all).
+with live cluster inventory (sinfo --clusters=all: GPU types, CPU features,
+free counts) and sshare priority/usage data.
 
-Filter values for --cluster/--account/--qos/--gpu-type are matched as
-case-insensitive substrings, so --cluster NOTCH matches notchpeak.
+Filter values for --cluster/--account/--qos are matched as case-insensitive
+substrings, so --cluster NOTCH matches notchpeak. --gpu-type and --cpu-type
+use glob patterns instead (bare values are auto-wrapped to *VALUE*; see
+their per-flag help for vendor shorthands and explicit globs).
 """
 
 EPILOG = """\
 Examples:
   chpc-allocs                              # all allocs; default 4-tier probe set,
-                                           # trimmed walltimes (2-3 endpoints per tier):
+                                           # trimmed walltimes (2-3 endpoints per tier).
+                                           # GPU shapes (default kind):
                                            #   dev      (2080ti:1                    @30m, 12h)
                                            #   middle   (v100:1, 3090:1              @4h, 24h)
                                            #   research (a100/h100/h200:1            @1h, 24h, 72h)
                                            #   premium  (a100/h100/a6000:4           @24h, 7d)
+                                           # CPU shapes (with --cpu):
+                                           #   dev      (cpu:4                       @30m, 12h)
+                                           #   middle   (cpu:16                      @4h, 24h)
+                                           #   research (cpu-intel:32, cpu-amd:32    @1h, 24h, 72h)
+                                           #   premium  (cpu-amd:64                  @24h, 7d)
                                            # rows with identical wait across walltimes are merged
                                            # (label shows '@min..max'); shapes silently drop if
                                            # the hardware is inaccessible
@@ -372,7 +381,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cpu", action="store_true",
-        help="Show rows whose SLURM metadata does NOT mention GPU. Mutually exclusive with --gpu.",
+        help="Show rows whose SLURM metadata does NOT mention GPU, AND switch "
+        "the implicit probe set from GPU tiers to CPU tiers (cpu:4, cpu:16, "
+        "cpu-intel:32 / cpu-amd:32, cpu-amd:64 — see Examples). Mutually "
+        "exclusive with --gpu.",
     )
     parser.add_argument(
         "--gpu-type", action="append", metavar="PATTERN",
@@ -441,7 +453,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wide", action="store_true",
-        help="Show extra columns including partition, gpu_types, TRES limits, and flags.",
+        help="Show extra columns including partition, gpu_types, cpu_features, "
+        "default_qos, TRES limits, QOS flags, and the full sshare detail set "
+        "(raw_shares, norm_shares, effective_usage, level_fs, tres_run_mins).",
     )
     parser.add_argument(
         "--sort", default=None, metavar="KEYS",
@@ -475,7 +489,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-wait", action="store_true",
         help="Skip the sbatch --test-only probe; omits the 'wait' column. "
-        "Default behavior runs one probe per allocation in parallel (~1s).",
+        "Default behavior runs one probe per (allocation x shape) in "
+        "parallel (~1-2s; the implicit shape set is multi-tier, so the probe "
+        "count is allocations * shapes).",
     )
     parser.add_argument(
         "--show-unknown", action="store_true",
