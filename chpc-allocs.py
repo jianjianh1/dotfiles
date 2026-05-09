@@ -72,9 +72,6 @@ INTEL_CPU_FEATURES = (
 )
 AMD_CPU_FEATURES = ("zen", "nap", "rom", "mil", "gen")
 
-_INTEL_CONSTRAINT_EXPR = "|".join(INTEL_CPU_FEATURES)
-_AMD_CONSTRAINT_EXPR = "|".join(AMD_CPU_FEATURES)
-
 
 def classify_cpu_vendor(features) -> str:
     """Map a row's cpu_features to 'intel', 'amd', 'mixed', or '' (unknown).
@@ -101,40 +98,37 @@ def classify_cpu_vendor(features) -> str:
         return "amd"
     return ""
 
-# Probe-shape defaults. Used as the argparse defaults for the legacy
-# single-shape flags and to detect when the user has overridden any of them.
+# Probe-shape defaults — used by ProbeShape() and parse_shape_spec().
 DEFAULT_PROBE_CPUS = 1
 DEFAULT_PROBE_NODES = 1
 DEFAULT_PROBE_TIME = "01:00:00"
 
-# Implicit default shape set, built when no shape flags are passed. Three
-# tiers covering the typical HPC research lifecycle:
+# Implicit default shape set, built when no positional SHAPE_LIST is given.
+# Three GPU tiers covering the typical HPC research lifecycle:
 #   1. dev      — small-GPU iteration, build/test, scaling sanity checks
-#   2. research — single-node CPU runs, single-GPU fine-tuning
-#   3. premium  — full-node CPU, multi-GPU DDP training
+#   2. research — single-GPU fine-tuning
+#   3. premium  — multi-GPU DDP training
 # Each shape is probed at one or more walltimes (curated per tier) so the
 # user sees how queue pressure scales with wallclock request length.
 # Shapes are gated on accessibility — a probe only emits if the user has
-# a row exposing the required vendor or GPU type.
+# a row exposing the required GPU type. CPU shapes are not part of the
+# implicit set; pass an explicit shape (e.g. 'cpu:32@12h') for CPU probes.
 #
 # Two walltime tuples per tier: a trimmed default and a `_FULL` sweep used
 # when --full is passed. Rows that share the same wait across the
 # remaining walltimes are merged by collapse_uniform_walltimes.
 DEV_WALLTIMES = ("04:00:00",)  # 4h
 DEV_WALLTIMES_FULL = ("04:00:00", "1-00:00:00")  # 4h, 24h
-DEV_CPU_CORES = 16
 DEV_GPU_PATTERNS = ("2080ti", "v100", "3090")
 
 RESEARCH_WALLTIMES = ("01:00:00", "1-00:00:00", "3-00:00:00")  # 1h, 24h, 72h
 RESEARCH_WALLTIMES_FULL = (
     "01:00:00", "02:00:00", "04:00:00", "12:00:00", "1-00:00:00", "3-00:00:00",
 )  # 1h, 2h, 4h, 12h, 24h, 72h
-RESEARCH_CPU_CORES = 32
 RESEARCH_GPU_PATTERNS = ("a100", "h100", "h200")
 
 PREMIUM_WALLTIMES = ("1-00:00:00", "7-00:00:00")  # 24h, 7d
 PREMIUM_WALLTIMES_FULL = ("08:00:00", "1-00:00:00", "3-00:00:00", "7-00:00:00")  # 8h, 24h, 72h, 7d
-PREMIUM_CPU_AMD_CORES = 64  # full Granite Genoa node
 PREMIUM_GPU_SHAPES = (
     ("a100", 4),
     ("h100", 4),
@@ -226,30 +220,15 @@ class AllocationRow:
     def is_default(self) -> bool:
         return bool(self.default_qos) and self.qos == self.default_qos
 
-    def _gpus_cell(
-        self,
-        shape: Optional["ProbeShape"],
-        gpu_filter_patterns: Optional[Sequence[str]],
-    ) -> str:
-        """Compact cell for the `gpus` column: which of this row's GPU types
-        explain the match. Combines `--gpu-type` filter hits with the per-row
-        resolution of any user-supplied shape gpu_type. Empty for CPU-only rows.
+    def _gpus_cell(self, shape: Optional["ProbeShape"]) -> str:
+        """Compact cell for the `gpus` column: the row's GPU type resolved
+        from the probe shape's gpu_type (e.g. shape says 'h100', row exposes
+        'h100nvl'). Empty for CPU-only rows or shapes without a gpu_type.
         """
-        if not self.gpu_types:
+        if not self.gpu_types or shape is None:
             return ""
-        seen: Set[str] = set()
-        out: List[str] = []
-        if gpu_filter_patterns:
-            for gt in gpu_types_matching(self.gpu_types, gpu_filter_patterns):
-                if gt not in seen:
-                    seen.add(gt)
-                    out.append(gt)
-        if shape is not None:
-            resolved = shape.resolved_gpu_type(self)
-            if resolved and resolved not in seen:
-                seen.add(resolved)
-                out.append(resolved)
-        return ",".join(out)
+        resolved = shape.resolved_gpu_type(self)
+        return resolved or ""
 
     def to_dict(
         self,
@@ -258,7 +237,6 @@ class AllocationRow:
         include_wait: bool = True,
         shape: Optional["ProbeShape"] = None,
         show_gpus: bool = False,
-        gpu_filter_patterns: Optional[Sequence[str]] = None,
     ) -> Dict[str, str]:
         # Column order is intentional: identity → probe → "will it fit" →
         # QOS metadata → wide diagnostics → live availability. Python dict
@@ -282,7 +260,7 @@ class AllocationRow:
         data["wall"] = self.qos_info.max_wall
         data["tags"] = ",".join(self.tags)
         if show_gpus:
-            data["gpus"] = self._gpus_cell(shape, gpu_filter_patterns)
+            data["gpus"] = self._gpus_cell(shape)
         data["cpu_vendor"] = self.cpu_vendor
         data["default"] = "yes" if self.is_default else ""
         data["priority"] = self.qos_info.priority
@@ -323,18 +301,19 @@ DESCRIPTION = """\
 chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
 A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
-wait time. With no args, this help is printed. Otherwise the default run
-probes 3 GPU shape tiers (dev / research / premium) at 1-3 walltimes each
-— see --list-tiers for the exact list. A one-line "Probing:" banner on
-stderr always shows the chosen mode + tier set + shapes before probing.
+wait time. With no args, this help is printed. With -t/--tier (or no
+SHAPE_LIST), the run probes the implicit 3 GPU shape tiers (dev / research
+/ premium) at 1–3 walltimes each — see --list-tiers for the exact list.
+With a SHAPE_LIST, the run probes those shapes instead. A one-line
+"Probing:" banner on stderr shows the planned shapes before probing.
 
 Common entry points:
   chpc-allocs                       print this help
-  chpc-allocs --gpu                 default 3-tier GPU probe
-  chpc-allocs --cpu                 default 3-tier CPU probe (CPU mode)
-  chpc-allocs -t dev --gpu          only the dev tier (fast iteration probe)
-  chpc-allocs a100:4                a single a100x4 job (positional shorthand)
-  chpc-allocs cpu:32                a single 32-core CPU job
+  chpc-allocs -t dev                only the dev tier (fast iteration probe)
+  chpc-allocs -t dev -t research    combine tiers
+  chpc-allocs a100:4                a single a100x4 probe
+  chpc-allocs cpu:32                a single 32-core CPU probe
+  chpc-allocs 'a100:4;cpu:32'       compose two shapes (semicolon-separated; quote it)
   chpc-allocs --explain             preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
 """
@@ -343,24 +322,24 @@ EPILOG = """\
 Examples
 ────────
 Quickstart:
-  chpc-allocs a100:4                    # when can my a100x4 job run?
-  chpc-allocs cpu:32                    # ... or a 32-core CPU job
-  chpc-allocs -t dev --gpu              # only the dev tier
-  chpc-allocs -t research -t premium    # combine tiers
-  chpc-allocs --explain                 # preview the default plan, run nothing
-  chpc-allocs --list-tiers              # show the implicit 3-tier shape set
+  chpc-allocs a100:4                          # when can my a100x4 job run?
+  chpc-allocs cpu:32                          # ... or a 32-core CPU job
+  chpc-allocs 'a100:4;cpu:32@12h'             # compose two shapes
+  chpc-allocs 'a100:1;a100:4' --pivot         # compare shapes side-by-side
+  chpc-allocs -t dev                          # only the dev tier
+  chpc-allocs -t research -t premium          # combine tiers
+  chpc-allocs --explain                       # preview the default plan, run nothing
+  chpc-allocs --list-tiers                    # show the implicit 3-tier shape set
 
 Common queries:
-  chpc-allocs --cluster notchpeak --gpu        # GPU rows on notchpeak only
-  chpc-allocs --gpu-type a100                  # a100 + 80gb_pcie + MIG slices
-  chpc-allocs --gpu-type 'h*'                  # any Hopper / H-series
-  chpc-allocs --cpu-type intel                 # Intel CPU partitions only
-  chpc-allocs --shape a100:1 --shape a100:4 --pivot   # compare shapes side-by-side
+  chpc-allocs --cluster notchpeak             # rows on notchpeak only
+  chpc-allocs a100:1                          # narrows to rows that expose a100
+  chpc-allocs h100:1                          # 'h100' resolves to row's actual GRES (e.g. h100nvl)
 
 Scripting / output:
-  chpc-allocs --gpu --format json | jq '.rows[]'      # JSON with _help legend
-  chpc-allocs --sbatch --gpu --format json            # machine-readable triples
-  chpc-allocs --quick --format json                   # fast list, no probes/sinfo
+  chpc-allocs --format json | jq '.rows[]'    # JSON with _help legend
+  chpc-allocs --sbatch --format json          # machine-readable triples
+  chpc-allocs --quick --format json           # fast list, no probes/sinfo
   chpc-allocs --wide --format csv > allocs.csv
 
 Diagnostics:
@@ -376,24 +355,27 @@ def _lower_choice(value: str) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        usage="chpc-allocs [SHAPE] [--shape SHAPE ... | --explain] "
-              "[FILTER ...] [OUTPUT ...]",
+        usage="chpc-allocs [SHAPE_LIST | --explain] [FILTER ...] [OUTPUT ...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Prefix abbreviation off: `--freecycle` no longer silently expands
+        # to `--freecycle-only` (the same goes for `--guest` / `--no-guest`).
+        allow_abbrev=False,
     )
 
-    # Positional shorthand: `chpc-allocs a100:4` / `cpu:32` / `32`. Forwarded
-    # into apply_wait_for_shorthand at the start of main(). Conflicts with
-    # --wait-for and other single-shape flags are caught there.
+    # Positional probe spec. Single shape ('a100:4') or semicolon-separated
+    # list ('a100:4;cpu:32;h100:1@30m'). Quote because ';' is a shell
+    # metacharacter. Parsed in main() via parse_shape_list.
     parser.add_argument(
-        "shape_pos", nargs="?", metavar="SHAPE", default=None,
-        help="Optional single-shape shorthand. Same grammar as --wait-for / "
-        "--shape: 'a100:4' (GPU), 'cpu:32' (CPU + 32 cores), 'gpu:4' (any GPU "
-        "x 4), '32' (= cpu:32). Append '@DUR' to set walltime: 'a100:1@30m', "
-        "'cpu:32@12h'. Comma-separated key=value tokens (mem=, time=, nodes=) "
-        "also accepted. Conflicts with --wait-for, --shape, and "
-        "--cores/--gpus/--mem/--time/--nodes.",
+        "shape_pos", nargs="?", metavar="SHAPE_LIST", default=None,
+        help="Probe shape, or ';'-separated list of shapes. Per-shape "
+        "grammar: 'a100:4' (GPU), 'cpu:32' (32-core CPU), 'gpu:4' (any GPU "
+        "x 4), '32' (= cpu:32). Append '@DUR' for walltime: 'a100:1@30m', "
+        "'cpu:32@12h'. Comma-separated key=value tokens (cores=, mem=, "
+        "time=, gpus=, nodes=) also accepted, e.g. "
+        "'a100:4,mem=32G,time=24h'. Quote multi-shape lists: "
+        "'a100:4;cpu:32;h100:1@30m'. Conflicts with -t/--tier.",
     )
 
     # ----- Filtering -------------------------------------------------------
@@ -402,7 +384,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Narrow the allocations shown. Name filters (--cluster/--account/"
             "--qos) are case-insensitive substrings, repeatable, OR-matched. "
-            "Hardware filters (--gpu-type/--cpu-type) use globs."
+            "Hardware narrowing happens implicitly via the probe shape "
+            "(SHAPE_LIST) — a row whose hardware can't run any probed shape "
+            "is dropped."
         ),
     )
     filt.add_argument(
@@ -421,31 +405,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--default-only", action="store_true",
         help="Only the default QOS for each association.",
     )
-    cpu_gpu = filt.add_mutually_exclusive_group()
-    cpu_gpu.add_argument(
-        "--gpu", action="store_true",
-        help="Only GPU allocations. (Default tier set already targets GPUs.)",
-    )
-    cpu_gpu.add_argument(
-        "--cpu", action="store_true",
-        help="Only CPU allocations; switches the tier set to CPU shapes "
-        "(cpu:16, cpu-intel:32, cpu-amd:32, cpu-amd:64). "
-        "Mode/tier-set switch — for shape size see --cores.",
-    )
-    filt.add_argument(
-        "--gpu-type", action="append", metavar="PATTERN",
-        help="Only partitions exposing this GPU type. Glob ('h*', 'rtx*'); "
-        "bare 'a100' wraps to *a100*. The matched types appear in a 'gpus' "
-        "column so you can see why each row qualified (e.g. 'h100' matches "
-        "rows that expose 'h100nvl'). See --list-gpus. "
-        "Filter — for the probe shape see --gpus.",
-    )
-    filt.add_argument(
-        "--cpu-type", action="append", metavar="PATTERN",
-        help="Only partitions with this CPU feature/microarch. 'intel'/'amd' "
-        "are vendor shorthands; otherwise glob (e.g. emr, gen, zen*). "
-        "See --list-cpus.",
-    )
     fc_group = filt.add_mutually_exclusive_group()
     fc_group.add_argument(
         "--freecycle-only", dest="freecycle_only", action="store_true",
@@ -455,15 +414,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--exclude-freecycle", dest="exclude_freecycle", action="store_true",
         help="Hide freecycle rows.",
     )
-    # Old names kept as hidden aliases — same dests as the new flags above.
-    filt.add_argument(
-        "--freecycle", dest="freecycle_only", action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    filt.add_argument(
-        "--no-freecycle", dest="exclude_freecycle", action="store_true",
-        help=argparse.SUPPRESS,
-    )
     g_group = filt.add_mutually_exclusive_group()
     g_group.add_argument(
         "--guest-only", dest="guest_only", action="store_true",
@@ -472,14 +422,6 @@ def _build_parser() -> argparse.ArgumentParser:
     g_group.add_argument(
         "--exclude-guest", dest="exclude_guest", action="store_true",
         help="Hide guest rows.",
-    )
-    filt.add_argument(
-        "--guest", dest="guest_only", action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    filt.add_argument(
-        "--no-guest", dest="exclude_guest", action="store_true",
-        help=argparse.SUPPRESS,
     )
     filt.add_argument(
         "--reservation", action="store_true",
@@ -507,75 +449,19 @@ def _build_parser() -> argparse.ArgumentParser:
     shp = parser.add_argument_group(
         "Probe shape",
         description=(
-            "Customize the hypothetical job used to predict wait. With no "
-            "shape flags, the implicit 3-tier shape set runs (see "
-            "--list-tiers). Use -t/--tier to restrict to one or more tiers. "
-            "For a single custom shape, pass the positional SHAPE "
-            "('a100:4', 'cpu:32') or any of --cores/--nodes/--gpus/--mem/"
-            "--time. Pass --shape (repeatable) for multi-shape probing. "
-            "--tier is rejected when a single-shape mode is active."
+            "Customize the hypothetical job(s) used to predict wait. Pass "
+            "the positional SHAPE_LIST (one shape, or several joined with "
+            "';') for explicit shapes; otherwise the implicit GPU 3-tier "
+            "set runs (see --list-tiers). -t/--tier restricts the implicit "
+            "set; it is rejected when a SHAPE_LIST is also given."
         ),
     )
     shp.add_argument(
         "-t", "--tier", action="append", choices=TIER_NAMES,
         metavar="{dev,research,premium}",
         help="Restrict the implicit shape set to one or more tiers. "
-        "Repeatable. Default: all three. Conflicts with the positional "
-        "SHAPE, --shape, --wait-for, and --cores/--gpus/--mem/--time/--nodes "
-        "(use one or the other). See --list-tiers.",
-    )
-    shp.add_argument(
-        "--cores", dest="cpus", type=int, metavar="N",
-        default=DEFAULT_PROBE_CPUS,
-        help=f"Cores per task for a SINGLE-shape probe (default: "
-        f"{DEFAULT_PROBE_CPUS}). Setting this switches off the multi-tier "
-        "default. Pair with --cpu to also switch the tier set / mode to CPU.",
-    )
-    # Hidden deprecated alias for --cores. Routes to the same dest; a
-    # one-line stderr deprecation notice fires from _warn_legacy_aliases.
-    shp.add_argument(
-        "--cpus", dest="cpus", type=int, metavar="N",
-        help=argparse.SUPPRESS,
-    )
-    shp.add_argument(
-        "--nodes", type=int, metavar="N", default=DEFAULT_PROBE_NODES,
-        help=f"Node count for the single-shape probe (default: "
-        f"{DEFAULT_PROBE_NODES}).",
-    )
-    shp.add_argument(
-        "--gpus", metavar="SPEC",
-        help="GPU(s) for a SINGLE-shape probe — 'a100:4', '4' (any type), "
-        "'a100' (one). Partial type names like 'h100' resolve per row to the "
-        "actual GRES name (e.g. 'h100nvl') so the probe succeeds; the "
-        "resolution appears in the 'gpus' column. "
-        "Probe shape — for filtering see --gpu-type.",
-    )
-    shp.add_argument(
-        "--mem", metavar="SIZE",
-        help="Memory for the single-shape probe (e.g. 16G, 128G).",
-    )
-    shp.add_argument(
-        "--time", metavar="DURATION", default=DEFAULT_PROBE_TIME,
-        help=f"Wall time for the single-shape probe. e.g. 24h, 3d, 4:00:00, "
-        f"3-00:00:00. Default: {DEFAULT_PROBE_TIME}.",
-    )
-    shp.add_argument(
-        "--shape", action="append", metavar="SPEC",
-        help="Probe an additional job shape. Repeatable. Comma-separated "
-        "positional shorthands ('a100:4', 'cpu:32', '32') or key=value tokens "
-        "(cores=, mem=, time=, gpus=, nodes=). e.g. 'a100:4,mem=32G,time=24h'. "
-        "Multi-shape output expands to one row per (allocation, shape) — see "
-        "--pivot.",
-    )
-    shp.add_argument(
-        "--wait-for", metavar="SPEC",
-        help="Shorthand for a single-job query (same as the positional "
-        "SHAPE; full grammar shared with --shape). 'a100:4' = --gpus a100:4 "
-        "+ --gpu-type a100; 'gpu:4' = --gpus 4 + --gpu; 'cpu:32' = --cores "
-        "32 + --cpu; '32' = same as cpu:32. Append '@DUR' for walltime: "
-        "'a100:1@30m', 'cpu:32@12h', '32@1h'. Comma-separated key=value "
-        "tokens (mem=, time=, nodes=) also accepted, e.g. "
-        "'cpu:32,mem=128G,time=12h'.",
+        "Repeatable. Default: all three. Conflicts with SHAPE_LIST. "
+        "See --list-tiers.",
     )
 
     # ----- Output ----------------------------------------------------------
@@ -600,8 +486,8 @@ def _build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--pivot", action="store_true",
         help="Pivot layout: rows = (cluster, account, qos), columns = shape "
-        "labels, cells = wait times. Table format only; useful with multiple "
-        "--shape flags.",
+        "labels, cells = wait times. Table format only; useful with a "
+        "multi-shape SHAPE_LIST.",
     )
     out.add_argument(
         "--sort", default=None, metavar="KEYS",
@@ -646,11 +532,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Don't hide marginal rows: '?' waits, no-MaxWall QOS, "
         "over-MaxWall shapes, zero-free.",
     )
-    # Old name kept as a hidden alias.
-    out.add_argument(
-        "--show-unknown", dest="show_all", action="store_true",
-        help=argparse.SUPPRESS,
-    )
 
     # ----- Diagnostics & speed --------------------------------------------
     diag = parser.add_argument_group(
@@ -670,11 +551,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the live sinfo capacity query (no free_* columns). Faster. "
         "In table mode the free_* columns replace priority/fairshare/usage/"
         "default/tags by default; --wide brings them back.",
-    )
-    # Old name kept as a hidden alias.
-    diag.add_argument(
-        "--no-avail", dest="no_availability", action="store_true",
-        help=argparse.SUPPRESS,
     )
     diag.add_argument(
         "--no-usage", action="store_true",
@@ -717,8 +593,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inv.add_argument(
         "--list-tiers", action="store_true",
-        help="Print the implicit shape set and exit. Honors --cpu (CPU tiers) "
-        "and --full (all walltimes per tier).",
+        help="Print the implicit GPU shape set and exit. Honors --full "
+        "(all walltimes per tier).",
     )
 
     return parser
@@ -1104,10 +980,10 @@ def _format_wall_short(value: str) -> str:
 class ProbeShape:
     """Shape of the hypothetical job used for `sbatch --test-only` wait probing.
 
-    Defaults reproduce the historical behavior: 1 node, 1 CPU, 1-minute wall,
-    `--gres=gpu:1` on GPU rows, no GRES on CPU rows. When the user supplies
-    flags (--cpus/--mem/--nodes/--gpus/--time), this carries them into the
-    probe so the predicted wait reflects the actual job they intend to run.
+    Defaults: 1 node, 1 CPU, 1-hour wall, `--gres=gpu:1` on GPU rows, no
+    GRES on CPU rows. parse_shape_spec() builds these from a user-supplied
+    SHAPE_LIST so the predicted wait reflects the actual job they intend
+    to run.
     """
 
     def __init__(
@@ -1118,7 +994,6 @@ class ProbeShape:
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
         time: str = DEFAULT_PROBE_TIME,
-        cpu_vendor: Optional[str] = None,
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
@@ -1126,7 +1001,6 @@ class ProbeShape:
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
         self.time = time
-        self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
         self.label = self._compute_label()
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
@@ -1135,8 +1009,6 @@ class ProbeShape:
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
             core = f"{gtype}:{count}@{wall}"
-        elif self.cpu_vendor:
-            core = f"cpu-{self.cpu_vendor}:{self.cpus}@{wall}"
         else:
             core = f"cpu:{self.cpus}@{wall}"
         parts = [core]
@@ -1181,27 +1053,10 @@ class ProbeShape:
         gres = self.gres_for(row)
         if gres:
             args.append(f"--gres={gres}")
-        constraint = self._constraint_expr()
-        if constraint:
-            args.append(f"--constraint={constraint}")
         return args
-
-    def _constraint_expr(self) -> Optional[str]:
-        """Return a `--constraint=` value pinning the probe to a CPU vendor."""
-        if self.cpu_vendor == "intel":
-            return _INTEL_CONSTRAINT_EXPR
-        if self.cpu_vendor == "amd":
-            return _AMD_CONSTRAINT_EXPR
-        return None
 
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
-        if self.cpu_vendor:
-            # Allow unknown ('') or mixed rows so we don't drop probes when
-            # feature metadata is incomplete; skip only on clear mismatch.
-            row_vendor = row.cpu_vendor
-            if row_vendor and row_vendor != "mixed" and row_vendor != self.cpu_vendor:
-                return True
         gpu_requested = self.gpu_type is not None or self.gpu_count is not None
         if not gpu_requested:
             return False
@@ -1240,7 +1095,7 @@ def _spec_error(
 
 
 def _shape_error(spec: str, problem: str, expected: str) -> CommandError:
-    return _spec_error("--shape spec", spec, problem, expected, _SHAPE_HINT)
+    return _spec_error("shape spec", spec, problem, expected, _SHAPE_HINT)
 
 
 def _gpus_error(spec: str, problem: str) -> CommandError:
@@ -1294,11 +1149,10 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
 
 
 def parse_shape_spec(spec: str) -> ProbeShape:
-    """Parse a --shape SPEC into a ProbeShape.
+    """Parse a single shape SPEC into a ProbeShape.
 
     Tokens (comma-separated, any order):
       cores=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
-      (cpus=N is a deprecated alias for cores=N)
     Positional shorthands (first one wins for that slot):
       cpu:N        -> cores=N (CPU shape, no GPU)
       gpu:N        -> any GPU type, count N
@@ -1343,12 +1197,12 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     f"empty value for {key!r}",
                     f"{key}=VALUE (e.g. {key}=8 for an integer, {key}=24h for a duration)",
                 )
-            if key in ("cores", "cpus"):
+            if key == "cores":
                 if not val.isdigit() or int(val) <= 0:
                     raise _shape_error(
                         spec,
-                        f"{key} value {val!r} is not a positive integer",
-                        f"{key}=N where N > 0 (e.g. {key}=8, {key}=32)",
+                        f"cores value {val!r} is not a positive integer",
+                        "cores=N where N > 0 (e.g. cores=8, cores=32)",
                     )
                 cpus = int(val)
             elif key == "mem":
@@ -1431,9 +1285,23 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     )
 
 
-def _has_vendor(vendors: Set[str], vendor: str) -> bool:
-    """True if `vendor` or 'mixed' is in the precomputed vendor set."""
-    return vendor in vendors or "mixed" in vendors
+def parse_shape_list(spec: str) -> List[ProbeShape]:
+    """Split a ';'-separated SHAPE_LIST and parse each piece via parse_shape_spec."""
+    s = (spec or "").strip()
+    _LIST_HINT = "a shape, or ';'-separated shapes (e.g. 'a100:4', 'a100:4;cpu:32@12h')"
+    if not s:
+        raise _shape_error(spec, "empty SHAPE_LIST", _LIST_HINT)
+    shapes: List[ProbeShape] = []
+    for raw in s.split(";"):
+        piece = raw.strip()
+        if not piece:
+            raise _shape_error(
+                spec,
+                "empty piece between ';' separators",
+                _LIST_HINT,
+            )
+        shapes.append(parse_shape_spec(piece))
+    return shapes
 
 
 def _shortest_matching_gpu(
@@ -1456,15 +1324,13 @@ TIER_NAMES = ("dev", "research", "premium")
 
 def default_shape_set(
     rows: List["AllocationRow"],
-    kind: str = "gpu",
     full: bool = False,
     tiers: Optional[Sequence[str]] = None,
 ) -> List[ProbeShape]:
-    """Build the implicit shape set used when no shape flags are given.
+    """Build the implicit GPU shape set used when no SHAPE_LIST is given.
 
-    `kind="gpu"` (default) emits only the GPU half of each tier; `kind="cpu"`
-    emits only the CPU half. Walltime spreads scale with tier so the user
-    sees queue-pressure scaling with wallclock length.
+    Walltime spreads scale with tier so the user sees queue-pressure
+    scaling with wallclock length.
 
     `full=False` (default) uses a trimmed walltime set per tier; `full=True`
     restores the wider sweep listed in parentheses below.
@@ -1473,25 +1339,18 @@ def default_shape_set(
     "premium"} to filter (matches the `--tier` CLI flag).
 
     Tier 1 — dev (walltime: 4h; full: + 24h):
-      * gpu: `2080ti:1`, `v100:1`, `3090:1` — small-GPU iteration / scaling
-        sanity (each emits only if accessible)
-      * cpu: `cpu:16` — generic build/test or small parallel run
+      * `2080ti:1`, `v100:1`, `3090:1` — small-GPU iteration / scaling sanity
+        (each emits only if the user has a row exposing that GPU)
 
     Tier 2 — research (walltimes: 1h, 24h, 72h; full: + 2h, 4h, 12h):
-      * gpu: `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
-      * cpu: `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
-        (one per detected vendor; each carries an sbatch `--constraint=`
-        listing that vendor's microarch tokens)
+      * `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
 
     Tier 3 — premium (walltimes: 24h, 7d; full: + 8h, 72h):
-      * gpu: `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
-      * cpu: `cpu-amd:64` — full Granite Genoa node
+      * `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
 
     For each GPU pattern, the shortest matching concrete type from sinfo
     is picked so `--gres=gpu:<type>:N` resolves cleanly.
     """
-    if kind not in ("gpu", "cpu"):
-        raise ValueError(f"default_shape_set: unknown kind {kind!r}")
     unknown = [t for t in (tiers or ()) if t not in TIER_NAMES]
     if unknown:
         raise CommandError(
@@ -1503,73 +1362,41 @@ def default_shape_set(
     research_walls = RESEARCH_WALLTIMES_FULL if full else RESEARCH_WALLTIMES
     premium_walls = PREMIUM_WALLTIMES_FULL if full else PREMIUM_WALLTIMES
     shapes: List[ProbeShape] = []
-    vendors = {row.cpu_vendor for row in rows}
     gpu_types = {gt.lower() for row in rows for gt in row.gpu_types}
 
-    # Tier 1 — dev
     if "dev" in active:
-        if kind == "cpu":
-            for wall in dev_walls:
-                shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
-        else:
-            for pattern in DEV_GPU_PATTERNS:
-                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-                if gpu_type:
-                    for wall in dev_walls:
-                        shapes.append(ProbeShape(
-                            gpu_type=gpu_type, gpu_count=1, time=wall
-                        ))
+        for pattern in DEV_GPU_PATTERNS:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
+                for wall in dev_walls:
+                    shapes.append(ProbeShape(
+                        gpu_type=gpu_type, gpu_count=1, time=wall
+                    ))
 
-    # Tier 2 — research
     if "research" in active:
-        if kind == "cpu":
-            if _has_vendor(vendors, "intel"):
+        for pattern in RESEARCH_GPU_PATTERNS:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
                 for wall in research_walls:
                     shapes.append(ProbeShape(
-                        cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
+                        gpu_type=gpu_type, gpu_count=1, time=wall
                     ))
-            if _has_vendor(vendors, "amd"):
-                for wall in research_walls:
-                    shapes.append(ProbeShape(
-                        cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
-                    ))
-        else:
-            for pattern in RESEARCH_GPU_PATTERNS:
-                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-                if gpu_type:
-                    for wall in research_walls:
-                        shapes.append(ProbeShape(
-                            gpu_type=gpu_type, gpu_count=1, time=wall
-                        ))
 
-    # Tier 3 — premium
     if "premium" in active:
-        if kind == "cpu":
-            if _has_vendor(vendors, "amd"):
+        for pattern, count in PREMIUM_GPU_SHAPES:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
                 for wall in premium_walls:
                     shapes.append(ProbeShape(
-                        cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
+                        gpu_type=gpu_type, gpu_count=count, time=wall
                     ))
-        else:
-            for pattern, count in PREMIUM_GPU_SHAPES:
-                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-                if gpu_type:
-                    for wall in premium_walls:
-                        shapes.append(ProbeShape(
-                            gpu_type=gpu_type, gpu_count=count, time=wall
-                        ))
 
     return shapes
 
 
 def _shape_tier(shape: ProbeShape) -> str:
     """Map a shape from `default_shape_set` back to its tier name (dev /
-    research / premium).
-
-    Used by `format_tier_listing` so users can see which tier each shape lives
-    in. Keys off `(cpus, cpu_vendor, gpu_type, gpu_count)` against the
-    constants that `default_shape_set` itself uses, so the labels stay in sync
-    automatically when those constants change.
+    research / premium), or '?' for user-supplied shapes.
     """
     if shape.gpu_type:
         if shape.gpu_count is not None and shape.gpu_count >= 2:
@@ -1578,36 +1405,23 @@ def _shape_tier(shape: ProbeShape) -> str:
             return "research"
         if any(p in shape.gpu_type for p in DEV_GPU_PATTERNS):
             return "dev"
-        return "?"
-    # CPU-side shapes.
-    if shape.cpus == DEV_CPU_CORES:
-        return "dev"
-    if shape.cpus == RESEARCH_CPU_CORES:
-        return "research"
-    if shape.cpus >= PREMIUM_CPU_AMD_CORES:
-        return "premium"
     return "?"
 
 
-def format_tier_listing(
-    full: bool = False,
-    show_gpu: bool = True,
-    show_cpu: bool = True,
-) -> str:
-    """Render the implicit shape set as a section-grouped, per-tier listing.
+def format_tier_listing(full: bool = False) -> str:
+    """Render the implicit GPU shape set as a section-grouped, per-tier listing.
 
     Builds the shape set against a synthetic AllocationRow exposing every GPU
-    type and both CPU vendors, so all three tiers emit. Uses
-    `default_shape_set` directly — never duplicates tier definitions.
+    type, so all three tiers emit. Uses `default_shape_set` directly — never
+    duplicates tier definitions.
     """
     blurb = {
         "dev": "small-GPU iteration, build/test",
-        "research": "single-GPU fine-tuning, single-node CPU",
-        "premium": "multi-GPU DDP, full-node CPU",
+        "research": "single-GPU fine-tuning",
+        "premium": "multi-GPU DDP",
     }
     synthetic = AllocationRow(
         cluster="*", account="*", user="*", partition="*", qos="*", default_qos="",
-        cpu_features=("skl", "zen4"),
     )
     # Cover every GPU pattern referenced by the tier set. Concrete names are
     # MIG-free so the shortest-match tiebreaker resolves cleanly.
@@ -1616,106 +1430,32 @@ def format_tier_listing(
         *RESEARCH_GPU_PATTERNS,
         *(name for name, _ in PREMIUM_GPU_SHAPES),
     )
-    synthetic.cpu_vendor = classify_cpu_vendor(synthetic.cpu_features)
 
-    by_tier: Dict[str, Dict[str, List[ProbeShape]]] = {
-        t: {"gpu": [], "cpu": []} for t in TIER_NAMES
-    }
-    if show_gpu:
-        for s in default_shape_set([synthetic], kind="gpu", full=full):
-            tier = _shape_tier(s)
-            if tier in by_tier:
-                by_tier[tier]["gpu"].append(s)
-    if show_cpu:
-        for s in default_shape_set([synthetic], kind="cpu", full=full):
-            tier = _shape_tier(s)
-            if tier in by_tier:
-                by_tier[tier]["cpu"].append(s)
+    by_tier: Dict[str, List[ProbeShape]] = {t: [] for t in TIER_NAMES}
+    for s in default_shape_set([synthetic], full=full):
+        tier = _shape_tier(s)
+        if tier in by_tier:
+            by_tier[tier].append(s)
 
     sweep_label = "full sweep" if full else "trimmed default"
     lines = [f"Default tier set ({sweep_label}).", ""]
     for tier in TIER_NAMES:
-        gpu_shapes = by_tier[tier]["gpu"]
-        cpu_shapes = by_tier[tier]["cpu"]
-        if not gpu_shapes and not cpu_shapes:
+        shapes = by_tier[tier]
+        if not shapes:
             continue
         lines.append(f"{tier.upper():<8}  — {blurb[tier]}")
-        for s in gpu_shapes:
-            lines.append(f"  gpu     {s.label}")
-        for s in cpu_shapes:
-            lines.append(f"  cpu     {s.label}")
+        for s in shapes:
+            lines.append(f"  {s.label}")
         lines.append("")
 
     lines.append(
-        "Tip: each tier emits only when your allocations expose the matching "
-        "hardware."
+        "Tip: each tier emits only when your allocations expose the matching GPU."
     )
     lines.append("Filter to one tier:  chpc-allocs -t dev")
+    lines.append("Custom shapes:       chpc-allocs 'a100:4;cpu:32@12h'")
     if not full:
         lines.append("Add --full to see every walltime per tier.")
     return "\n".join(lines)
-
-
-def _user_supplied_shape_flags(args: argparse.Namespace) -> bool:
-    """True if the user passed any flag that customizes the wait probe shape.
-
-    `apply_wait_for_shorthand` runs first, so `--wait-for` shows up here as
-    mutated cpus/gpus/etc.
-    """
-    return (
-        bool(args.shape)
-        or args.gpus is not None
-        or args.mem is not None
-        or args.cpus != DEFAULT_PROBE_CPUS
-        or args.nodes != DEFAULT_PROBE_NODES
-        or args.time != DEFAULT_PROBE_TIME
-    )
-
-
-def apply_wait_for_shorthand(args: argparse.Namespace) -> None:
-    """Translate `--wait-for SPEC` into the matching probe-shape + filter flags.
-
-    Delegates parsing to `parse_shape_spec` so `--wait-for` accepts the same
-    grammar as `--shape` (including the `@DUR` walltime suffix), then maps the
-    resulting ProbeShape back onto the single-shape argparse slots:
-
-      cpu:N or bare N        -> --cores N + --cpu
-      gpu:N                  -> --gpus N + --gpu (any GPU type)
-      TYPE[:N]               -> --gpus TYPE[:N] + adds TYPE to --gpu-type
-      <shape>@<DUR>          -> sets --time DUR
-      `key=value` tokens     -> set the matching slot (mem=, time=, nodes=, ...)
-    """
-    spec = getattr(args, "wait_for", None)
-    if not spec:
-        return
-    err_prefix = f"invalid --wait-for spec: {spec!r}"
-    try:
-        shape = parse_shape_spec(spec)
-    except CommandError as e:
-        # parse_shape_spec already emits a multi-line message; preserve it as
-        # the inner detail under our --wait-for-specific prefix.
-        raise CommandError(f"{err_prefix}\n  {e}") from None
-
-    args.cpus = shape.cpus
-    args.nodes = shape.nodes
-    if shape.mem is not None:
-        args.mem = shape.mem
-    args.time = shape.time
-
-    if shape.gpu_type is not None:
-        if shape.gpu_count is not None:
-            args.gpus = f"{shape.gpu_type}:{shape.gpu_count}"
-        else:
-            args.gpus = shape.gpu_type
-        existing = list(args.gpu_type or [])
-        if shape.gpu_type not in existing:
-            existing.append(shape.gpu_type)
-        args.gpu_type = existing
-    elif shape.gpu_count is not None:
-        args.gpus = str(shape.gpu_count)
-        args.gpu = True
-    else:
-        args.cpu = True
 
 
 # Matches the relevant part of `sbatch --test-only`'s stderr line:
@@ -2142,39 +1882,6 @@ def any_glob_match(values: Iterable[str], patterns: Iterable[str]) -> bool:
     return next(_iter_glob_matches(values, patterns), None) is not None
 
 
-def gpu_types_matching(
-    values: Iterable[str], patterns: Iterable[str]
-) -> List[str]:
-    """Return the subset of `values` matching any pattern, preserving input order.
-
-    Same wildcard semantics as `any_glob_match`. Used to highlight which GPU
-    types in a row's `gpu_types` actually triggered a `--gpu-type` filter.
-    """
-    return list(_iter_glob_matches(values, patterns))
-
-
-def _matches_cpu_type_filter(row: "AllocationRow", patterns: Iterable[str]) -> bool:
-    """--cpu-type matcher with `intel`/`amd` shorthand for vendor groups.
-
-    Bare `intel` or `amd` matches when classify_cpu_vendor() returns that
-    vendor (or 'mixed'). Other patterns fall through to the existing
-    fnmatch-based feature-token matcher.
-    """
-    vendor = row.cpu_vendor
-    other: List[str] = []
-    for pat in patterns:
-        p = (pat or "").lower()
-        if p == "intel":
-            if vendor in ("intel", "mixed"):
-                return True
-        elif p == "amd":
-            if vendor in ("amd", "mixed"):
-                return True
-        else:
-            other.append(pat)
-    return any_glob_match(row.cpu_features, other)
-
-
 def parse_wall_seconds(value: str) -> Optional[int]:
     value = (value or "").strip().lower()
     if not value:
@@ -2267,18 +1974,6 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
         if args.default_only and not row.is_default:
             _drop(row, "--default-only (not the default QOS)")
             continue
-        if args.gpu and "gpu" not in tags:
-            _drop(row, "--gpu (cpu row)")
-            continue
-        if args.cpu and "gpu" in tags:
-            _drop(row, "--cpu (gpu row)")
-            continue
-        if args.gpu_type and not any_glob_match(row.gpu_types, args.gpu_type):
-            _drop(row, f"--gpu-type {args.gpu_type} (gpu_types={list(row.gpu_types)})")
-            continue
-        if args.cpu_type and not _matches_cpu_type_filter(row, args.cpu_type):
-            _drop(row, f"--cpu-type {args.cpu_type} (vendor={row.cpu_vendor or '?'})")
-            continue
         if freecycle_only and "freecycle" not in tags:
             _drop(row, "--freecycle-only")
             continue
@@ -2328,14 +2023,6 @@ def _format_applied_filters(args: argparse.Namespace) -> List[str]:
         bits.append(f"qos={','.join(args.qos)}")
     if args.default_only:
         bits.append("--default-only")
-    if args.gpu:
-        bits.append("--gpu")
-    if args.cpu:
-        bits.append("--cpu")
-    if args.gpu_type:
-        bits.append(f"gpu-type={','.join(args.gpu_type)}")
-    if args.cpu_type:
-        bits.append(f"cpu-type={','.join(args.cpu_type)}")
     if args.freecycle_only:
         bits.append("--freecycle-only")
     if args.exclude_freecycle:
@@ -2455,7 +2142,6 @@ def _shape_signature(shape: ProbeShape) -> Tuple[object, ...]:
         shape.mem,
         shape.gpu_type,
         shape.gpu_count,
-        shape.cpu_vendor,
     )
 
 
@@ -2508,7 +2194,6 @@ def collapse_uniform_walltimes(
             gpu_type=first_shape.gpu_type,
             gpu_count=first_shape.gpu_count,
             time=first_shape.time,
-            cpu_vendor=first_shape.cpu_vendor,
         )
         collapsed.label = collapsed._compute_label(time_label=time_label)
         first_row.wait_by_shape[collapsed.label] = waits[0]
@@ -2734,7 +2419,6 @@ def table_output(
     tty: Optional[bool] = None,
     term_width: Optional[int] = None,
     show_gpus: bool = False,
-    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2743,7 +2427,6 @@ def table_output(
             include_wait=include_wait,
             shape=shape,
             show_gpus=show_gpus,
-            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2845,7 +2528,6 @@ def csv_output(
     include_wait: bool = True,
     *,
     show_gpus: bool = False,
-    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2854,7 +2536,6 @@ def csv_output(
             include_wait=include_wait,
             shape=shape,
             show_gpus=show_gpus,
-            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2878,7 +2559,6 @@ def json_output(
     include_help: bool = False,
     *,
     show_gpus: bool = False,
-    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2887,7 +2567,6 @@ def json_output(
             include_wait=include_wait,
             shape=shape,
             show_gpus=show_gpus,
-            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2911,8 +2590,8 @@ def json_output(
                         "known tier. See --list-tiers / --tier.",
                 "shape": "probed job shape: '<gpu>:<count>@<wall>[,<mem>]' or "
                         "'cpu:<cpus>@<wall>[,<mem>]'. The 'wait' value on this row "
-                        "is for THIS shape on THIS allocation. With multiple --shape "
-                        "flags, each (allocation, shape) pair gets its own row.",
+                        "is for THIS shape on THIS allocation. With a multi-shape "
+                        "SHAPE_LIST, each (allocation, shape) pair gets its own row.",
                 "wait": "predicted seconds until job start from `sbatch --test-only` "
                         "for the shape on this row; 'now' means startable immediately, "
                         "'?' / null means probe skipped or unknown",
@@ -2920,16 +2599,13 @@ def json_output(
                 "free_cpus": "live free/total CPU count from sinfo",
                 "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
-                "gpus": "matched GPU types from this row that explain why it "
-                        "appears: --gpu-type filter hits plus the per-row "
-                        "GRES name resolved from a probe shape's gpu_type "
-                        "(e.g. user passed 'h100', row exposes 'h100nvl'). "
-                        "Shown when --gpu-type is set or an active probe "
-                        "shape carries a gpu_type.",
+                "gpus": "the row's GPU type resolved from the probe shape's "
+                        "gpu_type (e.g. shape 'h100' resolves to row 'h100nvl'). "
+                        "Shown when an active probe shape carries a gpu_type.",
                 "cpu_features": "node feature tags for the partition (with --wide)",
                 "cpu_vendor": "derived from cpu_features: 'intel', 'amd', "
-                        "'mixed', or '' when unknown. Filter via --cpu-type "
-                        "intel|amd; sort tier 'vendor' ranks intel<amd<mixed<unknown.",
+                        "'mixed', or '' when unknown. Sort tier 'vendor' ranks "
+                        "intel<amd<mixed<unknown.",
                 "tags": "quality flags: gpu, cpu, freecycle (preemptable), "
                         "guest (preemptable on idle owner nodes), reservation, default",
                 "default": "'yes' if this QOS is the default for the assoc",
@@ -2946,26 +2622,19 @@ def json_output(
                 "against `gpu_types` (case-insensitive).",
                 "freecycle/guest QOS rows are preemptable; jobs there should "
                 "use --requeue and checkpoint.",
-                "With multiple --shape flags the output is in long format: one "
-                "row per (allocation, shape) pair. The `shape` column tells "
-                "you which shape was probed for that wait.",
-                "Without any shape flags, the implicit default probes a "
-                "three-tier set covering the typical HPC research lifecycle: "
-                "dev (cpu:16, 2080ti:1, v100:1, 3090:1 @4h,24h), research "
-                "(cpu-intel:32, cpu-amd:32, a100:1, h100:1, h200:1 "
-                "@1h,2h,4h,12h,24h,72h), premium (cpu-amd:64, a100:4, h100:4, "
-                "a6000:4 @8h,24h,72h,7d). Pass --tier dev|research|premium "
-                "(repeatable) to restrict to one or more tiers. Each shape "
-                "is gated on accessibility — vendor CPU shapes only emit if "
-                "that vendor is detected on the user's rows; GPU shapes only "
-                "emit if the user has a row exposing that GPU type. "
-                "Vendor-tagged CPU shapes pass `--constraint=` to sbatch so "
-                "the probe lands on matching hardware. Pairs where the "
-                "shape can't run on the row are dropped from output.",
+                "Multi-shape output is long format: one row per (allocation, shape) "
+                "pair. The `shape` column tells you which shape was probed for that wait.",
+                "Without a SHAPE_LIST, the implicit default probes a three-tier "
+                "GPU set: dev (2080ti:1, v100:1, 3090:1 @4h), research (a100:1, "
+                "h100:1, h200:1 @1h,24h,72h), premium (a100:4, h100:4, a6000:4 "
+                "@24h,7d). Pass -t/--tier dev|research|premium (repeatable) to "
+                "restrict. Each shape is gated on accessibility — only emits if "
+                "the user has a row exposing that GPU type. Pairs where the shape "
+                "can't run on the row are dropped from output.",
                 "By default, rows are hidden when the probe returned `?`, "
                 "the QOS has no MaxWall, the shape's walltime exceeds the "
                 "QOS MaxWall, or the allocation has zero free capacity. "
-                "Pass --show-unknown to include them.",
+                "Pass --show-all to include them.",
             ],
         },
         "rows": records,
@@ -3521,74 +3190,42 @@ def run_self_test() -> int:
     assert ProbeShape(gpu_type="h100").resolved_gpu_type(gpu_row) == "h100"
     assert ProbeShape().resolved_gpu_type(gpu_row) is None
 
-    # gpu_types_matching: returns the matching subset, preserves order, supports globs.
-    assert gpu_types_matching(("h100nvl", "l40s"), ["h100"]) == ["h100nvl"]
-    assert gpu_types_matching(("a100", "a100_80gb_pcie", "v100"), ["a100"]) == ["a100", "a100_80gb_pcie"]
-    assert gpu_types_matching(("h100nvl", "h200", "l40s"), ["h*"]) == ["h100nvl", "h200"]
-    assert gpu_types_matching(("v100",), ["a100"]) == []
-    assert gpu_types_matching((), ["h100"]) == []
-    assert gpu_types_matching(("h100nvl",), []) == []
-
-    # _gpus_cell: dedupes filter hits + per-row resolution; empty for CPU rows.
-    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100", gpu_count=1), ["h100"]) == "h100nvl"
-    assert h100_row._gpus_cell(None, ["h*"]) == "h100nvl"
-    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100"), None) == "h100nvl"
-    assert cpu_row._gpus_cell(ProbeShape(gpu_type="h100"), ["h100"]) == ""
+    # _gpus_cell: shows the per-row resolution of the shape's gpu_type;
+    # empty for CPU rows, missing shapes, or shapes without a gpu_type.
+    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100", gpu_count=1)) == "h100nvl"
+    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100")) == "h100nvl"
+    assert h100_row._gpus_cell(None) == ""
+    assert h100_row._gpus_cell(ProbeShape(cpus=32)) == ""
+    assert cpu_row._gpus_cell(ProbeShape(gpu_type="h100")) == ""
     # Default probe never skips.
     assert ProbeShape().should_skip(gpu_row) is False
     assert ProbeShape().should_skip(cpu_row) is False
     # predict_wait honors should_skip even with sbatch on PATH.
     assert predict_wait(gpu_row, shape=ProbeShape(gpu_type="a100", gpu_count=4)) is None
 
-    # apply_wait_for_shorthand: each form maps to the right flag combo.
+    # parse_shape_list: split on ';', each piece goes through parse_shape_spec.
     parser = _build_parser()
-    a = parser.parse_args(["--wait-for", "a100:4"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "a100:4" and "a100" in (a.gpu_type or [])
-    a = parser.parse_args(["--wait-for", "gpu:4"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "4" and a.gpu is True
-    a = parser.parse_args(["--wait-for", "cpu:32"])
-    apply_wait_for_shorthand(a)
-    assert a.cpus == 32 and a.cpu is True
-    a = parser.parse_args(["--wait-for", "32"])
-    apply_wait_for_shorthand(a)
-    assert a.cpus == 32 and a.cpu is True
-    a = parser.parse_args(["--wait-for", "a100"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "a100:1" and "a100" in (a.gpu_type or [])
-    a = parser.parse_args(["--wait-for", "a100:1@30m"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "a100:1" and a.time == "30m" and "a100" in (a.gpu_type or [])
-    a = parser.parse_args(["--wait-for", "a100@30m"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "a100:1" and a.time == "30m" and "a100" in (a.gpu_type or [])
-    a = parser.parse_args(["--wait-for", "cpu:32@12h"])
-    apply_wait_for_shorthand(a)
-    assert a.cpus == 32 and a.time == "12h" and a.cpu is True
-    a = parser.parse_args(["--wait-for", "32@1h"])
-    apply_wait_for_shorthand(a)
-    assert a.cpus == 32 and a.time == "1h" and a.cpu is True
-    a = parser.parse_args(["--wait-for", "gpu:4@2h"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "4" and a.time == "2h" and a.gpu is True
-    a = parser.parse_args(["--wait-for", "cpu:32,mem=128G,time=12h"])
-    apply_wait_for_shorthand(a)
-    assert a.cpus == 32 and a.mem == "128G" and a.time == "12h" and a.cpu is True
-    a = parser.parse_args(["--wait-for", "a100:4,time=24h"])
-    apply_wait_for_shorthand(a)
-    assert a.gpus == "a100:4" and a.time == "24h" and "a100" in (a.gpu_type or [])
-    for bad in (
-        "cpu:0", "gpu:abc", "cpu:", "gpu:0", "a100:0",
-        "a100:1@", "@30m", "a100:1@notatime", "cpu:0@30m",
-    ):
-        a = parser.parse_args(["--wait-for", bad])
+    shapes_one = parse_shape_list("a100:4")
+    assert len(shapes_one) == 1 and shapes_one[0].gpu_type == "a100" and shapes_one[0].gpu_count == 4
+    shapes_many = parse_shape_list("a100:4;cpu:32@12h;h100:1@30m")
+    assert [s.label for s in shapes_many] == ["a100:4@1h", "cpu:32@12h", "h100:1@30m"]
+    # Whitespace around ';' tolerated.
+    shapes_ws = parse_shape_list(" a100:4 ; cpu:32 ")
+    assert [s.label for s in shapes_ws] == ["a100:4@1h", "cpu:32@1h"]
+    # Empty/blank input and empty pieces raise.
+    for bad in ("", " ", ";", "a100:4;", ";a100:4", "a100:4;;cpu:32"):
         try:
-            apply_wait_for_shorthand(a)
+            parse_shape_list(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"apply_wait_for_shorthand({bad!r}) should have raised")
+            raise AssertionError(f"parse_shape_list({bad!r}) should have raised")
+
+    # Positional SHAPE_LIST flows into args.shape_pos and is parsed in main().
+    a = parser.parse_args(["a100:4"])
+    assert a.shape_pos == "a100:4"
+    a = parser.parse_args(["a100:4;cpu:32"])
+    assert a.shape_pos == "a100:4;cpu:32"
 
     sh = parse_shape_spec("a100:1@30m")
     assert sh.gpu_type == "a100" and sh.gpu_count == 1 and sh.time == "30m"
@@ -3646,9 +3283,6 @@ def run_self_test() -> int:
     sh = parse_shape_spec("cores=8,mem=16G,gpus=h100nvl:1,time=4h")
     assert sh.cpus == 8 and sh.gpu_type == "h100nvl" and sh.gpu_count == 1
     assert sh.label == "h100nvl:1@4h,16G", sh.label
-    # Deprecated cpus= key still parses (backwards compat).
-    sh = parse_shape_spec("cpus=8,time=4h")
-    assert sh.cpus == 8 and sh.label == "cpu:8@4h", sh.label
     # Multi-node prefix.
     sh = parse_shape_spec("nodes=2,cores=4,time=1h")
     assert sh.nodes == 2 and sh.label == "2n*cpu:4@1h", sh.label
@@ -3656,8 +3290,8 @@ def run_self_test() -> int:
     assert _format_wall_short("00:01:00") == "1m"
     assert _format_wall_short("3-00:00:00") == "3d"
     assert _format_wall_short("01:30:00") == "1h30m"
-    # Bad shape specs raise.
-    for bad in ("", "cores=", "cpus=", "time=banana", "weird=1", "cores=0"):
+    # Bad shape specs raise. cpus= is no longer accepted.
+    for bad in ("", "cores=", "cpus=8", "time=banana", "weird=1", "cores=0"):
         try:
             parse_shape_spec(bad)
         except CommandError:
@@ -3672,10 +3306,9 @@ def run_self_test() -> int:
     assert _to_sbatch_wall("01:30:00") == "01:30:00"
     assert _to_sbatch_wall("garbage") == "garbage"
 
-    # default_shape_set: three-tier probe set; each shape probed at one or
-    # more walltimes; each emission gated on accessibility.
-    # Case A — full accessibility: Intel + AMD CPUs and 2080ti, v100, 3090,
-    # a100, h100, h200, a6000 GPUs.
+    # default_shape_set: three-tier GPU probe set; each shape probed at one
+    # or more walltimes; each emission gated on accessibility.
+    # Case A — full accessibility: 2080ti, v100, 3090, a100, h100, h200, a6000.
     intel_a100_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-a100", "q-a100",
         cpu_features=("skl", "csl"),
@@ -3692,8 +3325,7 @@ def run_self_test() -> int:
     )
     amd_row.gpu_types = ("h200",)
     rows_full = [intel_a100_row, intel_h100_row, amd_row]
-    gpu_full = [s.label for s in default_shape_set(rows_full, kind="gpu", full=True)]
-    cpu_full = [s.label for s in default_shape_set(rows_full, kind="cpu", full=True)]
+    gpu_full = [s.label for s in default_shape_set(rows_full, full=True)]
     expected_gpu_full = {
         # dev (4h, 24h) — 2080ti, v100, 3090
         "2080ti:1@4h", "2080ti:1@24h",
@@ -3711,33 +3343,19 @@ def run_self_test() -> int:
         "h100nvl:4@8h", "h100nvl:4@24h", "h100nvl:4@3d", "h100nvl:4@7d",
         "a6000:4@8h", "a6000:4@24h", "a6000:4@3d", "a6000:4@7d",
     }
-    expected_cpu_full = {
-        "cpu:16@4h", "cpu:16@24h",
-        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
-        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
-        "cpu-amd:32@1h", "cpu-amd:32@2h", "cpu-amd:32@4h",
-        "cpu-amd:32@12h", "cpu-amd:32@24h", "cpu-amd:32@3d",
-        "cpu-amd:64@8h", "cpu-amd:64@24h", "cpu-amd:64@3d", "cpu-amd:64@7d",
-    }
     assert set(gpu_full) == expected_gpu_full, sorted(set(gpu_full) ^ expected_gpu_full)
-    assert set(cpu_full) == expected_cpu_full, sorted(set(cpu_full) ^ expected_cpu_full)
     # Dedup picks the shortest matching concrete type per pattern (a100 over
     # a100_80gb_pcie; h100nvl is the shortest 'h100' match here).
     assert "a100_80gb_pcie:1@4h" not in gpu_full, gpu_full
     # Tier ordering: dev → research → premium; within tier, walltimes appear
     # in declared order (shorter first).
-    cpu_idx = {label: idx for idx, label in enumerate(cpu_full)}
     gpu_idx = {label: idx for idx, label in enumerate(gpu_full)}
-    assert cpu_idx["cpu:16@4h"] < cpu_idx["cpu:16@24h"]
-    assert cpu_idx["cpu:16@24h"] < cpu_idx["cpu-intel:32@1h"]
-    assert cpu_idx["cpu-intel:32@1h"] < cpu_idx["cpu-intel:32@3d"]
-    assert cpu_idx["cpu-intel:32@3d"] < cpu_idx["cpu-amd:64@8h"]
     assert gpu_idx["2080ti:1@4h"] < gpu_idx["a100:1@1h"]
     assert gpu_idx["a100:1@1h"] < gpu_idx["a100:4@8h"]
     assert gpu_idx["a100:4@8h"] < gpu_idx["a100:4@7d"]
 
     # Trimmed default (full=False): fewer walltimes per tier, same tier set.
-    gpu_trim = [s.label for s in default_shape_set(rows_full, kind="gpu")]
+    gpu_trim = [s.label for s in default_shape_set(rows_full)]
     expected_gpu_trim = {
         # dev (4h)
         "2080ti:1@4h", "v100:1@4h", "3090:1@4h",
@@ -3755,17 +3373,17 @@ def run_self_test() -> int:
 
     # tiers= filter: passing a subset restricts emissions; an empty/None tiers
     # value emits all tiers; an unknown tier raises CommandError.
-    dev_only = [s.label for s in default_shape_set(rows_full, kind="gpu", tiers=["dev"])]
+    dev_only = [s.label for s in default_shape_set(rows_full, tiers=["dev"])]
     assert set(dev_only) == {"2080ti:1@4h", "v100:1@4h", "3090:1@4h"}, dev_only
     rp = [
         s.label for s in default_shape_set(
-            rows_full, kind="gpu", tiers=["research", "premium"]
+            rows_full, tiers=["research", "premium"]
         )
     ]
     assert all(not lbl.startswith(("2080ti", "v100", "3090")) for lbl in rp), rp
     assert any(lbl.startswith("a100:4") for lbl in rp), rp
     try:
-        default_shape_set(rows_full, kind="gpu", tiers=["bogus"])
+        default_shape_set(rows_full, tiers=["bogus"])
     except CommandError:
         pass
     else:
@@ -3777,9 +3395,7 @@ def run_self_test() -> int:
         cpu_features=("zen4",),
     )
     h200_row.gpu_types = ("h200", "h200_1g.18gb", "h200_2g.35gb", "h200nvl")
-    h200_labels = [
-        s.label for s in default_shape_set([h200_row], kind="gpu", full=True)
-    ]
+    h200_labels = [s.label for s in default_shape_set([h200_row], full=True)]
     # h200 lives in research tier (walltimes 1h, 2h, 4h, 12h, 24h, 72h).
     for wall in ("1h", "2h", "4h", "12h", "24h", "3d"):  # 72h → "3d"
         assert f"h200:1@{wall}" in h200_labels, (wall, h200_labels)
@@ -3788,35 +3404,20 @@ def run_self_test() -> int:
     assert "h200:1@8h" not in h200_labels, h200_labels
     assert "h200:1@7d" not in h200_labels, h200_labels
 
-    # Case B — minimal accessibility: Intel CPU + a100 only. Each tier gated
-    # independently; no AMD vendor → no cpu-amd shapes; no 2080ti/v100/3090/
-    # h100/h200/a6000 → only a100 GPU shapes emit.
-    minimal_row = AllocationRow(
-        "notchpeak", "x", "u", "", "q-min", "q-min",
-        cpu_features=("skl",),
-    )
+    # Case B — minimal accessibility: only a100. Tier gating drops other GPUs.
+    minimal_row = AllocationRow("notchpeak", "x", "u", "", "q-min", "q-min")
     minimal_row.gpu_types = ("a100",)
-    minimal_gpu = [s.label for s in default_shape_set([minimal_row], kind="gpu", full=True)]
-    minimal_cpu = [s.label for s in default_shape_set([minimal_row], kind="cpu", full=True)]
+    minimal_gpu = [s.label for s in default_shape_set([minimal_row], full=True)]
     assert set(minimal_gpu) == {
         "a100:1@1h", "a100:1@2h", "a100:1@4h",
         "a100:1@12h", "a100:1@24h", "a100:1@3d",
         "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
     }, sorted(minimal_gpu)
-    assert set(minimal_cpu) == {
-        "cpu:16@4h", "cpu:16@24h",
-        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
-        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
-    }, sorted(minimal_cpu)
 
-    # Case C — vendor-less rows: CPU dev shapes still emit (they're
-    # vendor-agnostic) but research/premium vendor-tagged shapes are dropped.
-    # GPU side is empty (no gpu_types).
+    # Case C — CPU-only rows: empty implicit set (CPU tiers were removed).
     cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
     cpu_only_row.gpu_types = ()
-    assert default_shape_set([cpu_only_row], kind="gpu", full=True) == []
-    cpu_only = [s.label for s in default_shape_set([cpu_only_row], kind="cpu", full=True)]
-    assert cpu_only == ["cpu:16@4h", "cpu:16@24h"], cpu_only
+    assert default_shape_set([cpu_only_row], full=True) == []
 
     # _is_low_information_pair drops the four noise categories.
     li_shape = ProbeShape(cpus=4, time="01:00:00")
@@ -3861,28 +3462,34 @@ def run_self_test() -> int:
     # Aliases for the downstream expand_rows_by_shape test below.
     a100_row = intel_a100_row
 
-    # _user_supplied_shape_flags detects each shape-related override.
+    # Removed flags (--cores/--cpus/--shape/--gpus/--mem/--time/--nodes/
+    # --wait-for/--gpu/--cpu/--gpu-type/--cpu-type and legacy aliases) all
+    # raise SystemExit at parse time.
     parser = _build_parser()
-    assert _user_supplied_shape_flags(parser.parse_args([])) is False
-    assert _user_supplied_shape_flags(parser.parse_args(["--cores", "16"])) is True
-    # --cpus is a hidden deprecated alias and must still register.
-    assert _user_supplied_shape_flags(parser.parse_args(["--cpus", "16"])) is True
-    assert _user_supplied_shape_flags(parser.parse_args(["--time", "4h"])) is True
-    assert _user_supplied_shape_flags(parser.parse_args(["--shape", "a100:1"])) is True
-    assert _user_supplied_shape_flags(parser.parse_args(["--gpus", "a100:4"])) is True
-    assert _user_supplied_shape_flags(parser.parse_args(["--mem", "32G"])) is True
-    # --wait-for routes through apply_wait_for_shorthand which mutates cpus/gpus.
-    a = parser.parse_args(["--wait-for", "cpu:32"])
-    apply_wait_for_shorthand(a)
-    assert _user_supplied_shape_flags(a) is True
-    # Positional SHAPE parses cleanly and stays inert until main() copies it
-    # into args.wait_for. The conflict checks live in main(), not the parser.
+    for removed in (
+        ["--cores", "16"], ["--cpus", "16"], ["--time", "4h"],
+        ["--shape", "a100:1"], ["--gpus", "a100:4"], ["--mem", "32G"],
+        ["--wait-for", "cpu:32"], ["--nodes", "2"],
+        ["--gpu"], ["--cpu"], ["--gpu-type", "a100"], ["--cpu-type", "intel"],
+        ["--freecycle"], ["--no-freecycle"], ["--guest"], ["--no-guest"],
+        ["--show-unknown"], ["--no-avail"],
+    ):
+        try:
+            parser.parse_args(removed)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"removed flag still accepted: {removed}")
+
+    # Positional SHAPE_LIST parses cleanly into args.shape_pos.
     a = parser.parse_args(["a100:4"])
-    assert a.shape_pos == "a100:4" and a.wait_for is None
+    assert a.shape_pos == "a100:4"
     a = parser.parse_args(["cpu:32"])
     assert a.shape_pos == "cpu:32"
     a = parser.parse_args(["32"])
     assert a.shape_pos == "32"
+    a = parser.parse_args(["a100:4;cpu:32@12h"])
+    assert a.shape_pos == "a100:4;cpu:32@12h"
 
     # expand_rows_by_shape filters skipped pairs (gpu shape on cpu row).
     a100_only = ProbeShape(gpu_type="a100", gpu_count=1)
@@ -3929,30 +3536,18 @@ def run_self_test() -> int:
     args_explicit = parser_fmt.parse_args(["--format", "table"])
     assert args_explicit.format == "table"
 
-    # Renamed flags expose new dests; old names still parse as hidden aliases.
+    # Surviving flags expose their dests.
     a = parser_fmt.parse_args(["--no-availability"])
-    assert a.no_availability is True
-    a = parser_fmt.parse_args(["--no-avail"])  # legacy alias
     assert a.no_availability is True
     a = parser_fmt.parse_args(["--show-all"])
     assert a.show_all is True
-    a = parser_fmt.parse_args(["--show-unknown"])  # legacy alias
-    assert a.show_all is True
     a = parser_fmt.parse_args(["--freecycle-only"])
     assert a.freecycle_only is True and a.exclude_freecycle is False
-    a = parser_fmt.parse_args(["--freecycle"])  # legacy alias
-    assert a.freecycle_only is True
     a = parser_fmt.parse_args(["--exclude-freecycle"])
-    assert a.exclude_freecycle is True
-    a = parser_fmt.parse_args(["--no-freecycle"])  # legacy alias
     assert a.exclude_freecycle is True
     a = parser_fmt.parse_args(["--guest-only"])
     assert a.guest_only is True
-    a = parser_fmt.parse_args(["--guest"])  # legacy alias
-    assert a.guest_only is True
     a = parser_fmt.parse_args(["--exclude-guest"])
-    assert a.exclude_guest is True
-    a = parser_fmt.parse_args(["--no-guest"])  # legacy alias
     assert a.exclude_guest is True
     # New flags exist and default sensibly.
     a = parser_fmt.parse_args([])
@@ -3967,7 +3562,6 @@ def run_self_test() -> int:
 
     # Mutex groups reject combos at parse time (SystemExit from argparse).
     for combo in (
-        ["--gpu", "--cpu"],
         ["--freecycle-only", "--exclude-freecycle"],
         ["--guest-only", "--exclude-guest"],
     ):
@@ -3979,7 +3573,7 @@ def run_self_test() -> int:
             raise AssertionError(f"argparse should have rejected {combo}")
 
     # Help text shows argument groups + key DESCRIPTION/EPILOG sections + does
-    # NOT show the legacy aliases.
+    # NOT show any of the removed flags or legacy aliases.
     rendered = parser_fmt.format_help()
     for header in (
         "Filtering",
@@ -3996,20 +3590,21 @@ def run_self_test() -> int:
         "Quality:",
     ):
         assert header in rendered, f"expected {header!r} in --help"
-    # Hidden aliases must not appear in --help. Use a word-boundary check so
+    # Removed flags must not appear in --help. Use a word-boundary check so
     # '--no-avail' isn't mistakenly matched against '--no-availability'.
-    for hidden in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
-                   "--guest", "--no-guest", "--avail", "--cpus"):
-        assert not re.search(rf"{re.escape(hidden)}\b(?!-)", rendered), \
-            f"hidden alias {hidden!r} leaked into --help"
-    # New-name flags ARE in help.
+    for removed in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
+                    "--guest", "--no-guest", "--avail", "--cpus", "--cores",
+                    "--gpu-type", "--cpu-type", "--gpus", "--shape", "--wait-for"):
+        assert not re.search(rf"{re.escape(removed)}\b(?!-)", rendered), \
+            f"removed flag {removed!r} leaked into --help"
+    # Surviving flags ARE in help.
     for visible in ("--no-availability", "--show-all", "--freecycle-only",
                     "--exclude-freecycle", "--guest-only", "--exclude-guest",
                     "--explain", "--pivot", "--no-json-help",
-                    "--list-tiers", "--quick", "--cores"):
+                    "--list-tiers", "--quick"):
         assert visible in rendered, f"expected {visible!r} in --help"
 
-    # Better error messages: mem without unit + bad time + cpus=0 + bad gpu spec.
+    # Better error messages: mem without unit + bad time + cores=0 + bad gpu spec.
     try:
         parse_shape_spec("a100:4,mem=99")
     except CommandError as exc:
@@ -4044,18 +3639,16 @@ def run_self_test() -> int:
     else:
         raise AssertionError("':4' should have raised")
 
-    # _format_applied_filters captures only non-default flags.
+    # _format_applied_filters captures only the surviving filter flags.
     a = parser_fmt.parse_args([])
     assert _format_applied_filters(a) == []
     a = parser_fmt.parse_args([
-        "--cluster", "notchpeak", "--account", "foo", "--gpu",
-        "--gpu-type", "a100", "--min-wall", "12:00:00",
+        "--cluster", "notchpeak", "--account", "foo",
+        "--min-wall", "12:00:00",
     ])
     bits = _format_applied_filters(a)
     assert "cluster=notchpeak" in bits
     assert "account=foo" in bits
-    assert "--gpu" in bits
-    assert "gpu-type=a100" in bits
     assert "min-wall=12:00:00" in bits
 
     # _zero_results_hint mentions applied filters and offers actionable hints.
@@ -4074,7 +3667,7 @@ def run_self_test() -> int:
         ProbeShape(gpu_type="a100", gpu_count=1, time="01:00:00"),
         ProbeShape(gpu_type="h100", gpu_count=4, time="1-00:00:00"),
     ]
-    a = parser_fmt.parse_args(["--gpu"])
+    a = parser_fmt.parse_args([])
     text = render_explain_plan(explain_rows, explain_shapes, a, "text")
     assert "Allocations matching filters: 2" in text
     assert "Probe shape set (2)" in text
@@ -4171,35 +3764,26 @@ def run_self_test() -> int:
     assert parser_fmt.parse_args(["--list-tiers"]).list_tiers is True
     assert parser_fmt.parse_args(["--quick"]).quick is True
 
-    # format_tier_listing renders section-grouped sections with both gpu and
-    # cpu shapes under each tier (dev / research / premium).
+    # format_tier_listing renders the GPU 3-tier set (dev / research / premium).
     listing = format_tier_listing(full=False)
     assert "Default tier set" in listing
     assert "DEV" in listing and "RESEARCH" in listing and "PREMIUM" in listing
-    assert "middle" not in listing.lower()  # collapsed into dev
     # Default trimmed dev walltime is 4h.
-    assert "2080ti:1@4h" in listing and "cpu:16@4h" in listing
-    assert "cpu-intel:32" in listing and "cpu-amd:32" in listing
-    assert "cpu-amd:64" in listing
+    assert "2080ti:1@4h" in listing
+    # CPU tiers are gone.
+    assert "cpu:16" not in listing and "cpu-intel" not in listing and "cpu-amd" not in listing
     assert "@7d" in listing  # premium
     # --full produces a strict superset of walltimes per tier (dev gains 24h).
     listing_full = format_tier_listing(full=True)
-    assert "2080ti:1@24h" in listing_full and "cpu:16@24h" in listing_full
-    # show_gpu/show_cpu narrow output.
-    gpu_only = format_tier_listing(show_gpu=True, show_cpu=False)
-    assert "cpu:16" not in gpu_only and "2080ti:1@4h" in gpu_only
-    cpu_only_listing = format_tier_listing(show_gpu=False, show_cpu=True)
-    assert "2080ti" not in cpu_only_listing and "cpu:16@4h" in cpu_only_listing
+    assert "2080ti:1@24h" in listing_full
 
-    # _shape_tier maps each shape back to its tier label correctly.
-    assert _shape_tier(ProbeShape(cpus=DEV_CPU_CORES, time="4h")) == "dev"
-    assert _shape_tier(ProbeShape(cpus=RESEARCH_CPU_CORES, time="1h", cpu_vendor="intel")) == "research"
-    assert _shape_tier(ProbeShape(cpus=PREMIUM_CPU_AMD_CORES, time="24h", cpu_vendor="amd")) == "premium"
+    # _shape_tier maps GPU shapes back to their tier; CPU/user-supplied shapes → '?'.
     assert _shape_tier(ProbeShape(gpu_type="2080ti", gpu_count=1)) == "dev"
     assert _shape_tier(ProbeShape(gpu_type="v100", gpu_count=1)) == "dev"
     assert _shape_tier(ProbeShape(gpu_type="3090", gpu_count=1)) == "dev"
     assert _shape_tier(ProbeShape(gpu_type="a100", gpu_count=1)) == "research"
     assert _shape_tier(ProbeShape(gpu_type="a100", gpu_count=4)) == "premium"
+    assert _shape_tier(ProbeShape(cpus=32)) == "?"
 
     # --tier flag parses and rejects unknown values.
     assert parser_fmt.parse_args(["-t", "dev"]).tier == ["dev"]
@@ -4253,68 +3837,30 @@ def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool, bool]:
     return (fmt or "table"), wide, auto_switched
 
 
-# Legacy long-form flags kept around for muscle-memory scripts. argparse
-# silently accepts them (help=SUPPRESS); we emit a one-line stderr notice
-# so users discover the new spelling. Map: legacy → current.
-_LEGACY_ALIAS_MAP = {
-    "--freecycle": "--freecycle-only",
-    "--no-freecycle": "--exclude-freecycle",
-    "--guest": "--guest-only",
-    "--no-guest": "--exclude-guest",
-    "--show-unknown": "--show-all",
-    "--no-avail": "--no-availability",
-    "--cpus": "--cores",
-}
-
-
-def _warn_legacy_aliases(argv: Sequence[str], verbose: bool) -> None:
-    """Emit one stderr line per legacy alias used.
-
-    Notice is suppressed unless stderr is a TTY or --verbose is set, mirroring
-    _maybe_emit_format_auto_notice — keeps logged pipelines quiet but lets
-    interactive users discover the rename.
-    """
-    if not (verbose or sys.stderr.isatty()):
-        return
-    # split('=', 1)[0] handles '--no-avail=foo'-style tokens.
-    used = dict.fromkeys(
-        head for head in (token.split("=", 1)[0] for token in argv)
-        if head in _LEGACY_ALIAS_MAP
-    )
-    for alias in used:
-        replacement = _LEGACY_ALIAS_MAP[alias]
-        print(
-            f"[chpc-allocs] {alias} is a legacy alias; prefer {replacement}.",
-            file=sys.stderr,
-        )
-
-
 def _print_probe_banner(
     args: argparse.Namespace, shapes: Sequence["ProbeShape"]
 ) -> None:
     """Print a one-line 'Probing:' banner to stderr before probes run.
 
-    Makes the chosen mode + tier set + shape count visible upfront, so a
-    misread flag combination (e.g. forgetting --cpu when probing CPU shapes)
-    is caught before the user reads the wait table. Suppressed under
-    --no-wait (no probe), --explain (it has its own plan output), and on
-    non-TTY stderr unless --verbose is set.
+    Makes the chosen shape set visible upfront. Suppressed under --no-wait
+    (no probe), --explain (it has its own plan output), and on non-TTY
+    stderr unless --verbose is set.
     """
     if args.no_wait or args.explain or not shapes:
         return
     if not (args.verbose or sys.stderr.isatty()):
         return
-    mode = "CPU" if args.cpu else "GPU"
-    if args.shape:
-        labels = ", ".join(s.label for s in shapes[:4])
-        if len(shapes) > 4:
-            labels += f", +{len(shapes) - 4} more"
-        body = f"multi-shape · {len(shapes)} shapes ({labels})"
-    elif _user_supplied_shape_flags(args):
-        body = f"single shape ({shapes[0].label}) · {mode} mode"
+    if args.shape_pos:
+        if len(shapes) == 1:
+            body = f"single shape ({shapes[0].label})"
+        else:
+            labels = ", ".join(s.label for s in shapes[:4])
+            if len(shapes) > 4:
+                labels += f", +{len(shapes) - 4} more"
+            body = f"multi-shape · {len(shapes)} shapes ({labels})"
     else:
         tiers = ",".join(args.tier or TIER_NAMES)
-        body = f"{mode} mode · tiers=[{tiers}] · {len(shapes)} shapes"
+        body = f"GPU tiers=[{tiers}] · {len(shapes)} shapes"
     print(f"[chpc-allocs] Probing: {body}", file=sys.stderr)
 
 
@@ -4388,61 +3934,18 @@ def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     if args.self_test:
         return run_self_test()
-    _warn_legacy_aliases(argv, args.verbose)
     if args.quick:
         args.no_wait = True
         args.no_availability = True
         args.no_usage = True
     if args.list_tiers:
-        print(format_tier_listing(
-            full=args.full,
-            show_gpu=not args.cpu,
-            show_cpu=not args.gpu,
-        ))
+        print(format_tier_listing(full=args.full))
         return 0
-    # Positional SHAPE shares a slot with --wait-for and the single-shape
-    # flags; reject conflicts up front instead of silently overriding.
-    if args.shape_pos is not None:
-        if args.wait_for is not None:
-            raise CommandError(
-                f"positional SHAPE {args.shape_pos!r} conflicts with "
-                f"--wait-for {args.wait_for!r}; pick one"
-            )
-        if args.shape:
-            raise CommandError(
-                "positional SHAPE conflicts with --shape (multi-shape mode); "
-                "drop one"
-            )
-        if _user_supplied_shape_flags(args):
-            raise CommandError(
-                "positional SHAPE conflicts with --cores/--gpus/--mem/--time/"
-                "--nodes; pass either the positional or the explicit flags"
-            )
-        args.wait_for = args.shape_pos
-    apply_wait_for_shorthand(args)
-    # --tier only steers the implicit multi-tier default; pairing it with a
-    # single-shape selection used to be silently ignored.
-    if args.tier and (args.shape or _user_supplied_shape_flags(args)):
+    user_shapes = parse_shape_list(args.shape_pos) if args.shape_pos is not None else None
+    if user_shapes and args.tier:
         raise CommandError(
-            "--tier applies to the multi-tier default; drop --tier or drop "
-            "the single-shape flags (positional SHAPE, --wait-for, --shape, "
-            "--cores, --gpus, --mem, --time, --nodes)"
-        )
-    # Catches the awkward old-alias cross-pair combos (e.g. --freecycle
-    # --exclude-freecycle) that the argparse mutex groups don't see.
-    if args.freecycle_only and args.exclude_freecycle:
-        raise CommandError("--freecycle-only and --exclude-freecycle cannot be used together")
-    if args.guest_only and args.exclude_guest:
-        raise CommandError("--guest-only and --exclude-guest cannot be used together")
-    if args.cpus <= 0:
-        raise CommandError(f"--cores must be > 0 (got {args.cpus})")
-    if args.nodes <= 0:
-        raise CommandError(f"--nodes must be > 0 (got {args.nodes})")
-    if parse_wall_seconds(args.time) is None:
-        raise CommandError(
-            f"invalid --time value {args.time!r}\n"
-            f"  expected: HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' "
-            f"(e.g. 1:00:00, 24h, 3d, 30m)"
+            "SHAPE_LIST conflicts with -t/--tier; drop one\n"
+            "  hint: -t selects the implicit GPU tier set; SHAPE_LIST replaces it"
         )
     if args.pivot and args.format in ("csv", "json"):
         raise CommandError(
@@ -4458,17 +3961,6 @@ def main(argv: Sequence[str]) -> int:
             raise CommandError(
                 "--best is incompatible with --sbatch and --pivot"
             )
-    gpu_type, gpu_count = (None, None)
-    if args.gpus:
-        gpu_type, gpu_count = parse_gpu_spec(args.gpus)
-    shape = ProbeShape(
-        nodes=args.nodes,
-        cpus=args.cpus,
-        mem=args.mem,
-        gpu_type=gpu_type,
-        gpu_count=gpu_count,
-        time=args.time,
-    )
 
     if args.list_gpus:
         print(format_gpu_summary(show_partition_availability()))
@@ -4484,21 +3976,21 @@ def main(argv: Sequence[str]) -> int:
     partition_avail = show_partition_availability() if include_avail else None
     # When availability data is loaded, derive the gpu-types map from it for
     # free (no second sinfo call) — needed by the implicit 'premium' sort tier
-    # so a100/h100/h200/a6000 rows surface even without --gpu-type/--wide.
+    # so a100/h100/h200/a6000 rows surface even without --wide.
     # Matches the shape show_partition_gpus returns.
     if partition_avail is not None:
         partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
             for c, parts in partition_avail.items()
         }
-    elif args.gpu_type or args.wide:
+    elif args.wide:
         partition_gpus = show_partition_gpus()
     else:
         partition_gpus = {}
-    # cpu_vendor classification + Intel/AMD baseline shapes both rely on
-    # partition features, so fetch them unless explicitly opted out.
+    # cpu_vendor classification feeds the 'vendor' sort key, so fetch features
+    # unless we're skipping availability AND the user didn't ask for --wide.
     partition_features = (
-        {} if args.no_availability and not (args.cpu_type or args.wide)
+        {} if args.no_availability and not args.wide
         else show_partition_features()
     )
     attach_metadata(
@@ -4512,17 +4004,10 @@ def main(argv: Sequence[str]) -> int:
     rows = filter_rows(rows, args)
     shapes: List[ProbeShape] = []
     if include_wait:
-        if args.shape:
-            shapes = [parse_shape_spec(s) for s in args.shape]
-        elif _user_supplied_shape_flags(args):
-            shapes = [shape]
+        if user_shapes is not None:
+            shapes = user_shapes
         else:
-            shapes = default_shape_set(
-                rows,
-                kind="cpu" if args.cpu else "gpu",
-                full=args.full,
-                tiers=args.tier,
-            )
+            shapes = default_shape_set(rows, full=args.full, tiers=args.tier)
 
     # --explain: print the resolved plan and exit before any probes run.
     if args.explain:
@@ -4566,28 +4051,26 @@ def main(argv: Sequence[str]) -> int:
     elif args.pivot:
         output = pivot_output(pairs)
     else:
-        gpu_filter_patterns = list(args.gpu_type or [])
-        any_shape_gpu = any(s is not None and s.gpu_type for _, s in pairs)
-        show_gpus = bool(gpu_filter_patterns) or any_shape_gpu
+        show_gpus = any(s is not None and s.gpu_type for _, s in pairs)
         _maybe_emit_gpu_resolution_notice(pairs, args.verbose)
         if fmt == "csv":
             output = csv_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
-                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+                show_gpus=show_gpus,
             )
         elif fmt == "json":
             output = json_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
                 include_help=not args.no_json_help,
-                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+                show_gpus=show_gpus,
             )
         else:
             output = table_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
-                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+                show_gpus=show_gpus,
             )
 
     print(output)
