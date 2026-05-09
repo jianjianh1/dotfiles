@@ -82,11 +82,12 @@ Both `bashrc_exports` and `bashrc_aliases` are sourced from `~/.bashrc` (lines a
 | `fd` | find replacement |
 | `bat` | cat replacement with syntax highlighting |
 | `delta` | Git diff pager (side-by-side, syntax-highlighted) |
-| `eza` | Modern ls replacement |
 | `zoxide` | Smart `cd` replacement (`z` command) |
 | `lazygit` | Git TUI |
 | `btop` | System monitor |
 | `jq` | JSON processor |
+| `starship` | Cross-shell prompt |
+| `atuin` | Shell history sync and search |
 | `claude` | Claude Code CLI |
 | `codex` | Codex CLI |
 
