@@ -116,21 +116,30 @@ DEFAULT_PROBE_TIME = "01:00:00"
 # user sees how queue pressure scales with wallclock request length.
 # Shapes are gated on accessibility — a probe only emits if the user has
 # a row exposing the required vendor or GPU type.
-DEV_WALLTIMES = ("00:30:00", "01:00:00", "04:00:00", "12:00:00")
+#
+# Two walltime tuples per tier: a trimmed default (2-3 endpoints) and a
+# `_FULL` sweep used when --full is passed. The trimmed tuples cut row
+# count roughly in half; rows that share the same wait across the
+# remaining walltimes are then merged by collapse_uniform_walltimes.
+DEV_WALLTIMES = ("00:30:00", "12:00:00")
+DEV_WALLTIMES_FULL = ("00:30:00", "01:00:00", "04:00:00", "12:00:00")
 DEV_CPU_CORES = 4
 DEV_GPU_PATTERN = "2080ti"
 
-MID_WALLTIMES = ("01:00:00", "04:00:00", "12:00:00", "1-00:00:00")  # 1h, 4h, 12h, 24h
+MID_WALLTIMES = ("04:00:00", "1-00:00:00")  # 4h, 24h
+MID_WALLTIMES_FULL = ("01:00:00", "04:00:00", "12:00:00", "1-00:00:00")  # 1h, 4h, 12h, 24h
 MID_CPU_CORES = 16
 MID_GPU_PATTERNS = ("v100", "3090")
 
-RESEARCH_WALLTIMES = (
+RESEARCH_WALLTIMES = ("01:00:00", "1-00:00:00", "3-00:00:00")  # 1h, 24h, 72h
+RESEARCH_WALLTIMES_FULL = (
     "01:00:00", "02:00:00", "04:00:00", "12:00:00", "1-00:00:00", "3-00:00:00",
 )  # 1h, 2h, 4h, 12h, 24h, 72h
 RESEARCH_CPU_CORES = 32
 RESEARCH_GPU_PATTERNS = ("a100", "h100", "h200")
 
-PREMIUM_WALLTIMES = ("08:00:00", "1-00:00:00", "3-00:00:00", "7-00:00:00")  # 8h, 24h, 72h, 7d
+PREMIUM_WALLTIMES = ("1-00:00:00", "7-00:00:00")  # 24h, 7d
+PREMIUM_WALLTIMES_FULL = ("08:00:00", "1-00:00:00", "3-00:00:00", "7-00:00:00")  # 8h, 24h, 72h, 7d
 PREMIUM_CPU_AMD_CORES = 64  # full Granite Genoa node
 PREMIUM_GPU_SHAPES = (
     ("a100", 4),
@@ -293,13 +302,17 @@ case-insensitive substrings, so --cluster NOTCH matches notchpeak.
 EPILOG = """\
 Examples:
   chpc-allocs                              # all allocs; default 4-tier probe set,
-                                           # each shape probed at multiple walltimes
-                                           # (small to large experiments):
-                                           #   dev      (cpu:4, 2080ti:1                    @30m, 1h, 4h, 12h)
-                                           #   middle   (cpu:16, v100:1, 3090:1             @1h, 4h, 12h, 24h)
-                                           #   research (cpu-intel/amd:32, a100/h100/h200:1 @1h, 2h, 4h, 12h, 24h, 72h)
-                                           #   premium  (cpu-amd:64, a100/h100/a6000:4      @8h, 24h, 72h, 7d)
-                                           # shapes silently drop if the hardware is inaccessible
+                                           # trimmed walltimes (2-3 endpoints per tier):
+                                           #   dev      (2080ti:1                    @30m, 12h)
+                                           #   middle   (v100:1, 3090:1              @4h, 24h)
+                                           #   research (a100/h100/h200:1            @1h, 24h, 72h)
+                                           #   premium  (a100/h100/a6000:4           @24h, 7d)
+                                           # rows with identical wait across walltimes are merged
+                                           # (label shows '@min..max'); shapes silently drop if
+                                           # the hardware is inaccessible
+  chpc-allocs --full                       # full per-tier walltime sweep, no row collapse
+                                           #   (dev +1h/4h, middle +1h/12h,
+                                           #    research +2h/4h/12h, premium +8h/72h)
   chpc-allocs | jq '.rows[]'               # piped: auto JSON (wide) with _help legend
   chpc-allocs --cluster notchpeak --gpu    # GPU rows on notchpeak only
   chpc-allocs --gpu-type a100 --sbatch     # a100 + a100_80gb_pcie + MIG slices
@@ -470,6 +483,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "returned '?', QOS rows with no MaxWall, shapes that exceed the "
         "QOS MaxWall, and rows with zero free capacity. By default these "
         "are dropped to keep the output focused on actionable predictions.",
+    )
+    parser.add_argument(
+        "--full", action="store_true",
+        help="Probe the full per-tier walltime sweep and skip the "
+        "identical-wait row collapse. Default trims walltimes to 2-3 per "
+        "tier and merges rows whose wait is identical across walltimes.",
     )
     parser.add_argument(
         "--cpus", type=int, metavar="N", default=DEFAULT_PROBE_CPUS,
@@ -940,8 +959,8 @@ class ProbeShape:
         self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
         self.label = self._compute_label()
 
-    def _compute_label(self) -> str:
-        wall = _format_wall_short(self.time)
+    def _compute_label(self, time_label: Optional[str] = None) -> str:
+        wall = time_label if time_label is not None else _format_wall_short(self.time)
         if self.gpu_type or self.gpu_count is not None:
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
@@ -1129,6 +1148,7 @@ def _shortest_matching_gpu(
 def default_shape_set(
     rows: List["AllocationRow"],
     kind: str = "gpu",
+    full: bool = False,
 ) -> List[ProbeShape]:
     """Build the implicit shape set used when no shape flags are given.
 
@@ -1136,21 +1156,24 @@ def default_shape_set(
     emits only the CPU half. Walltime spreads scale with tier so the user
     sees queue-pressure scaling with wallclock length.
 
-    Tier 1 — dev (walltimes: 30m, 1h, 4h, 12h):
+    `full=False` (default) uses a trimmed 2-3 walltimes per tier; `full=True`
+    restores the wider sweep listed in parentheses below.
+
+    Tier 1 — dev (walltimes: 30m, 12h; full: + 1h, 4h):
       * gpu: `<2080ti>:1` — small-GPU correctness check (if accessible)
       * cpu: `cpu:4` — generic, for compilation/build
 
-    Tier 2 — middle (walltimes: 1h, 4h, 12h, 24h):
+    Tier 2 — middle (walltimes: 4h, 24h; full: + 1h, 12h):
       * gpu: `v100:1`, `3090:1` — small experiments (if accessible)
       * cpu: `cpu:16` — mid-sized parallel test/run
 
-    Tier 3 — research (walltimes: 1h, 2h, 4h, 12h, 24h, 72h):
+    Tier 3 — research (walltimes: 1h, 24h, 72h; full: + 2h, 4h, 12h):
       * gpu: `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
       * cpu: `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
         (one per detected vendor; each carries an sbatch `--constraint=`
         listing that vendor's microarch tokens)
 
-    Tier 4 — premium (walltimes: 8h, 24h, 72h, 7d):
+    Tier 4 — premium (walltimes: 24h, 7d; full: + 8h, 72h):
       * gpu: `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
       * cpu: `cpu-amd:64` — full Granite Genoa node
 
@@ -1159,40 +1182,44 @@ def default_shape_set(
     """
     if kind not in ("gpu", "cpu"):
         raise ValueError(f"default_shape_set: unknown kind {kind!r}")
+    dev_walls = DEV_WALLTIMES_FULL if full else DEV_WALLTIMES
+    mid_walls = MID_WALLTIMES_FULL if full else MID_WALLTIMES
+    research_walls = RESEARCH_WALLTIMES_FULL if full else RESEARCH_WALLTIMES
+    premium_walls = PREMIUM_WALLTIMES_FULL if full else PREMIUM_WALLTIMES
     shapes: List[ProbeShape] = []
     vendors = {row.cpu_vendor for row in rows}
     gpu_types = {gt.lower() for row in rows for gt in row.gpu_types}
 
     # Tier 1 — dev
     if kind == "cpu":
-        for wall in DEV_WALLTIMES:
+        for wall in dev_walls:
             shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
     else:
         dev_gpu = _shortest_matching_gpu(gpu_types, DEV_GPU_PATTERN)
         if dev_gpu:
-            for wall in DEV_WALLTIMES:
+            for wall in dev_walls:
                 shapes.append(ProbeShape(gpu_type=dev_gpu, gpu_count=1, time=wall))
 
     # Tier 2 — middle
     if kind == "cpu":
-        for wall in MID_WALLTIMES:
+        for wall in mid_walls:
             shapes.append(ProbeShape(cpus=MID_CPU_CORES, time=wall))
     else:
         for pattern in MID_GPU_PATTERNS:
             gpu_type = _shortest_matching_gpu(gpu_types, pattern)
             if gpu_type:
-                for wall in MID_WALLTIMES:
+                for wall in mid_walls:
                     shapes.append(ProbeShape(gpu_type=gpu_type, gpu_count=1, time=wall))
 
     # Tier 3 — research
     if kind == "cpu":
         if _has_vendor(vendors, "intel"):
-            for wall in RESEARCH_WALLTIMES:
+            for wall in research_walls:
                 shapes.append(ProbeShape(
                     cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
                 ))
         if _has_vendor(vendors, "amd"):
-            for wall in RESEARCH_WALLTIMES:
+            for wall in research_walls:
                 shapes.append(ProbeShape(
                     cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
                 ))
@@ -1200,7 +1227,7 @@ def default_shape_set(
         for pattern in RESEARCH_GPU_PATTERNS:
             gpu_type = _shortest_matching_gpu(gpu_types, pattern)
             if gpu_type:
-                for wall in RESEARCH_WALLTIMES:
+                for wall in research_walls:
                     shapes.append(ProbeShape(
                         gpu_type=gpu_type, gpu_count=1, time=wall
                     ))
@@ -1208,7 +1235,7 @@ def default_shape_set(
     # Tier 4 — premium
     if kind == "cpu":
         if _has_vendor(vendors, "amd"):
-            for wall in PREMIUM_WALLTIMES:
+            for wall in premium_walls:
                 shapes.append(ProbeShape(
                     cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
                 ))
@@ -1216,7 +1243,7 @@ def default_shape_set(
         for pattern, count in PREMIUM_GPU_SHAPES:
             gpu_type = _shortest_matching_gpu(gpu_types, pattern)
             if gpu_type:
-                for wall in PREMIUM_WALLTIMES:
+                for wall in premium_walls:
                     shapes.append(ProbeShape(
                         gpu_type=gpu_type, gpu_count=count, time=wall
                     ))
@@ -1832,6 +1859,77 @@ def expand_rows_by_shape(
         for shape in shapes
         if not shape.should_skip(row)
     ]
+
+
+def _shape_signature(shape: ProbeShape) -> Tuple[object, ...]:
+    """Stable identity for a shape ignoring walltime — used for grouping."""
+    return (
+        shape.nodes,
+        shape.cpus,
+        shape.mem,
+        shape.gpu_type,
+        shape.gpu_count,
+        shape.cpu_vendor,
+    )
+
+
+def _row_signature(row: AllocationRow) -> Tuple[str, str, str, str]:
+    return (row.cluster, row.account, row.partition, row.qos)
+
+
+def collapse_uniform_walltimes(
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+) -> List[Tuple[AllocationRow, Optional[ProbeShape]]]:
+    """Merge (row, shape) pairs that share a wait across walltimes.
+
+    Within each (row, shape-without-walltime) group, if every walltime
+    yields the same wait value, replace the group with one pair whose
+    shape carries a label spanning `min..max` of the group's walltimes.
+    Non-uniform groups (where wait differs across walltimes) are emitted
+    unchanged so scaling stays visible.
+
+    Mutates `row.wait_by_shape` to add the merged label as a new key so
+    downstream sort/render paths (which look up wait via `shape.label`)
+    work unchanged.
+    """
+    grouped: Dict[Tuple[object, ...], List[int]] = {}
+    for index, (row, shape) in enumerate(pairs):
+        if shape is None:
+            continue
+        grouped.setdefault((_row_signature(row), _shape_signature(shape)), []).append(index)
+
+    replaced: Dict[int, Tuple[AllocationRow, Optional[ProbeShape]]] = {}
+    drop: Set[int] = set()
+    for indices in grouped.values():
+        if len(indices) < 2:
+            continue
+        members = [pairs[i] for i in indices]
+        waits = [row.wait_by_shape.get(shape.label) for row, shape in members]
+        if any(w is None for w in waits) or len(set(waits)) != 1:
+            continue
+        members_sorted = sorted(members, key=lambda p: parse_wall_seconds(p[1].time) or 0)
+        first_row, first_shape = members_sorted[0]
+        last_shape = members_sorted[-1][1]
+        time_label = (
+            _format_wall_short(first_shape.time)
+            + ".."
+            + _format_wall_short(last_shape.time)
+        )
+        collapsed = ProbeShape(
+            nodes=first_shape.nodes,
+            cpus=first_shape.cpus,
+            mem=first_shape.mem,
+            gpu_type=first_shape.gpu_type,
+            gpu_count=first_shape.gpu_count,
+            time=first_shape.time,
+            cpu_vendor=first_shape.cpu_vendor,
+        )
+        collapsed.label = collapsed._compute_label(time_label=time_label)
+        first_row.wait_by_shape[collapsed.label] = waits[0]
+        replaced[indices[0]] = (first_row, collapsed)
+        drop.update(indices[1:])
+
+    return [replaced.get(i, pair) for i, pair in enumerate(pairs) if i not in drop]
 
 
 def sort_pairs(
@@ -2581,21 +2679,16 @@ def run_self_test() -> int:
         cpu_features=("zen4", "gen"),
     )
     amd_row.gpu_types = ("h200",)
-    shapes = default_shape_set([intel_a100_row, intel_h100_row, amd_row])
-    labels = [s.label for s in shapes]
-    expected_full = {
+    rows_full = [intel_a100_row, intel_h100_row, amd_row]
+    gpu_full = [s.label for s in default_shape_set(rows_full, kind="gpu", full=True)]
+    cpu_full = [s.label for s in default_shape_set(rows_full, kind="cpu", full=True)]
+    expected_gpu_full = {
         # dev (30m, 1h, 4h, 12h)
-        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
         "2080ti:1@30m", "2080ti:1@1h", "2080ti:1@4h", "2080ti:1@12h",
         # middle (1h, 4h, 12h, 24h)
-        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
         "v100:1@1h", "v100:1@4h", "v100:1@12h", "v100:1@24h",
         "3090:1@1h", "3090:1@4h", "3090:1@12h", "3090:1@24h",
         # research (1h, 2h, 4h, 12h, 24h, 72h → 3d label)
-        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
-        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
-        "cpu-amd:32@1h", "cpu-amd:32@2h", "cpu-amd:32@4h",
-        "cpu-amd:32@12h", "cpu-amd:32@24h", "cpu-amd:32@3d",
         "a100:1@1h", "a100:1@2h", "a100:1@4h",
         "a100:1@12h", "a100:1@24h", "a100:1@3d",
         "h100nvl:1@1h", "h100nvl:1@2h", "h100nvl:1@4h",
@@ -2603,25 +2696,55 @@ def run_self_test() -> int:
         "h200:1@1h", "h200:1@2h", "h200:1@4h",
         "h200:1@12h", "h200:1@24h", "h200:1@3d",
         # premium (8h, 24h, 72h → 3d, 7d)
-        "cpu-amd:64@8h", "cpu-amd:64@24h", "cpu-amd:64@3d", "cpu-amd:64@7d",
         "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
         "h100nvl:4@8h", "h100nvl:4@24h", "h100nvl:4@3d", "h100nvl:4@7d",
         "a6000:4@8h", "a6000:4@24h", "a6000:4@3d", "a6000:4@7d",
     }
-    assert set(labels) == expected_full, sorted(set(labels) ^ expected_full)
+    expected_cpu_full = {
+        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
+        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+        "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
+        "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
+        "cpu-amd:32@1h", "cpu-amd:32@2h", "cpu-amd:32@4h",
+        "cpu-amd:32@12h", "cpu-amd:32@24h", "cpu-amd:32@3d",
+        "cpu-amd:64@8h", "cpu-amd:64@24h", "cpu-amd:64@3d", "cpu-amd:64@7d",
+    }
+    assert set(gpu_full) == expected_gpu_full, sorted(set(gpu_full) ^ expected_gpu_full)
+    assert set(cpu_full) == expected_cpu_full, sorted(set(cpu_full) ^ expected_cpu_full)
     # Dedup picks the shortest matching concrete type per pattern (a100 over
     # a100_80gb_pcie; h100nvl is the shortest 'h100' match here).
-    assert "a100_80gb_pcie:1@4h" not in labels, labels
+    assert "a100_80gb_pcie:1@4h" not in gpu_full, gpu_full
     # Tier ordering: dev → mid → research → premium; within tier, walltimes
     # appear in declared order (shorter first).
-    tier_indices = {label: idx for idx, label in enumerate(labels)}
-    assert tier_indices["cpu:4@30m"] < tier_indices["cpu:4@12h"]
-    assert tier_indices["cpu:4@12h"] < tier_indices["cpu:16@1h"]
-    assert tier_indices["cpu:16@24h"] < tier_indices["cpu-intel:32@1h"]
-    assert tier_indices["cpu-intel:32@1h"] < tier_indices["cpu-intel:32@3d"]
-    assert tier_indices["cpu-intel:32@3d"] < tier_indices["cpu-amd:64@8h"]
-    assert tier_indices["a100:1@1h"] < tier_indices["a100:4@8h"]
-    assert tier_indices["a100:4@8h"] < tier_indices["a100:4@7d"]
+    cpu_idx = {label: idx for idx, label in enumerate(cpu_full)}
+    gpu_idx = {label: idx for idx, label in enumerate(gpu_full)}
+    assert cpu_idx["cpu:4@30m"] < cpu_idx["cpu:4@12h"]
+    assert cpu_idx["cpu:4@12h"] < cpu_idx["cpu:16@1h"]
+    assert cpu_idx["cpu:16@24h"] < cpu_idx["cpu-intel:32@1h"]
+    assert cpu_idx["cpu-intel:32@1h"] < cpu_idx["cpu-intel:32@3d"]
+    assert cpu_idx["cpu-intel:32@3d"] < cpu_idx["cpu-amd:64@8h"]
+    assert gpu_idx["a100:1@1h"] < gpu_idx["a100:4@8h"]
+    assert gpu_idx["a100:4@8h"] < gpu_idx["a100:4@7d"]
+
+    # Trimmed default (full=False): fewer walltimes per tier, same tier set.
+    gpu_trim = [s.label for s in default_shape_set(rows_full, kind="gpu")]
+    expected_gpu_trim = {
+        # dev (30m, 12h)
+        "2080ti:1@30m", "2080ti:1@12h",
+        # middle (4h, 24h)
+        "v100:1@4h", "v100:1@24h",
+        "3090:1@4h", "3090:1@24h",
+        # research (1h, 24h, 72h)
+        "a100:1@1h", "a100:1@24h", "a100:1@3d",
+        "h100nvl:1@1h", "h100nvl:1@24h", "h100nvl:1@3d",
+        "h200:1@1h", "h200:1@24h", "h200:1@3d",
+        # premium (24h, 7d)
+        "a100:4@24h", "a100:4@7d",
+        "h100nvl:4@24h", "h100nvl:4@7d",
+        "a6000:4@24h", "a6000:4@7d",
+    }
+    assert set(gpu_trim) == expected_gpu_trim, sorted(set(gpu_trim) ^ expected_gpu_trim)
+    assert len(gpu_trim) < len(gpu_full)
 
     # MIG-slice noise: shortest match wins over MIG variants.
     h200_row = AllocationRow(
@@ -2629,8 +2752,10 @@ def run_self_test() -> int:
         cpu_features=("zen4",),
     )
     h200_row.gpu_types = ("h200", "h200_1g.18gb", "h200_2g.35gb", "h200nvl")
-    h200_labels = [s.label for s in default_shape_set([h200_row])]
-    # h200 lives in research tier now (walltimes 1h, 2h, 4h, 12h, 24h, 72h).
+    h200_labels = [
+        s.label for s in default_shape_set([h200_row], kind="gpu", full=True)
+    ]
+    # h200 lives in research tier (walltimes 1h, 2h, 4h, 12h, 24h, 72h).
     for wall in ("1h", "2h", "4h", "12h", "24h", "3d"):  # 72h → "3d"
         assert f"h200:1@{wall}" in h200_labels, (wall, h200_labels)
     assert "h200_1g.18gb:1@4h" not in h200_labels, h200_labels
@@ -2640,28 +2765,33 @@ def run_self_test() -> int:
 
     # Case B — minimal accessibility: Intel CPU + a100 only. Each tier gated
     # independently; no AMD vendor → no cpu-amd shapes; no 2080ti/v100/3090/
-    # h100/h200/a6000 → only a100 GPU shapes emit, at all four walltimes.
+    # h100/h200/a6000 → only a100 GPU shapes emit.
     minimal_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-min", "q-min",
         cpu_features=("skl",),
     )
     minimal_row.gpu_types = ("a100",)
-    minimal = [s.label for s in default_shape_set([minimal_row])]
-    assert set(minimal) == {
+    minimal_gpu = [s.label for s in default_shape_set([minimal_row], kind="gpu", full=True)]
+    minimal_cpu = [s.label for s in default_shape_set([minimal_row], kind="cpu", full=True)]
+    assert set(minimal_gpu) == {
+        "a100:1@1h", "a100:1@2h", "a100:1@4h",
+        "a100:1@12h", "a100:1@24h", "a100:1@3d",
+        "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
+    }, sorted(minimal_gpu)
+    assert set(minimal_cpu) == {
         "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
         "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
         "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
         "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
-        "a100:1@1h", "a100:1@2h", "a100:1@4h",
-        "a100:1@12h", "a100:1@24h", "a100:1@3d",
-        "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
-    }, sorted(minimal)
+    }, sorted(minimal_cpu)
 
     # Case C — vendor-less rows: CPU dev + middle shapes still emit (they're
     # vendor-agnostic) but research/premium vendor-tagged shapes are dropped.
+    # GPU side is empty (no gpu_types).
     cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
     cpu_only_row.gpu_types = ()
-    cpu_only = [s.label for s in default_shape_set([cpu_only_row])]
+    assert default_shape_set([cpu_only_row], kind="gpu", full=True) == []
+    cpu_only = [s.label for s in default_shape_set([cpu_only_row], kind="cpu", full=True)]
     assert cpu_only == [
         "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
         "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
@@ -2735,6 +2865,32 @@ def run_self_test() -> int:
     assert ("q-cpu", "cpu:8@1h") in pair_labels
     assert ("q-cpu", "a100:1@1h") not in pair_labels  # skipped: cpu row, gpu shape
     assert ("q-a100", "a100:1@1h") in pair_labels
+
+    # collapse_uniform_walltimes: uniform-wait groups merge to one row,
+    # non-uniform groups pass through unchanged.
+    coll_row = AllocationRow(
+        "notchpeak", "co", "u", "", "q-coll", "q-coll",
+        qos_info=QOSInfo("q-coll", max_wall="3-00:00:00"), tags=("gpu",),
+    )
+    coll_row.gpu_types = ("h100nvl",)
+    h_1h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="01:00:00")
+    h_24h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="1-00:00:00")
+    h_72h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="3-00:00:00")
+    triple = [(coll_row, h_1h), (coll_row, h_24h), (coll_row, h_72h)]
+    coll_row.wait_by_shape = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 0}
+    merged = collapse_uniform_walltimes(triple)
+    assert len(merged) == 1, merged
+    merged_shape = merged[0][1]
+    assert merged_shape.label == "h100nvl:1@1h..3d", merged_shape.label
+    assert coll_row.wait_by_shape[merged_shape.label] == 0
+    # Non-uniform waits → no collapse.
+    coll_row.wait_by_shape = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 600}
+    assert len(collapse_uniform_walltimes(triple)) == 3
+    # Single-element group → unchanged.
+    single = collapse_uniform_walltimes([(coll_row, h_1h)])
+    assert len(single) == 1 and single[0][1] is h_1h
+    # None shape (no-wait mode) → passed through untouched.
+    assert collapse_uniform_walltimes([(coll_row, None)]) == [(coll_row, None)]
 
     parser_fmt = _build_parser()
     args_no_fmt = parser_fmt.parse_args([])
@@ -2822,13 +2978,17 @@ def main(argv: Sequence[str]) -> int:
         elif _user_supplied_shape_flags(args):
             shapes = [shape]
         else:
-            shapes = default_shape_set(rows, kind="cpu" if args.cpu else "gpu")
+            shapes = default_shape_set(
+                rows, kind="cpu" if args.cpu else "gpu", full=args.full
+            )
         if not args.show_unknown:
             rows = [r for r in rows if not _is_unprobeable_row(r)]
         predict_wait_times(rows, shapes=shapes)
     pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
     if include_wait and not args.show_unknown:
         pairs = [p for p in pairs if not _is_low_information_pair(*p)]
+        if not args.full:
+            pairs = collapse_uniform_walltimes(pairs)
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = (
