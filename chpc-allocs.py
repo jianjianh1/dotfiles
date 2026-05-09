@@ -296,14 +296,16 @@ chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
 wait time. With no args, this help is printed. Otherwise the default run
 probes 3 GPU shape tiers (dev / research / premium) at 1-3 walltimes each
-— see --list-tiers for the exact list.
+— see --list-tiers for the exact list. A one-line "Probing:" banner on
+stderr always shows the chosen mode + tier set + shapes before probing.
 
 Common entry points:
   chpc-allocs                       print this help
   chpc-allocs --gpu                 default 3-tier GPU probe
-  chpc-allocs --cpu                 same, but for CPU-only allocations
+  chpc-allocs --cpu                 default 3-tier CPU probe (CPU mode)
   chpc-allocs -t dev --gpu          only the dev tier (fast iteration probe)
-  chpc-allocs --wait-for SHAPE      a specific job, e.g. a100:4 / cpu:32
+  chpc-allocs a100:4                a single a100x4 job (positional shorthand)
+  chpc-allocs cpu:32                a single 32-core CPU job
   chpc-allocs --explain             preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
 """
@@ -312,8 +314,8 @@ EPILOG = """\
 Examples
 ────────
 Quickstart:
-  chpc-allocs --wait-for a100:4         # when can my a100x4 job run?
-  chpc-allocs --wait-for cpu:32         # ... or a 32-core CPU job
+  chpc-allocs a100:4                    # when can my a100x4 job run?
+  chpc-allocs cpu:32                    # ... or a 32-core CPU job
   chpc-allocs -t dev --gpu              # only the dev tier
   chpc-allocs -t research -t premium    # combine tiers
   chpc-allocs --explain                 # preview the default plan, run nothing
@@ -345,11 +347,22 @@ def _lower_choice(value: str) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        usage="chpc-allocs [--wait-for SHAPE | --shape SHAPE ... | --explain] "
+        usage="chpc-allocs [SHAPE] [--shape SHAPE ... | --explain] "
               "[FILTER ...] [OUTPUT ...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Positional shorthand: `chpc-allocs a100:4` / `cpu:32` / `32`. Forwarded
+    # into apply_wait_for_shorthand at the start of main(). Conflicts with
+    # --wait-for and other single-shape flags are caught there.
+    parser.add_argument(
+        "shape_pos", nargs="?", metavar="SHAPE", default=None,
+        help="Optional single-shape shorthand. Same grammar as --wait-for: "
+        "'a100:4' (GPU), 'cpu:32' (CPU mode + 32 cores), '32' (= cpu:32). "
+        "Conflicts with --wait-for, --shape, and "
+        "--cores/--gpus/--mem/--time/--nodes.",
     )
 
     # ----- Filtering -------------------------------------------------------
@@ -386,7 +399,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cpu", action="store_true",
         help="Only CPU allocations; switches the tier set to CPU shapes "
         "(cpu:16, cpu-intel:32, cpu-amd:32, cpu-amd:64). "
-        "Filter — for the probe shape see --cpus.",
+        "Mode/tier-set switch — for shape size see --cores.",
     )
     filt.add_argument(
         "--gpu-type", action="append", metavar="PATTERN",
@@ -462,25 +475,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "Probe shape",
         description=(
             "Customize the hypothetical job used to predict wait. With no "
-            "flags here, the implicit 3-tier shape set runs (see "
+            "shape flags, the implicit 3-tier shape set runs (see "
             "--list-tiers). Use -t/--tier to restrict to one or more tiers. "
-            "Setting any of --cpus/--nodes/--gpus/--mem/--time replaces the "
-            "multi-tier default with a single shape — pass --shape "
-            "(repeatable) to keep multi-shape probing."
+            "For a single custom shape, pass the positional SHAPE "
+            "('a100:4', 'cpu:32') or any of --cores/--nodes/--gpus/--mem/"
+            "--time. Pass --shape (repeatable) for multi-shape probing. "
+            "--tier is rejected when a single-shape mode is active."
         ),
     )
     shp.add_argument(
         "-t", "--tier", action="append", choices=TIER_NAMES,
         metavar="{dev,research,premium}",
         help="Restrict the implicit shape set to one or more tiers. "
-        "Repeatable. Default: all three. Ignored when --shape, --wait-for, "
-        "or --cpus/--gpus/--mem/--time/--nodes is set. See --list-tiers.",
+        "Repeatable. Default: all three. Conflicts with the positional "
+        "SHAPE, --shape, --wait-for, and --cores/--gpus/--mem/--time/--nodes "
+        "(use one or the other). See --list-tiers.",
     )
     shp.add_argument(
-        "--cpus", type=int, metavar="N", default=DEFAULT_PROBE_CPUS,
-        help=f"CPUs per task for a SINGLE-shape probe (default: "
-        f"{DEFAULT_PROBE_CPUS}). Setting this disables the multi-tier "
-        "default — pass --shape for multi-shape, or --cpu for the CPU tier set.",
+        "--cores", dest="cpus", type=int, metavar="N",
+        default=DEFAULT_PROBE_CPUS,
+        help=f"Cores per task for a SINGLE-shape probe (default: "
+        f"{DEFAULT_PROBE_CPUS}). Setting this switches off the multi-tier "
+        "default. Pair with --cpu to also switch the tier set / mode to CPU.",
+    )
+    # Hidden deprecated alias for --cores. Routes to the same dest; a
+    # one-line stderr deprecation notice fires from _warn_legacy_aliases.
+    shp.add_argument(
+        "--cpus", dest="cpus", type=int, metavar="N",
+        help=argparse.SUPPRESS,
     )
     shp.add_argument(
         "--nodes", type=int, metavar="N", default=DEFAULT_PROBE_NODES,
@@ -505,15 +527,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--shape", action="append", metavar="SPEC",
         help="Probe an additional job shape. Repeatable. Comma-separated "
         "positional shorthands ('a100:4', 'cpu:32', '32') or key=value tokens "
-        "(cpus=, mem=, time=, gpus=, nodes=). e.g. 'a100:4,mem=32G,time=24h'. "
+        "(cores=, mem=, time=, gpus=, nodes=). e.g. 'a100:4,mem=32G,time=24h'. "
         "Multi-shape output expands to one row per (allocation, shape) — see "
         "--pivot.",
     )
     shp.add_argument(
         "--wait-for", metavar="SPEC",
-        help="Shorthand for a single-job query. 'a100:4' = --gpus a100:4 + "
-        "--gpu-type a100; 'gpu:4' = --gpus 4 + --gpu; 'cpu:32' = --cpus 32 + "
-        "--cpu; '32' = same as cpu:32.",
+        help="Shorthand for a single-job query (same as the positional "
+        "SHAPE). 'a100:4' = --gpus a100:4 + --gpu-type a100; 'gpu:4' = "
+        "--gpus 4 + --gpu; 'cpu:32' = --cores 32 + --cpu; '32' = same as "
+        "cpu:32.",
     )
 
     # ----- Output ----------------------------------------------------------
@@ -1205,18 +1228,19 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     """Parse a --shape SPEC into a ProbeShape.
 
     Tokens (comma-separated, any order):
-      cpus=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
+      cores=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
+      (cpus=N is a deprecated alias for cores=N)
     Positional shorthands (first one wins for that slot):
-      cpu:N        -> cpus=N (CPU shape, no GPU)
+      cpu:N        -> cores=N (CPU shape, no GPU)
       <type>:N     -> gpus=<type>:N
       <type>       -> gpus=<type> (count 1)
-      N (digits)   -> cpus=N
+      N (digits)   -> cores=N
 
     Examples:
-      'a100:4'                    -> 1 a100, 1 CPU, 1-min wall
-      'a100:4,mem=32G,time=24h'   -> 4 a100, 32G mem, 24-hour wall
-      'cpu:32,mem=128G,time=12h'  -> 32 CPUs (CPU job), 128G, 12h
-      'cpus=8,mem=16G,gpus=h100nvl:1,time=4h'
+      'a100:4'                     -> 1 a100, 1 core, 1-min wall
+      'a100:4,mem=32G,time=24h'    -> 4 a100, 32G mem, 24-hour wall
+      'cpu:32,mem=128G,time=12h'   -> 32 cores (CPU job), 128G, 12h
+      'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
     """
     s = (spec or "").strip()
     if not s:
@@ -1246,12 +1270,12 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     f"empty value for {key!r}",
                     f"{key}=VALUE (e.g. {key}=8 for an integer, {key}=24h for a duration)",
                 )
-            if key == "cpus":
+            if key in ("cores", "cpus"):
                 if not val.isdigit() or int(val) <= 0:
                     raise _shape_error(
                         spec,
-                        f"cpus value {val!r} is not a positive integer",
-                        "cpus=N where N > 0 (e.g. cpus=8, cpus=32)",
+                        f"{key} value {val!r} is not a positive integer",
+                        f"{key}=N where N > 0 (e.g. {key}=8, {key}=32)",
                     )
                 cpus = int(val)
             elif key == "mem":
@@ -1284,7 +1308,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                 raise _shape_error(
                     spec,
                     f"unknown key {key!r}",
-                    "one of cpus=, mem=, time=, gpus=, nodes=",
+                    "one of cores=, mem=, time=, gpus=, nodes=",
                 )
         else:
             low = tok.lower()
@@ -1302,7 +1326,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     raise _shape_error(
                         spec,
                         f"bare integer {low!r} must be > 0",
-                        "N > 0 (treated as cpus=N)",
+                        "N > 0 (treated as cores=N)",
                     )
                 cpus = int(low)
             else:
@@ -3416,18 +3440,21 @@ def run_self_test() -> int:
     assert sh.gpu_type == "a100" and sh.gpu_count == 1
     sh = parse_shape_spec("32")
     assert sh.cpus == 32 and sh.gpu_type is None
-    sh = parse_shape_spec("cpus=8,mem=16G,gpus=h100nvl:1,time=4h")
+    sh = parse_shape_spec("cores=8,mem=16G,gpus=h100nvl:1,time=4h")
     assert sh.cpus == 8 and sh.gpu_type == "h100nvl" and sh.gpu_count == 1
     assert sh.label == "h100nvl:1@4h,16G", sh.label
+    # Deprecated cpus= key still parses (backwards compat).
+    sh = parse_shape_spec("cpus=8,time=4h")
+    assert sh.cpus == 8 and sh.label == "cpu:8@4h", sh.label
     # Multi-node prefix.
-    sh = parse_shape_spec("nodes=2,cpus=4,time=1h")
+    sh = parse_shape_spec("nodes=2,cores=4,time=1h")
     assert sh.nodes == 2 and sh.label == "2n*cpu:4@1h", sh.label
     # Wall short-format edges.
     assert _format_wall_short("00:01:00") == "1m"
     assert _format_wall_short("3-00:00:00") == "3d"
     assert _format_wall_short("01:30:00") == "1h30m"
     # Bad shape specs raise.
-    for bad in ("", "cpus=", "time=banana", "weird=1", "cpus=0"):
+    for bad in ("", "cores=", "cpus=", "time=banana", "weird=1", "cores=0"):
         try:
             parse_shape_spec(bad)
         except CommandError:
@@ -3634,6 +3661,8 @@ def run_self_test() -> int:
     # _user_supplied_shape_flags detects each shape-related override.
     parser = _build_parser()
     assert _user_supplied_shape_flags(parser.parse_args([])) is False
+    assert _user_supplied_shape_flags(parser.parse_args(["--cores", "16"])) is True
+    # --cpus is a hidden deprecated alias and must still register.
     assert _user_supplied_shape_flags(parser.parse_args(["--cpus", "16"])) is True
     assert _user_supplied_shape_flags(parser.parse_args(["--time", "4h"])) is True
     assert _user_supplied_shape_flags(parser.parse_args(["--shape", "a100:1"])) is True
@@ -3643,6 +3672,14 @@ def run_self_test() -> int:
     a = parser.parse_args(["--wait-for", "cpu:32"])
     apply_wait_for_shorthand(a)
     assert _user_supplied_shape_flags(a) is True
+    # Positional SHAPE parses cleanly and stays inert until main() copies it
+    # into args.wait_for. The conflict checks live in main(), not the parser.
+    a = parser.parse_args(["a100:4"])
+    assert a.shape_pos == "a100:4" and a.wait_for is None
+    a = parser.parse_args(["cpu:32"])
+    assert a.shape_pos == "cpu:32"
+    a = parser.parse_args(["32"])
+    assert a.shape_pos == "32"
 
     # expand_rows_by_shape filters skipped pairs (gpu shape on cpu row).
     a100_only = ProbeShape(gpu_type="a100", gpu_count=1)
@@ -3759,14 +3796,14 @@ def run_self_test() -> int:
     # Hidden aliases must not appear in --help. Use a word-boundary check so
     # '--no-avail' isn't mistakenly matched against '--no-availability'.
     for hidden in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
-                   "--guest", "--no-guest", "--avail"):
+                   "--guest", "--no-guest", "--avail", "--cpus"):
         assert not re.search(rf"{re.escape(hidden)}\b(?!-)", rendered), \
             f"hidden alias {hidden!r} leaked into --help"
     # New-name flags ARE in help.
     for visible in ("--no-availability", "--show-all", "--freecycle-only",
                     "--exclude-freecycle", "--guest-only", "--exclude-guest",
                     "--explain", "--pivot", "--no-json-help",
-                    "--list-tiers", "--quick"):
+                    "--list-tiers", "--quick", "--cores"):
         assert visible in rendered, f"expected {visible!r} in --help"
 
     # Better error messages: mem without unit + bad time + cpus=0 + bad gpu spec.
@@ -3779,11 +3816,11 @@ def run_self_test() -> int:
     else:
         raise AssertionError("parse_shape_spec('a100:4,mem=99') should have raised")
     try:
-        parse_shape_spec("cpus=0")
+        parse_shape_spec("cores=0")
     except CommandError as exc:
         assert "positive integer" in str(exc), str(exc)
     else:
-        raise AssertionError("cpus=0 should have raised")
+        raise AssertionError("cores=0 should have raised")
     try:
         parse_shape_spec("time=banana")
     except CommandError as exc:
@@ -4023,6 +4060,7 @@ _LEGACY_ALIAS_MAP = {
     "--no-guest": "--exclude-guest",
     "--show-unknown": "--show-all",
     "--no-avail": "--no-availability",
+    "--cpus": "--cores",
 }
 
 
@@ -4046,6 +4084,35 @@ def _warn_legacy_aliases(argv: Sequence[str], verbose: bool) -> None:
             f"[chpc-allocs] {alias} is a legacy alias; prefer {replacement}.",
             file=sys.stderr,
         )
+
+
+def _print_probe_banner(
+    args: argparse.Namespace, shapes: Sequence["ProbeShape"]
+) -> None:
+    """Print a one-line 'Probing:' banner to stderr before probes run.
+
+    Makes the chosen mode + tier set + shape count visible upfront, so a
+    misread flag combination (e.g. forgetting --cpu when probing CPU shapes)
+    is caught before the user reads the wait table. Suppressed under
+    --no-wait (no probe), --explain (it has its own plan output), and on
+    non-TTY stderr unless --verbose is set.
+    """
+    if args.no_wait or args.explain or not shapes:
+        return
+    if not (args.verbose or sys.stderr.isatty()):
+        return
+    mode = "CPU" if args.cpu else "GPU"
+    if args.shape:
+        labels = ", ".join(s.label for s in shapes[:4])
+        if len(shapes) > 4:
+            labels += f", +{len(shapes) - 4} more"
+        body = f"multi-shape · {len(shapes)} shapes ({labels})"
+    elif _user_supplied_shape_flags(args):
+        body = f"single shape ({shapes[0].label}) · {mode} mode"
+    else:
+        tiers = ",".join(args.tier or TIER_NAMES)
+        body = f"{mode} mode · tiers=[{tiers}] · {len(shapes)} shapes"
+    print(f"[chpc-allocs] Probing: {body}", file=sys.stderr)
 
 
 def _maybe_emit_format_auto_notice(auto_switched: bool, verbose: bool) -> None:
@@ -4085,7 +4152,34 @@ def main(argv: Sequence[str]) -> int:
             show_cpu=not args.gpu,
         ))
         return 0
+    # Positional SHAPE shares a slot with --wait-for and the single-shape
+    # flags; reject conflicts up front instead of silently overriding.
+    if args.shape_pos is not None:
+        if args.wait_for is not None:
+            raise CommandError(
+                f"positional SHAPE {args.shape_pos!r} conflicts with "
+                f"--wait-for {args.wait_for!r}; pick one"
+            )
+        if args.shape:
+            raise CommandError(
+                "positional SHAPE conflicts with --shape (multi-shape mode); "
+                "drop one"
+            )
+        if _user_supplied_shape_flags(args):
+            raise CommandError(
+                "positional SHAPE conflicts with --cores/--gpus/--mem/--time/"
+                "--nodes; pass either the positional or the explicit flags"
+            )
+        args.wait_for = args.shape_pos
     apply_wait_for_shorthand(args)
+    # --tier only steers the implicit multi-tier default; pairing it with a
+    # single-shape selection used to be silently ignored.
+    if args.tier and (args.shape or _user_supplied_shape_flags(args)):
+        raise CommandError(
+            "--tier applies to the multi-tier default; drop --tier or drop "
+            "the single-shape flags (positional SHAPE, --wait-for, --shape, "
+            "--cores, --gpus, --mem, --time, --nodes)"
+        )
     # Catches the awkward old-alias cross-pair combos (e.g. --freecycle
     # --exclude-freecycle) that the argparse mutex groups don't see.
     if args.freecycle_only and args.exclude_freecycle:
@@ -4093,7 +4187,7 @@ def main(argv: Sequence[str]) -> int:
     if args.guest_only and args.exclude_guest:
         raise CommandError("--guest-only and --exclude-guest cannot be used together")
     if args.cpus <= 0:
-        raise CommandError(f"--cpus must be > 0 (got {args.cpus})")
+        raise CommandError(f"--cores must be > 0 (got {args.cpus})")
     if args.nodes <= 0:
         raise CommandError(f"--nodes must be > 0 (got {args.nodes})")
     if parse_wall_seconds(args.time) is None:
@@ -4127,31 +4221,6 @@ def main(argv: Sequence[str]) -> int:
         gpu_count=gpu_count,
         time=args.time,
     )
-
-    # If the user passed --cpus/--nodes/--gpus/--mem/--time without --shape,
-    # the implicit multi-tier default is silently disabled and a single shape
-    # runs. Surface this so users don't wonder why they got one row instead
-    # of the usual ~20. Skip when --no-wait (no probe to be confused about),
-    # --explain (the plan output already shows the shape), or --shape (user
-    # opted into single-shape explicitly).
-    if (
-        not args.no_wait
-        and not args.shape
-        and not args.explain
-        and _user_supplied_shape_flags(args)
-        and (args.verbose or sys.stderr.isatty())
-    ):
-        tier_note = (
-            " (--tier is ignored without the multi-tier default)"
-            if args.tier else ""
-        )
-        print(
-            f"[chpc-allocs] using a single explicit shape ({shape.label}); "
-            f"the multi-tier default is disabled{tier_note}. Drop --cpus/"
-            "--nodes/--gpus/--mem/--time to restore it, or pass --shape "
-            "(repeatable) for multi-shape probing.",
-            file=sys.stderr,
-        )
 
     if args.list_gpus:
         print(format_gpu_summary(show_partition_availability()))
@@ -4214,6 +4283,7 @@ def main(argv: Sequence[str]) -> int:
         return 0
 
     if include_wait:
+        _print_probe_banner(args, shapes)
         if not args.show_all:
             rows = [r for r in rows if not _is_unprobeable_row(r)]
         predict_wait_times(rows, shapes=shapes, verbose=args.verbose)
