@@ -1128,86 +1128,98 @@ def _shortest_matching_gpu(
 
 def default_shape_set(
     rows: List["AllocationRow"],
+    kind: str = "gpu",
 ) -> List[ProbeShape]:
     """Build the implicit shape set used when no shape flags are given.
 
-    Four tiers, each probing every shape across a curated walltime spread
-    so the user sees queue-pressure scaling with wallclock length:
+    `kind="gpu"` (default) emits only the GPU half of each tier; `kind="cpu"`
+    emits only the CPU half. Walltime spreads scale with tier so the user
+    sees queue-pressure scaling with wallclock length.
 
     Tier 1 — dev (walltimes: 30m, 1h, 4h, 12h):
-      * `cpu:4` — generic, for compilation/build
-      * `<2080ti>:1` — small-GPU correctness check (if accessible)
+      * gpu: `<2080ti>:1` — small-GPU correctness check (if accessible)
+      * cpu: `cpu:4` — generic, for compilation/build
 
     Tier 2 — middle (walltimes: 1h, 4h, 12h, 24h):
-      * `cpu:16` — mid-sized parallel test/run
-      * `v100:1`, `3090:1` — small experiments (if accessible)
+      * gpu: `v100:1`, `3090:1` — small experiments (if accessible)
+      * cpu: `cpu:16` — mid-sized parallel test/run
 
     Tier 3 — research (walltimes: 1h, 2h, 4h, 12h, 24h, 72h):
-      * `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
+      * gpu: `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
+      * cpu: `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
         (one per detected vendor; each carries an sbatch `--constraint=`
         listing that vendor's microarch tokens)
-      * `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
 
     Tier 4 — premium (walltimes: 8h, 24h, 72h, 7d):
-      * `cpu-amd:64` — full Granite Genoa node
-      * `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
+      * gpu: `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
+      * cpu: `cpu-amd:64` — full Granite Genoa node
 
     For each GPU pattern, the shortest matching concrete type from sinfo
     is picked so `--gres=gpu:<type>:N` resolves cleanly.
     """
+    if kind not in ("gpu", "cpu"):
+        raise ValueError(f"default_shape_set: unknown kind {kind!r}")
     shapes: List[ProbeShape] = []
     vendors = {row.cpu_vendor for row in rows}
     gpu_types = {gt.lower() for row in rows for gt in row.gpu_types}
 
     # Tier 1 — dev
-    for wall in DEV_WALLTIMES:
-        shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
-    dev_gpu = _shortest_matching_gpu(gpu_types, DEV_GPU_PATTERN)
-    if dev_gpu:
+    if kind == "cpu":
         for wall in DEV_WALLTIMES:
-            shapes.append(ProbeShape(gpu_type=dev_gpu, gpu_count=1, time=wall))
+            shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
+    else:
+        dev_gpu = _shortest_matching_gpu(gpu_types, DEV_GPU_PATTERN)
+        if dev_gpu:
+            for wall in DEV_WALLTIMES:
+                shapes.append(ProbeShape(gpu_type=dev_gpu, gpu_count=1, time=wall))
 
     # Tier 2 — middle
-    for wall in MID_WALLTIMES:
-        shapes.append(ProbeShape(cpus=MID_CPU_CORES, time=wall))
-    for pattern in MID_GPU_PATTERNS:
-        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-        if gpu_type:
-            for wall in MID_WALLTIMES:
-                shapes.append(ProbeShape(gpu_type=gpu_type, gpu_count=1, time=wall))
+    if kind == "cpu":
+        for wall in MID_WALLTIMES:
+            shapes.append(ProbeShape(cpus=MID_CPU_CORES, time=wall))
+    else:
+        for pattern in MID_GPU_PATTERNS:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
+                for wall in MID_WALLTIMES:
+                    shapes.append(ProbeShape(gpu_type=gpu_type, gpu_count=1, time=wall))
 
     # Tier 3 — research
-    if _has_vendor(vendors, "intel"):
-        for wall in RESEARCH_WALLTIMES:
-            shapes.append(ProbeShape(
-                cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
-            ))
-    if _has_vendor(vendors, "amd"):
-        for wall in RESEARCH_WALLTIMES:
-            shapes.append(ProbeShape(
-                cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
-            ))
-    for pattern in RESEARCH_GPU_PATTERNS:
-        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-        if gpu_type:
+    if kind == "cpu":
+        if _has_vendor(vendors, "intel"):
             for wall in RESEARCH_WALLTIMES:
                 shapes.append(ProbeShape(
-                    gpu_type=gpu_type, gpu_count=1, time=wall
+                    cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
                 ))
+        if _has_vendor(vendors, "amd"):
+            for wall in RESEARCH_WALLTIMES:
+                shapes.append(ProbeShape(
+                    cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
+                ))
+    else:
+        for pattern in RESEARCH_GPU_PATTERNS:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
+                for wall in RESEARCH_WALLTIMES:
+                    shapes.append(ProbeShape(
+                        gpu_type=gpu_type, gpu_count=1, time=wall
+                    ))
 
     # Tier 4 — premium
-    if _has_vendor(vendors, "amd"):
-        for wall in PREMIUM_WALLTIMES:
-            shapes.append(ProbeShape(
-                cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
-            ))
-    for pattern, count in PREMIUM_GPU_SHAPES:
-        gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-        if gpu_type:
+    if kind == "cpu":
+        if _has_vendor(vendors, "amd"):
             for wall in PREMIUM_WALLTIMES:
                 shapes.append(ProbeShape(
-                    gpu_type=gpu_type, gpu_count=count, time=wall
+                    cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
                 ))
+    else:
+        for pattern, count in PREMIUM_GPU_SHAPES:
+            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+            if gpu_type:
+                for wall in PREMIUM_WALLTIMES:
+                    shapes.append(ProbeShape(
+                        gpu_type=gpu_type, gpu_count=count, time=wall
+                    ))
 
     return shapes
 
@@ -2810,7 +2822,7 @@ def main(argv: Sequence[str]) -> int:
         elif _user_supplied_shape_flags(args):
             shapes = [shape]
         else:
-            shapes = default_shape_set(rows)
+            shapes = default_shape_set(rows, kind="cpu" if args.cpu else "gpu")
         if not args.show_unknown:
             rows = [r for r in rows if not _is_unprobeable_row(r)]
         predict_wait_times(rows, shapes=shapes)
