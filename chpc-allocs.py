@@ -316,6 +316,8 @@ Examples:
   chpc-allocs --wait-for cpu:32            # focused: 32-core CPU wait
   chpc-allocs --no-wait                    # skip sbatch --test-only probe (faster)
   chpc-allocs --no-avail                   # skip live sinfo too (legacy view)
+  chpc-allocs --show-unknown               # include `?` waits, over-MaxWall shapes,
+                                           # empty-MaxWall QOSes, and 0-free rows
   chpc-allocs --sort cluster,qos           # restore alphabetical ordering (drop premium tier)
   chpc-allocs --list-gpus                  # cluster/partition GPU inventory (free/total)
   chpc-allocs --list-cpus                  # cluster/partition feature inventory + free
@@ -461,6 +463,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-wait", action="store_true",
         help="Skip the sbatch --test-only probe; omits the 'wait' column. "
         "Default behavior runs one probe per allocation in parallel (~1s).",
+    )
+    parser.add_argument(
+        "--show-unknown", action="store_true",
+        help="Include rows that would normally be hidden: probes that "
+        "returned '?', QOS rows with no MaxWall, shapes that exceed the "
+        "QOS MaxWall, and rows with zero free capacity. By default these "
+        "are dropped to keep the output focused on actionable predictions.",
     )
     parser.add_argument(
         "--cpus", type=int, metavar="N", default=DEFAULT_PROBE_CPUS,
@@ -1758,6 +1767,40 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
 _WAIT_SENTINEL = 10**12  # sorts unknown waits to the end (still < float('inf') headaches)
 
 
+def _is_unprobeable_row(row: "AllocationRow") -> bool:
+    """True if probing this row would yield no actionable wait info.
+
+    Rows without QOS MaxWall metadata or with zero free capacity always
+    yield useless probes; pre-filtering them avoids expensive sbatch
+    --test-only subprocess calls.
+    """
+    if not row.qos_info.max_wall:
+        return True
+    if not row.free_nodes or row.free_nodes.startswith("0/"):
+        return True
+    return False
+
+
+def _is_low_information_pair(
+    row: "AllocationRow", shape: "ProbeShape"
+) -> bool:
+    """True if the (row, shape) pair should be hidden from the default view.
+
+    Drops noise that's not actionable: failed probes, QOSes without
+    MaxWall metadata, shapes whose walltime exceeds the QOS MaxWall,
+    and rows with zero free capacity.
+    """
+    if row.wait_by_shape.get(shape.label) is None:
+        return True
+    if _is_unprobeable_row(row):
+        return True
+    qos_max = parse_wall_seconds(row.qos_info.max_wall)
+    shape_secs = parse_wall_seconds(shape.time)
+    if qos_max is not None and shape_secs is not None and shape_secs > qos_max:
+        return True
+    return False
+
+
 def expand_rows_by_shape(
     rows: List["AllocationRow"],
     shapes: Optional[List[ProbeShape]],
@@ -2094,6 +2137,10 @@ def json_output(
                 "CPU shapes pass `--constraint=` to sbatch so the probe "
                 "lands on matching hardware. Pairs where the shape can't "
                 "run on the row are dropped from output.",
+                "By default, rows are hidden when the probe returned `?`, "
+                "the QOS has no MaxWall, the shape's walltime exceeds the "
+                "QOS MaxWall, or the allocation has zero free capacity. "
+                "Pass --show-unknown to include them.",
             ],
         },
         "rows": records,
@@ -2608,6 +2655,46 @@ def run_self_test() -> int:
         "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
     ], cpu_only
 
+    # _is_low_information_pair drops the four noise categories.
+    li_shape = ProbeShape(cpus=4, time="01:00:00")
+    big_shape = ProbeShape(cpus=4, time="7-00:00:00")
+    ok_li_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-ok", "q-ok",
+        qos_info=QOSInfo("q-ok", max_wall="3-00:00:00"),
+    )
+    ok_li_row.free_nodes = "5/10"
+    ok_li_row.wait_by_shape = {li_shape.label: 0}
+    assert _is_low_information_pair(ok_li_row, li_shape) is False
+
+    unk_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-u", "q-u",
+        qos_info=QOSInfo("q-u", max_wall="3-00:00:00"),
+    )
+    unk_row.free_nodes = "5/10"
+    unk_row.wait_by_shape = {li_shape.label: None}
+    assert _is_low_information_pair(unk_row, li_shape) is True
+
+    no_wall_row = AllocationRow("notchpeak", "x", "u", "", "q-nw", "q-nw")
+    no_wall_row.free_nodes = "5/10"
+    no_wall_row.wait_by_shape = {li_shape.label: 0}
+    assert _is_low_information_pair(no_wall_row, li_shape) is True
+
+    short_qos_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-s", "q-s",
+        qos_info=QOSInfo("q-s", max_wall="3-00:00:00"),
+    )
+    short_qos_row.free_nodes = "5/10"
+    short_qos_row.wait_by_shape = {big_shape.label: 0}
+    assert _is_low_information_pair(short_qos_row, big_shape) is True
+
+    empty_cap_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-e", "q-e",
+        qos_info=QOSInfo("q-e", max_wall="3-00:00:00"),
+    )
+    empty_cap_row.free_nodes = "0/10"
+    empty_cap_row.wait_by_shape = {li_shape.label: 0}
+    assert _is_low_information_pair(empty_cap_row, li_shape) is True
+
     # Aliases for the downstream expand_rows_by_shape test below.
     a100_row = intel_a100_row
 
@@ -2724,8 +2811,12 @@ def main(argv: Sequence[str]) -> int:
             shapes = [shape]
         else:
             shapes = default_shape_set(rows)
+        if not args.show_unknown:
+            rows = [r for r in rows if not _is_unprobeable_row(r)]
         predict_wait_times(rows, shapes=shapes)
     pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
+    if include_wait and not args.show_unknown:
+        pairs = [p for p in pairs if not _is_low_information_pair(*p)]
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = (
