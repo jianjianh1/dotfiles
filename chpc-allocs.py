@@ -20,7 +20,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import StringIO
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 
 ASSOC_FIELDS = [
@@ -226,12 +226,39 @@ class AllocationRow:
     def is_default(self) -> bool:
         return bool(self.default_qos) and self.qos == self.default_qos
 
+    def _gpus_cell(
+        self,
+        shape: Optional["ProbeShape"],
+        gpu_filter_patterns: Optional[Sequence[str]],
+    ) -> str:
+        """Compact cell for the `gpus` column: which of this row's GPU types
+        explain the match. Combines `--gpu-type` filter hits with the per-row
+        resolution of any user-supplied shape gpu_type. Empty for CPU-only rows.
+        """
+        if not self.gpu_types:
+            return ""
+        seen: Set[str] = set()
+        out: List[str] = []
+        if gpu_filter_patterns:
+            for gt in gpu_types_matching(self.gpu_types, gpu_filter_patterns):
+                if gt not in seen:
+                    seen.add(gt)
+                    out.append(gt)
+        if shape is not None:
+            resolved = shape.resolved_gpu_type(self)
+            if resolved and resolved not in seen:
+                seen.add(resolved)
+                out.append(resolved)
+        return ",".join(out)
+
     def to_dict(
         self,
         wide: bool = False,
         include_avail: bool = False,
         include_wait: bool = True,
         shape: Optional["ProbeShape"] = None,
+        show_gpus: bool = False,
+        gpu_filter_patterns: Optional[Sequence[str]] = None,
     ) -> Dict[str, str]:
         # Column order is intentional: identity → probe → "will it fit" →
         # QOS metadata → wide diagnostics → live availability. Python dict
@@ -254,6 +281,8 @@ class AllocationRow:
             data["wait"] = _format_wait(wait_secs)
         data["wall"] = self.qos_info.max_wall
         data["tags"] = ",".join(self.tags)
+        if show_gpus:
+            data["gpus"] = self._gpus_cell(shape, gpu_filter_patterns)
         data["cpu_vendor"] = self.cpu_vendor
         data["default"] = "yes" if self.is_default else ""
         data["priority"] = self.qos_info.priority
@@ -359,9 +388,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # --wait-for and other single-shape flags are caught there.
     parser.add_argument(
         "shape_pos", nargs="?", metavar="SHAPE", default=None,
-        help="Optional single-shape shorthand. Same grammar as --wait-for: "
-        "'a100:4' (GPU), 'cpu:32' (CPU mode + 32 cores), '32' (= cpu:32). "
-        "Conflicts with --wait-for, --shape, and "
+        help="Optional single-shape shorthand. Same grammar as --wait-for / "
+        "--shape: 'a100:4' (GPU), 'cpu:32' (CPU + 32 cores), 'gpu:4' (any GPU "
+        "x 4), '32' (= cpu:32). Append '@DUR' to set walltime: 'a100:1@30m', "
+        "'cpu:32@12h'. Comma-separated key=value tokens (mem=, time=, nodes=) "
+        "also accepted. Conflicts with --wait-for, --shape, and "
         "--cores/--gpus/--mem/--time/--nodes.",
     )
 
@@ -404,7 +435,9 @@ def _build_parser() -> argparse.ArgumentParser:
     filt.add_argument(
         "--gpu-type", action="append", metavar="PATTERN",
         help="Only partitions exposing this GPU type. Glob ('h*', 'rtx*'); "
-        "bare 'a100' wraps to *a100*. See --list-gpus. "
+        "bare 'a100' wraps to *a100*. The matched types appear in a 'gpus' "
+        "column so you can see why each row qualified (e.g. 'h100' matches "
+        "rows that expose 'h100nvl'). See --list-gpus. "
         "Filter — for the probe shape see --gpus.",
     )
     filt.add_argument(
@@ -512,7 +545,10 @@ def _build_parser() -> argparse.ArgumentParser:
     shp.add_argument(
         "--gpus", metavar="SPEC",
         help="GPU(s) for a SINGLE-shape probe — 'a100:4', '4' (any type), "
-        "'a100' (one). Probe shape — for filtering see --gpu-type.",
+        "'a100' (one). Partial type names like 'h100' resolve per row to the "
+        "actual GRES name (e.g. 'h100nvl') so the probe succeeds; the "
+        "resolution appears in the 'gpus' column. "
+        "Probe shape — for filtering see --gpu-type.",
     )
     shp.add_argument(
         "--mem", metavar="SIZE",
@@ -534,9 +570,12 @@ def _build_parser() -> argparse.ArgumentParser:
     shp.add_argument(
         "--wait-for", metavar="SPEC",
         help="Shorthand for a single-job query (same as the positional "
-        "SHAPE). 'a100:4' = --gpus a100:4 + --gpu-type a100; 'gpu:4' = "
-        "--gpus 4 + --gpu; 'cpu:32' = --cores 32 + --cpu; '32' = same as "
-        "cpu:32.",
+        "SHAPE; full grammar shared with --shape). 'a100:4' = --gpus a100:4 "
+        "+ --gpu-type a100; 'gpu:4' = --gpus 4 + --gpu; 'cpu:32' = --cores "
+        "32 + --cpu; '32' = same as cpu:32. Append '@DUR' for walltime: "
+        "'a100:1@30m', 'cpu:32@12h', '32@1h'. Comma-separated key=value "
+        "tokens (mem=, time=, nodes=) also accepted, e.g. "
+        "'cpu:32,mem=128G,time=12h'.",
     )
 
     # ----- Output ----------------------------------------------------------
@@ -1108,13 +1147,31 @@ class ProbeShape:
             label = f"{self.nodes}n*{label}"
         return label
 
+    def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
+        """Return the row-specific GRES name for this shape's gpu_type, or None.
+
+        When the user passes a partial name like 'h100' but the row exposes
+        'h100nvl' as its actual GRES type, resolve to the shortest matching
+        gpu_type so `sbatch --test-only` accepts the probe. Falls back to the
+        literal `self.gpu_type` when the row has no gpu_types metadata or no
+        substring match — same behavior as before for nonsense input.
+        """
+        if not self.gpu_type:
+            return None
+        if not row.gpu_types:
+            return self.gpu_type
+        if self.gpu_type in row.gpu_types:
+            return self.gpu_type
+        return _shortest_matching_gpu(set(row.gpu_types), self.gpu_type) or self.gpu_type
+
     def gres_for(self, row: "AllocationRow") -> Optional[str]:
         """Return the --gres value for this row, or None to omit the flag."""
         if "gpu" not in row.tags:
             return None
         count = self.gpu_count if self.gpu_count is not None else 1
-        if self.gpu_type:
-            return f"gpu:{self.gpu_type}:{count}"
+        gtype = self.resolved_gpu_type(row)
+        if gtype:
+            return f"gpu:{gtype}:{count}"
         return f"gpu:{count}"
 
     def to_sbatch_args(self, row: "AllocationRow") -> List[str]:
@@ -1224,6 +1281,18 @@ def parse_gpu_spec(spec: str) -> Tuple[Optional[str], int]:
 _MEM_RE = re.compile(r"^\d+[kmgtKMGT][bB]?$")
 
 
+def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
+    """Validate a `prefix:N` shorthand (e.g. 'cpu:32', 'gpu:4') and return N."""
+    count_text = tok[len(prefix):].strip()
+    if not count_text or not count_text.isdigit() or int(count_text) <= 0:
+        raise _shape_error(
+            spec,
+            f"{prefix!r} shorthand needs a positive integer count, got {count_text!r}",
+            hint,
+        )
+    return int(count_text)
+
+
 def parse_shape_spec(spec: str) -> ProbeShape:
     """Parse a --shape SPEC into a ProbeShape.
 
@@ -1232,12 +1301,16 @@ def parse_shape_spec(spec: str) -> ProbeShape:
       (cpus=N is a deprecated alias for cores=N)
     Positional shorthands (first one wins for that slot):
       cpu:N        -> cores=N (CPU shape, no GPU)
+      gpu:N        -> any GPU type, count N
       <type>:N     -> gpus=<type>:N
       <type>       -> gpus=<type> (count 1)
       N (digits)   -> cores=N
+    Walltime suffix on any positional shorthand:
+      <shape>@<DUR> -> shape + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
 
     Examples:
       'a100:4'                     -> 1 a100, 1 core, 1-min wall
+      'a100:1@30m'                 -> 1 a100, 30-minute wall
       'a100:4,mem=32G,time=24h'    -> 4 a100, 32G mem, 24-hour wall
       'cpu:32,mem=128G,time=12h'   -> 32 cores (CPU job), 128G, 12h
       'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
@@ -1312,15 +1385,31 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                 )
         else:
             low = tok.lower()
-            if low.startswith("cpu:"):
-                count_text = low[4:].strip()
-                if not count_text or not count_text.isdigit() or int(count_text) <= 0:
+            if "@" in low:
+                head, _, dur = low.partition("@")
+                head = head.strip()
+                dur = dur.strip()
+                _AT_HINT = "<shape>@<duration>, e.g. 'a100:1@30m', 'cpu:32@12h'"
+                if not head:
+                    raise _shape_error(spec, f"empty shape before '@' in {tok!r}", _AT_HINT)
+                if not dur:
+                    raise _shape_error(spec, f"empty duration after '@' in {tok!r}", _AT_HINT)
+                if parse_wall_seconds(dur) is None:
                     raise _shape_error(
                         spec,
-                        f"'cpu:' shorthand needs a positive integer count, got {count_text!r}",
-                        "cpu:N where N > 0 (e.g. cpu:32)",
+                        f"duration {dur!r} after '@' is not a recognized walltime",
+                        "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 30m)",
                     )
-                cpus = int(count_text)
+                time = dur
+                low = head
+            if low.startswith("cpu:"):
+                cpus = _parse_prefix_count(low, "cpu:", spec, "cpu:N where N > 0 (e.g. cpu:32)")
+            elif low.startswith("gpu:"):
+                gpu_type = None
+                gpu_count = _parse_prefix_count(
+                    low, "gpu:", spec,
+                    "gpu:N where N > 0 (e.g. gpu:4); use <type>:N to pin a GPU type",
+                )
             elif low.isdigit():
                 if int(low) <= 0:
                     raise _shape_error(
@@ -1330,7 +1419,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     )
                 cpus = int(low)
             else:
-                gpu_type, gpu_count = parse_gpu_spec(tok)
+                gpu_type, gpu_count = parse_gpu_spec(low)
 
     return ProbeShape(
         nodes=nodes,
@@ -1586,32 +1675,47 @@ def _user_supplied_shape_flags(args: argparse.Namespace) -> bool:
 def apply_wait_for_shorthand(args: argparse.Namespace) -> None:
     """Translate `--wait-for SPEC` into the matching probe-shape + filter flags.
 
-    Forms:
-      cpu:N or bare N  -> --cpus N + --cpu
-      gpu:N            -> --gpus N + --gpu       (any GPU type)
-      TYPE[:N]         -> --gpus TYPE[:N] + adds TYPE to --gpu-type
+    Delegates parsing to `parse_shape_spec` so `--wait-for` accepts the same
+    grammar as `--shape` (including the `@DUR` walltime suffix), then maps the
+    resulting ProbeShape back onto the single-shape argparse slots:
+
+      cpu:N or bare N        -> --cores N + --cpu
+      gpu:N                  -> --gpus N + --gpu (any GPU type)
+      TYPE[:N]               -> --gpus TYPE[:N] + adds TYPE to --gpu-type
+      <shape>@<DUR>          -> sets --time DUR
+      `key=value` tokens     -> set the matching slot (mem=, time=, nodes=, ...)
     """
     spec = getattr(args, "wait_for", None)
     if not spec:
         return
-    s = spec.strip().lower()
-    err = f"invalid --wait-for spec: {spec!r}"
-    if not s:
-        raise CommandError(err)
-    if s.startswith("cpu:") or s.isdigit():
-        args.cpus = _parse_positive_int(s[4:] if s.startswith("cpu:") else s, err)
-        args.cpu = True
-        return
-    if s.startswith("gpu:"):
-        args.gpus = str(_parse_positive_int(s[4:], err))
-        args.gpu = True
-        return
+    err_prefix = f"invalid --wait-for spec: {spec!r}"
     try:
-        gtype, _count = parse_gpu_spec(s)
-    except CommandError:
-        raise CommandError(err) from None
-    args.gpus = s
-    args.gpu_type = (args.gpu_type or []) + [gtype]
+        shape = parse_shape_spec(spec)
+    except CommandError as e:
+        # parse_shape_spec already emits a multi-line message; preserve it as
+        # the inner detail under our --wait-for-specific prefix.
+        raise CommandError(f"{err_prefix}\n  {e}") from None
+
+    args.cpus = shape.cpus
+    args.nodes = shape.nodes
+    if shape.mem is not None:
+        args.mem = shape.mem
+    args.time = shape.time
+
+    if shape.gpu_type is not None:
+        if shape.gpu_count is not None:
+            args.gpus = f"{shape.gpu_type}:{shape.gpu_count}"
+        else:
+            args.gpus = shape.gpu_type
+        existing = list(args.gpu_type or [])
+        if shape.gpu_type not in existing:
+            existing.append(shape.gpu_type)
+        args.gpu_type = existing
+    elif shape.gpu_count is not None:
+        args.gpus = str(shape.gpu_count)
+        args.gpu = True
+    else:
+        args.cpu = True
 
 
 # Matches the relevant part of `sbatch --test-only`'s stderr line:
@@ -2020,16 +2124,33 @@ def _to_glob(pattern: str) -> str:
     return p
 
 
-def any_glob_match(values: Iterable[str], patterns: Iterable[str]) -> bool:
-    """True if any value matches any pattern (case-insensitive, fnmatch)."""
+def _iter_glob_matches(
+    values: Iterable[str], patterns: Iterable[str]
+) -> Iterator[str]:
+    """Yield each value (in input order) matching any pattern; case-insensitive."""
     globs = [_to_glob(p) for p in patterns]
     if not globs:
-        return False
+        return
     for value in values:
         v = value.lower()
         if any(fnmatch.fnmatchcase(v, g) for g in globs):
-            return True
-    return False
+            yield value
+
+
+def any_glob_match(values: Iterable[str], patterns: Iterable[str]) -> bool:
+    """True if any value matches any pattern (case-insensitive, fnmatch)."""
+    return next(_iter_glob_matches(values, patterns), None) is not None
+
+
+def gpu_types_matching(
+    values: Iterable[str], patterns: Iterable[str]
+) -> List[str]:
+    """Return the subset of `values` matching any pattern, preserving input order.
+
+    Same wildcard semantics as `any_glob_match`. Used to highlight which GPU
+    types in a row's `gpu_types` actually triggered a `--gpu-type` filter.
+    """
+    return list(_iter_glob_matches(values, patterns))
 
 
 def _matches_cpu_type_filter(row: "AllocationRow", patterns: Iterable[str]) -> bool:
@@ -2612,6 +2733,8 @@ def table_output(
     *,
     tty: Optional[bool] = None,
     term_width: Optional[int] = None,
+    show_gpus: bool = False,
+    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2619,6 +2742,8 @@ def table_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
+            show_gpus=show_gpus,
+            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2718,6 +2843,9 @@ def csv_output(
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
+    *,
+    show_gpus: bool = False,
+    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2725,6 +2853,8 @@ def csv_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
+            show_gpus=show_gpus,
+            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2746,6 +2876,9 @@ def json_output(
     include_avail: bool = False,
     include_wait: bool = True,
     include_help: bool = False,
+    *,
+    show_gpus: bool = False,
+    gpu_filter_patterns: Optional[Sequence[str]] = None,
 ) -> str:
     records = [
         row.to_dict(
@@ -2753,6 +2886,8 @@ def json_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
+            show_gpus=show_gpus,
+            gpu_filter_patterns=gpu_filter_patterns,
         )
         for row, shape in pairs
     ]
@@ -2785,6 +2920,12 @@ def json_output(
                 "free_cpus": "live free/total CPU count from sinfo",
                 "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
+                "gpus": "matched GPU types from this row that explain why it "
+                        "appears: --gpu-type filter hits plus the per-row "
+                        "GRES name resolved from a probe shape's gpu_type "
+                        "(e.g. user passed 'h100', row exposes 'h100nvl'). "
+                        "Shown when --gpu-type is set or an active probe "
+                        "shape carries a gpu_type.",
                 "cpu_features": "node feature tags for the partition (with --wide)",
                 "cpu_vendor": "derived from cpu_features: 'intel', 'amd', "
                         "'mixed', or '' when unknown. Filter via --cpu-type "
@@ -3369,6 +3510,30 @@ def run_self_test() -> int:
     assert ProbeShape(gpu_count=4).should_skip(cpu_row) is True
     # Untyped count-only on a GPU row still probes (any GPU is fine).
     assert ProbeShape(gpu_count=4).should_skip(gpu_row) is False
+
+    h100_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    h100_row.tags = ("gpu",)
+    h100_row.gpu_types = ("h100nvl", "l40s")
+    assert ProbeShape(gpu_type="h100nvl").resolved_gpu_type(h100_row) == "h100nvl"
+    assert ProbeShape(gpu_type="h100").resolved_gpu_type(h100_row) == "h100nvl"
+    assert ProbeShape(gpu_type="h100", gpu_count=4).gres_for(h100_row) == "gpu:h100nvl:4"
+    assert ProbeShape(gpu_type="h100").resolved_gpu_type(empty_gpu_row) == "h100"
+    assert ProbeShape(gpu_type="h100").resolved_gpu_type(gpu_row) == "h100"
+    assert ProbeShape().resolved_gpu_type(gpu_row) is None
+
+    # gpu_types_matching: returns the matching subset, preserves order, supports globs.
+    assert gpu_types_matching(("h100nvl", "l40s"), ["h100"]) == ["h100nvl"]
+    assert gpu_types_matching(("a100", "a100_80gb_pcie", "v100"), ["a100"]) == ["a100", "a100_80gb_pcie"]
+    assert gpu_types_matching(("h100nvl", "h200", "l40s"), ["h*"]) == ["h100nvl", "h200"]
+    assert gpu_types_matching(("v100",), ["a100"]) == []
+    assert gpu_types_matching((), ["h100"]) == []
+    assert gpu_types_matching(("h100nvl",), []) == []
+
+    # _gpus_cell: dedupes filter hits + per-row resolution; empty for CPU rows.
+    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100", gpu_count=1), ["h100"]) == "h100nvl"
+    assert h100_row._gpus_cell(None, ["h*"]) == "h100nvl"
+    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100"), None) == "h100nvl"
+    assert cpu_row._gpus_cell(ProbeShape(gpu_type="h100"), ["h100"]) == ""
     # Default probe never skips.
     assert ProbeShape().should_skip(gpu_row) is False
     assert ProbeShape().should_skip(cpu_row) is False
@@ -3391,8 +3556,32 @@ def run_self_test() -> int:
     assert a.cpus == 32 and a.cpu is True
     a = parser.parse_args(["--wait-for", "a100"])
     apply_wait_for_shorthand(a)
-    assert a.gpus == "a100" and "a100" in (a.gpu_type or [])
-    for bad in ("cpu:0", "gpu:abc", "cpu:", "gpu:0", "a100:0"):
+    assert a.gpus == "a100:1" and "a100" in (a.gpu_type or [])
+    a = parser.parse_args(["--wait-for", "a100:1@30m"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "a100:1" and a.time == "30m" and "a100" in (a.gpu_type or [])
+    a = parser.parse_args(["--wait-for", "a100@30m"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "a100:1" and a.time == "30m" and "a100" in (a.gpu_type or [])
+    a = parser.parse_args(["--wait-for", "cpu:32@12h"])
+    apply_wait_for_shorthand(a)
+    assert a.cpus == 32 and a.time == "12h" and a.cpu is True
+    a = parser.parse_args(["--wait-for", "32@1h"])
+    apply_wait_for_shorthand(a)
+    assert a.cpus == 32 and a.time == "1h" and a.cpu is True
+    a = parser.parse_args(["--wait-for", "gpu:4@2h"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "4" and a.time == "2h" and a.gpu is True
+    a = parser.parse_args(["--wait-for", "cpu:32,mem=128G,time=12h"])
+    apply_wait_for_shorthand(a)
+    assert a.cpus == 32 and a.mem == "128G" and a.time == "12h" and a.cpu is True
+    a = parser.parse_args(["--wait-for", "a100:4,time=24h"])
+    apply_wait_for_shorthand(a)
+    assert a.gpus == "a100:4" and a.time == "24h" and "a100" in (a.gpu_type or [])
+    for bad in (
+        "cpu:0", "gpu:abc", "cpu:", "gpu:0", "a100:0",
+        "a100:1@", "@30m", "a100:1@notatime", "cpu:0@30m",
+    ):
         a = parser.parse_args(["--wait-for", bad])
         try:
             apply_wait_for_shorthand(a)
@@ -3400,6 +3589,20 @@ def run_self_test() -> int:
             pass
         else:
             raise AssertionError(f"apply_wait_for_shorthand({bad!r}) should have raised")
+
+    sh = parse_shape_spec("a100:1@30m")
+    assert sh.gpu_type == "a100" and sh.gpu_count == 1 and sh.time == "30m"
+    sh = parse_shape_spec("cpu:32@12h")
+    assert sh.cpus == 32 and sh.gpu_type is None and sh.time == "12h"
+    sh = parse_shape_spec("gpu:4@2h")
+    assert sh.gpu_type is None and sh.gpu_count == 4 and sh.time == "2h"
+    for bad in ("a100:1@", "@30m", "cpu:32@notatime"):
+        try:
+            parse_shape_spec(bad)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
 
     prem_rows = [
         AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
@@ -4115,6 +4318,51 @@ def _print_probe_banner(
     print(f"[chpc-allocs] Probing: {body}", file=sys.stderr)
 
 
+def _maybe_emit_gpu_resolution_notice(
+    pairs: List[Tuple["AllocationRow", Optional["ProbeShape"]]],
+    verbose: bool,
+) -> None:
+    """Print a one-line stderr notice when a shape's literal `gpu_type` got
+    resolved to a different per-row GRES name (e.g. 'h100' → 'h100nvl').
+
+    Quiet when no resolution happened, when stderr isn't a TTY (and verbose
+    is off), or when the user already typed the exact GRES name.
+    """
+    by_literal: Dict[str, Dict[str, Set[str]]] = {}
+    for row, shape in pairs:
+        if shape is None or not shape.gpu_type:
+            continue
+        if shape.gpu_type in row.gpu_types:
+            continue
+        resolved = shape.resolved_gpu_type(row)
+        if not resolved or resolved == shape.gpu_type:
+            continue
+        by_literal.setdefault(shape.gpu_type, {}).setdefault(resolved, set()).add(
+            f"{row.cluster}/{row.qos}"
+        )
+    if not by_literal:
+        return
+    if not (verbose or sys.stderr.isatty()):
+        return
+    for literal, mapping in by_literal.items():
+        if len(mapping) == 1:
+            resolved = next(iter(mapping))
+            print(
+                f"[chpc-allocs] note: {literal!r} resolved to {resolved!r} "
+                f"for matching rows (use {resolved!r} to silence this).",
+                file=sys.stderr,
+            )
+        else:
+            parts = [
+                f"{','.join(sorted(rows_set))}→{resolved}"
+                for resolved, rows_set in mapping.items()
+            ]
+            print(
+                f"[chpc-allocs] note: {literal!r} resolved to: {'; '.join(parts)}.",
+                file=sys.stderr,
+            )
+
+
 def _maybe_emit_format_auto_notice(auto_switched: bool, verbose: bool) -> None:
     """Print a stderr line when --format auto-switched to JSON.
 
@@ -4317,18 +4565,30 @@ def main(argv: Sequence[str]) -> int:
             output = sbatch_output([row for row, _ in pairs])
     elif args.pivot:
         output = pivot_output(pairs)
-    elif fmt == "csv":
-        output = csv_output(pairs, wide, include_avail=include_avail, include_wait=include_wait)
-    elif fmt == "json":
-        output = json_output(
-            pairs,
-            wide,
-            include_avail=include_avail,
-            include_wait=include_wait,
-            include_help=not args.no_json_help,
-        )
     else:
-        output = table_output(pairs, wide, include_avail=include_avail, include_wait=include_wait)
+        gpu_filter_patterns = list(args.gpu_type or [])
+        any_shape_gpu = any(s is not None and s.gpu_type for _, s in pairs)
+        show_gpus = bool(gpu_filter_patterns) or any_shape_gpu
+        _maybe_emit_gpu_resolution_notice(pairs, args.verbose)
+        if fmt == "csv":
+            output = csv_output(
+                pairs, wide,
+                include_avail=include_avail, include_wait=include_wait,
+                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+            )
+        elif fmt == "json":
+            output = json_output(
+                pairs, wide,
+                include_avail=include_avail, include_wait=include_wait,
+                include_help=not args.no_json_help,
+                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+            )
+        else:
+            output = table_output(
+                pairs, wide,
+                include_avail=include_avail, include_wait=include_wait,
+                show_gpus=show_gpus, gpu_filter_patterns=gpu_filter_patterns,
+            )
 
     print(output)
     return 0
