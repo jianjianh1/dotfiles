@@ -294,11 +294,13 @@ DESCRIPTION = """\
 chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
 A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
-wait time. The default run probes 4 GPU shapes (dev / middle / research /
-premium) at 2-3 walltimes each — see --list-tiers for the exact list.
+wait time. With no args, this help is printed. Otherwise the default run
+probes 4 GPU shapes (dev / middle / research / premium) at 2-3 walltimes
+each — see --list-tiers for the exact list.
 
 Common entry points:
-  chpc-allocs                       default 4-tier GPU probe
+  chpc-allocs                       print this help
+  chpc-allocs --gpu                 default 4-tier GPU probe
   chpc-allocs --cpu                 same, but for CPU-only allocations
   chpc-allocs --wait-for SHAPE      a specific job, e.g. a100:4 / cpu:32
   chpc-allocs --explain             preview the probe plan, run nothing
