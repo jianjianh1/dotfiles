@@ -22,7 +22,7 @@ email = jianjian.huang@utah.edu
 | `init.defaultBranch` | `main` | Default branch for `git init` |
 | `core.editor` | `vim` | Commit message editor |
 | `core.autocrlf` | `input` | Convert CRLF → LF on commit, leave LF on checkout |
-| `core.pager` | `delta 2>/dev/null \|\| less` | Use delta for diffs, fall back to less |
+| `core.pager` | `delta 2>/dev/null \|\| less 2>/dev/null \|\| cat` | Use delta for diffs, fall back to less, then cat |
 | `interactive.diffFilter` | `delta --color-only 2>/dev/null \|\| cat` | Delta for interactive diffs |
 | `color.ui` | `auto` | Color output when terminal supports it |
 
@@ -49,7 +49,7 @@ email = jianjian.huang@utah.edu
 | `push.default` | `current` | Push current branch to same-named remote |
 | `push.autoSetupRemote` | `true` | Auto-track remote on first push |
 | `fetch.prune` | `true` | Delete stale remote-tracking branches |
-| `merge.conflictstyle` | `diff3` | Three-way merge conflicts (shows base) |
+| `merge.conflictstyle` | `zdiff3` | Three-way merge conflicts with zealous diff (shows base, less noise) |
 | `diff.colorMoved` | `default` | Highlight moved lines in diffs |
 | `rebase.autoStash` | `true` | Auto-stash before rebase, pop after |
 | `rerere.enabled` | `true` | Remember conflict resolutions |
