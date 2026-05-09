@@ -106,30 +106,23 @@ DEFAULT_PROBE_CPUS = 1
 DEFAULT_PROBE_NODES = 1
 DEFAULT_PROBE_TIME = "01:00:00"
 
-# Implicit default shape set, built when no shape flags are passed. Four
+# Implicit default shape set, built when no shape flags are passed. Three
 # tiers covering the typical HPC research lifecycle:
-#   1. dev      — compile / build / kernel correctness
-#   2. middle   — small experiments, scaling tests
-#   3. research — single-node CPU runs, single-GPU fine-tuning
-#   4. premium  — full-node CPU, multi-GPU DDP training
-# Each shape is probed at multiple walltimes (curated per tier) so the
+#   1. dev      — small-GPU iteration, build/test, scaling sanity checks
+#   2. research — single-node CPU runs, single-GPU fine-tuning
+#   3. premium  — full-node CPU, multi-GPU DDP training
+# Each shape is probed at one or more walltimes (curated per tier) so the
 # user sees how queue pressure scales with wallclock request length.
 # Shapes are gated on accessibility — a probe only emits if the user has
 # a row exposing the required vendor or GPU type.
 #
-# Two walltime tuples per tier: a trimmed default (2-3 endpoints) and a
-# `_FULL` sweep used when --full is passed. The trimmed tuples cut row
-# count roughly in half; rows that share the same wait across the
-# remaining walltimes are then merged by collapse_uniform_walltimes.
-DEV_WALLTIMES = ("00:30:00", "12:00:00")
-DEV_WALLTIMES_FULL = ("00:30:00", "01:00:00", "04:00:00", "12:00:00")
-DEV_CPU_CORES = 4
-DEV_GPU_PATTERN = "2080ti"
-
-MID_WALLTIMES = ("04:00:00", "1-00:00:00")  # 4h, 24h
-MID_WALLTIMES_FULL = ("01:00:00", "04:00:00", "12:00:00", "1-00:00:00")  # 1h, 4h, 12h, 24h
-MID_CPU_CORES = 16
-MID_GPU_PATTERNS = ("v100", "3090")
+# Two walltime tuples per tier: a trimmed default and a `_FULL` sweep used
+# when --full is passed. Rows that share the same wait across the
+# remaining walltimes are merged by collapse_uniform_walltimes.
+DEV_WALLTIMES = ("04:00:00",)  # 4h
+DEV_WALLTIMES_FULL = ("04:00:00", "1-00:00:00")  # 4h, 24h
+DEV_CPU_CORES = 16
+DEV_GPU_PATTERNS = ("2080ti", "v100", "3090")
 
 RESEARCH_WALLTIMES = ("01:00:00", "1-00:00:00", "3-00:00:00")  # 1h, 24h, 72h
 RESEARCH_WALLTIMES_FULL = (
@@ -274,9 +267,11 @@ class AllocationRow:
         if include_avail:
             if include_wait:
                 if shape is not None:
+                    data["tier"] = _shape_tier(shape)
                     data["shape"] = shape.label
                     wait_secs = self.wait_by_shape.get(shape.label)
                 else:
+                    data["tier"] = ""
                     data["shape"] = ""
                     wait_secs = None
                 data["wait"] = _format_wait(wait_secs)
@@ -295,13 +290,14 @@ chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
 A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
 wait time. With no args, this help is printed. Otherwise the default run
-probes 4 GPU shapes (dev / middle / research / premium) at 2-3 walltimes
-each — see --list-tiers for the exact list.
+probes 3 GPU shape tiers (dev / research / premium) at 1-3 walltimes each
+— see --list-tiers for the exact list.
 
 Common entry points:
   chpc-allocs                       print this help
-  chpc-allocs --gpu                 default 4-tier GPU probe
+  chpc-allocs --gpu                 default 3-tier GPU probe
   chpc-allocs --cpu                 same, but for CPU-only allocations
+  chpc-allocs -t dev --gpu          only the dev tier (fast iteration probe)
   chpc-allocs --wait-for SHAPE      a specific job, e.g. a100:4 / cpu:32
   chpc-allocs --explain             preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
@@ -313,8 +309,10 @@ Examples
 Quickstart:
   chpc-allocs --wait-for a100:4         # when can my a100x4 job run?
   chpc-allocs --wait-for cpu:32         # ... or a 32-core CPU job
+  chpc-allocs -t dev --gpu              # only the dev tier
+  chpc-allocs -t research -t premium    # combine tiers
   chpc-allocs --explain                 # preview the default plan, run nothing
-  chpc-allocs --list-tiers              # show the implicit 4-tier shape set
+  chpc-allocs --list-tiers              # show the implicit 3-tier shape set
 
 Common queries:
   chpc-allocs --cluster notchpeak --gpu        # GPU rows on notchpeak only
@@ -382,7 +380,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cpu_gpu.add_argument(
         "--cpu", action="store_true",
         help="Only CPU allocations; switches the tier set to CPU shapes "
-        "(cpu:4, cpu:16, cpu-intel:32, cpu-amd:32, cpu-amd:64). "
+        "(cpu:16, cpu-intel:32, cpu-amd:32, cpu-amd:64). "
         "Filter — for the probe shape see --cpus.",
     )
     filt.add_argument(
@@ -459,11 +457,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Probe shape",
         description=(
             "Customize the hypothetical job used to predict wait. With no "
-            "flags here, the implicit 4-tier shape set runs (see "
-            "--list-tiers). Setting any of --cpus/--nodes/--gpus/--mem/--time "
-            "replaces the multi-tier default with a single shape — pass "
-            "--shape (repeatable) to keep multi-shape probing."
+            "flags here, the implicit 3-tier shape set runs (see "
+            "--list-tiers). Use -t/--tier to restrict to one or more tiers. "
+            "Setting any of --cpus/--nodes/--gpus/--mem/--time replaces the "
+            "multi-tier default with a single shape — pass --shape "
+            "(repeatable) to keep multi-shape probing."
         ),
+    )
+    shp.add_argument(
+        "-t", "--tier", action="append", choices=TIER_NAMES,
+        metavar="{dev,research,premium}",
+        help="Restrict the implicit shape set to one or more tiers. "
+        "Repeatable. Default: all three. Ignored when --shape, --wait-for, "
+        "or --cpus/--gpus/--mem/--time/--nodes is set. See --list-tiers.",
     )
     shp.add_argument(
         "--cpus", type=int, metavar="N", default=DEFAULT_PROBE_CPUS,
@@ -1320,10 +1326,14 @@ def _shortest_matching_gpu(
     return min(matches, key=lambda s: (len(s), s))
 
 
+TIER_NAMES = ("dev", "research", "premium")
+
+
 def default_shape_set(
     rows: List["AllocationRow"],
     kind: str = "gpu",
     full: bool = False,
+    tiers: Optional[Sequence[str]] = None,
 ) -> List[ProbeShape]:
     """Build the implicit shape set used when no shape flags are given.
 
@@ -1331,24 +1341,24 @@ def default_shape_set(
     emits only the CPU half. Walltime spreads scale with tier so the user
     sees queue-pressure scaling with wallclock length.
 
-    `full=False` (default) uses a trimmed 2-3 walltimes per tier; `full=True`
+    `full=False` (default) uses a trimmed walltime set per tier; `full=True`
     restores the wider sweep listed in parentheses below.
 
-    Tier 1 — dev (walltimes: 30m, 12h; full: + 1h, 4h):
-      * gpu: `<2080ti>:1` — small-GPU correctness check (if accessible)
-      * cpu: `cpu:4` — generic, for compilation/build
+    `tiers=None` emits all three; pass an iterable subset of {"dev", "research",
+    "premium"} to filter (matches the `--tier` CLI flag).
 
-    Tier 2 — middle (walltimes: 4h, 24h; full: + 1h, 12h):
-      * gpu: `v100:1`, `3090:1` — small experiments (if accessible)
-      * cpu: `cpu:16` — mid-sized parallel test/run
+    Tier 1 — dev (walltime: 4h; full: + 24h):
+      * gpu: `2080ti:1`, `v100:1`, `3090:1` — small-GPU iteration / scaling
+        sanity (each emits only if accessible)
+      * cpu: `cpu:16` — generic build/test or small parallel run
 
-    Tier 3 — research (walltimes: 1h, 24h, 72h; full: + 2h, 4h, 12h):
+    Tier 2 — research (walltimes: 1h, 24h, 72h; full: + 2h, 4h, 12h):
       * gpu: `a100:1`, `h100:1`, `h200:1` — single-GPU fine-tuning
       * cpu: `cpu-intel:32`, `cpu-amd:32` — single-node CPU jobs
         (one per detected vendor; each carries an sbatch `--constraint=`
         listing that vendor's microarch tokens)
 
-    Tier 4 — premium (walltimes: 24h, 7d; full: + 8h, 72h):
+    Tier 3 — premium (walltimes: 24h, 7d; full: + 8h, 72h):
       * gpu: `a100:4`, `h100:4`, `a6000:4` — multi-GPU DDP training
       * cpu: `cpu-amd:64` — full Granite Genoa node
 
@@ -1357,8 +1367,14 @@ def default_shape_set(
     """
     if kind not in ("gpu", "cpu"):
         raise ValueError(f"default_shape_set: unknown kind {kind!r}")
+    unknown = [t for t in (tiers or ()) if t not in TIER_NAMES]
+    if unknown:
+        raise CommandError(
+            f"unknown tier(s): {', '.join(unknown)}\n"
+            f"  expected: {', '.join(TIER_NAMES)}"
+        )
+    active = set(tiers or TIER_NAMES)
     dev_walls = DEV_WALLTIMES_FULL if full else DEV_WALLTIMES
-    mid_walls = MID_WALLTIMES_FULL if full else MID_WALLTIMES
     research_walls = RESEARCH_WALLTIMES_FULL if full else RESEARCH_WALLTIMES
     premium_walls = PREMIUM_WALLTIMES_FULL if full else PREMIUM_WALLTIMES
     shapes: List[ProbeShape] = []
@@ -1366,68 +1382,63 @@ def default_shape_set(
     gpu_types = {gt.lower() for row in rows for gt in row.gpu_types}
 
     # Tier 1 — dev
-    if kind == "cpu":
-        for wall in dev_walls:
-            shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
-    else:
-        dev_gpu = _shortest_matching_gpu(gpu_types, DEV_GPU_PATTERN)
-        if dev_gpu:
+    if "dev" in active:
+        if kind == "cpu":
             for wall in dev_walls:
-                shapes.append(ProbeShape(gpu_type=dev_gpu, gpu_count=1, time=wall))
+                shapes.append(ProbeShape(cpus=DEV_CPU_CORES, time=wall))
+        else:
+            for pattern in DEV_GPU_PATTERNS:
+                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+                if gpu_type:
+                    for wall in dev_walls:
+                        shapes.append(ProbeShape(
+                            gpu_type=gpu_type, gpu_count=1, time=wall
+                        ))
 
-    # Tier 2 — middle
-    if kind == "cpu":
-        for wall in mid_walls:
-            shapes.append(ProbeShape(cpus=MID_CPU_CORES, time=wall))
-    else:
-        for pattern in MID_GPU_PATTERNS:
-            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-            if gpu_type:
-                for wall in mid_walls:
-                    shapes.append(ProbeShape(gpu_type=gpu_type, gpu_count=1, time=wall))
-
-    # Tier 3 — research
-    if kind == "cpu":
-        if _has_vendor(vendors, "intel"):
-            for wall in research_walls:
-                shapes.append(ProbeShape(
-                    cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
-                ))
-        if _has_vendor(vendors, "amd"):
-            for wall in research_walls:
-                shapes.append(ProbeShape(
-                    cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
-                ))
-    else:
-        for pattern in RESEARCH_GPU_PATTERNS:
-            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-            if gpu_type:
+    # Tier 2 — research
+    if "research" in active:
+        if kind == "cpu":
+            if _has_vendor(vendors, "intel"):
                 for wall in research_walls:
                     shapes.append(ProbeShape(
-                        gpu_type=gpu_type, gpu_count=1, time=wall
+                        cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="intel"
                     ))
+            if _has_vendor(vendors, "amd"):
+                for wall in research_walls:
+                    shapes.append(ProbeShape(
+                        cpus=RESEARCH_CPU_CORES, time=wall, cpu_vendor="amd"
+                    ))
+        else:
+            for pattern in RESEARCH_GPU_PATTERNS:
+                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+                if gpu_type:
+                    for wall in research_walls:
+                        shapes.append(ProbeShape(
+                            gpu_type=gpu_type, gpu_count=1, time=wall
+                        ))
 
-    # Tier 4 — premium
-    if kind == "cpu":
-        if _has_vendor(vendors, "amd"):
-            for wall in premium_walls:
-                shapes.append(ProbeShape(
-                    cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
-                ))
-    else:
-        for pattern, count in PREMIUM_GPU_SHAPES:
-            gpu_type = _shortest_matching_gpu(gpu_types, pattern)
-            if gpu_type:
+    # Tier 3 — premium
+    if "premium" in active:
+        if kind == "cpu":
+            if _has_vendor(vendors, "amd"):
                 for wall in premium_walls:
                     shapes.append(ProbeShape(
-                        gpu_type=gpu_type, gpu_count=count, time=wall
+                        cpus=PREMIUM_CPU_AMD_CORES, time=wall, cpu_vendor="amd"
                     ))
+        else:
+            for pattern, count in PREMIUM_GPU_SHAPES:
+                gpu_type = _shortest_matching_gpu(gpu_types, pattern)
+                if gpu_type:
+                    for wall in premium_walls:
+                        shapes.append(ProbeShape(
+                            gpu_type=gpu_type, gpu_count=count, time=wall
+                        ))
 
     return shapes
 
 
 def _shape_tier(shape: ProbeShape) -> str:
-    """Map a shape from `default_shape_set` back to its tier name (dev / middle /
+    """Map a shape from `default_shape_set` back to its tier name (dev /
     research / premium).
 
     Used by `format_tier_listing` so users can see which tier each shape lives
@@ -1440,16 +1451,12 @@ def _shape_tier(shape: ProbeShape) -> str:
             return "premium"
         if any(p in shape.gpu_type for p in RESEARCH_GPU_PATTERNS):
             return "research"
-        if any(p in shape.gpu_type for p in MID_GPU_PATTERNS):
-            return "middle"
-        if DEV_GPU_PATTERN in shape.gpu_type:
+        if any(p in shape.gpu_type for p in DEV_GPU_PATTERNS):
             return "dev"
         return "?"
     # CPU-side shapes.
     if shape.cpus == DEV_CPU_CORES:
         return "dev"
-    if shape.cpus == MID_CPU_CORES:
-        return "middle"
     if shape.cpus == RESEARCH_CPU_CORES:
         return "research"
     if shape.cpus >= PREMIUM_CPU_AMD_CORES:
@@ -1457,46 +1464,70 @@ def _shape_tier(shape: ProbeShape) -> str:
     return "?"
 
 
-def format_tier_listing(kind: str = "gpu", full: bool = False) -> str:
-    """Render the implicit shape set as a `tier  shape-label` table.
+def format_tier_listing(
+    full: bool = False,
+    show_gpu: bool = True,
+    show_cpu: bool = True,
+) -> str:
+    """Render the implicit shape set as a section-grouped, per-tier listing.
 
     Builds the shape set against a synthetic AllocationRow exposing every GPU
-    type and both CPU vendors, so all four tiers emit. Uses
+    type and both CPU vendors, so all three tiers emit. Uses
     `default_shape_set` directly — never duplicates tier definitions.
     """
+    blurb = {
+        "dev": "small-GPU iteration, build/test",
+        "research": "single-GPU fine-tuning, single-node CPU",
+        "premium": "multi-GPU DDP, full-node CPU",
+    }
     synthetic = AllocationRow(
         cluster="*", account="*", user="*", partition="*", qos="*", default_qos="",
         cpu_features=("skl", "zen4"),
     )
-    # Cover every GPU pattern referenced by the four-tier set. Concrete names
-    # are MIG-free so the shortest-match tiebreaker resolves cleanly.
+    # Cover every GPU pattern referenced by the tier set. Concrete names are
+    # MIG-free so the shortest-match tiebreaker resolves cleanly.
     synthetic.gpu_types = (
-        DEV_GPU_PATTERN,
-        *MID_GPU_PATTERNS,
+        *DEV_GPU_PATTERNS,
         *RESEARCH_GPU_PATTERNS,
         *(name for name, _ in PREMIUM_GPU_SHAPES),
     )
     synthetic.cpu_vendor = classify_cpu_vendor(synthetic.cpu_features)
-    shapes = default_shape_set([synthetic], kind=kind, full=full)
-    if not shapes:
-        return "(no shapes)"
-    header = (
-        f"Default {'GPU' if kind == 'gpu' else 'CPU'} tier set "
-        f"({'full sweep' if full else 'trimmed default'})."
-    )
-    tier_w = max(len(_shape_tier(s)) for s in shapes)
-    lines = [header, ""]
-    for s in shapes:
-        lines.append(f"  {_shape_tier(s).ljust(tier_w)}  {s.label}")
-    lines.append("")
+
+    by_tier: Dict[str, Dict[str, List[ProbeShape]]] = {
+        t: {"gpu": [], "cpu": []} for t in TIER_NAMES
+    }
+    if show_gpu:
+        for s in default_shape_set([synthetic], kind="gpu", full=full):
+            tier = _shape_tier(s)
+            if tier in by_tier:
+                by_tier[tier]["gpu"].append(s)
+    if show_cpu:
+        for s in default_shape_set([synthetic], kind="cpu", full=full):
+            tier = _shape_tier(s)
+            if tier in by_tier:
+                by_tier[tier]["cpu"].append(s)
+
+    sweep_label = "full sweep" if full else "trimmed default"
+    lines = [f"Default tier set ({sweep_label}).", ""]
+    for tier in TIER_NAMES:
+        gpu_shapes = by_tier[tier]["gpu"]
+        cpu_shapes = by_tier[tier]["cpu"]
+        if not gpu_shapes and not cpu_shapes:
+            continue
+        lines.append(f"{tier.upper():<8}  — {blurb[tier]}")
+        for s in gpu_shapes:
+            lines.append(f"  gpu     {s.label}")
+        for s in cpu_shapes:
+            lines.append(f"  cpu     {s.label}")
+        lines.append("")
+
     lines.append(
-        "Tip: in real runs a tier emits only when your allocations expose "
-        "the matching hardware."
+        "Tip: each tier emits only when your allocations expose the matching "
+        "hardware."
     )
+    lines.append("Filter to one tier:  chpc-allocs -t dev")
     if not full:
         lines.append("Add --full to see every walltime per tier.")
-    if kind == "gpu":
-        lines.append("Add --cpu to see the CPU tier set.")
     return "\n".join(lines)
 
 
@@ -2440,6 +2471,15 @@ def table_output(
     )
     columns = _select_table_columns(all_columns, wide, include_avail)
 
+    # Suppress redundant tier column when all rows share the same tier (e.g.
+    # the user passed -t dev, or the default set produced only one tier's
+    # worth of accessible shapes). The field still flows through CSV/JSON
+    # for machine consumers — only the human-facing table hides it.
+    if "tier" in columns:
+        tier_values = {r.get("tier", "") for r in records}
+        if len(tier_values) <= 1:
+            columns = [c for c in columns if c != "tier"]
+
     if tty is None:
         tty = sys.stdout.isatty()
     if term_width is None:
@@ -2569,6 +2609,10 @@ def json_output(
                 "qos": "QOS to pass via --qos; partition is usually the same name",
                 "partition": "partition name (with --wide); pass via --partition",
                 "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
+                "tier": "tier name for this shape — one of dev / research / "
+                        "premium when the shape came from the implicit tier "
+                        "set, '?' for user-supplied shapes that don't match a "
+                        "known tier. See --list-tiers / --tier.",
                 "shape": "probed job shape: '<gpu>:<count>@<wall>[,<mem>]' or "
                         "'cpu:<cpus>@<wall>[,<mem>]'. The 'wait' value on this row "
                         "is for THIS shape on THIS allocation. With multiple --shape "
@@ -2604,20 +2648,18 @@ def json_output(
                 "row per (allocation, shape) pair. The `shape` column tells "
                 "you which shape was probed for that wait.",
                 "Without any shape flags, the implicit default probes a "
-                "four-tier set covering the typical HPC research lifecycle, "
-                "each shape probed at multiple walltimes (small to large "
-                "experiments) so the user sees queue-pressure scaling with "
-                "wallclock length: dev (cpu:4, 2080ti:1 @30m,1h,4h,12h), "
-                "middle (cpu:16, v100:1, 3090:1 @1h,4h,12h,24h), research "
+                "three-tier set covering the typical HPC research lifecycle: "
+                "dev (cpu:16, 2080ti:1, v100:1, 3090:1 @4h,24h), research "
                 "(cpu-intel:32, cpu-amd:32, a100:1, h100:1, h200:1 "
                 "@1h,2h,4h,12h,24h,72h), premium (cpu-amd:64, a100:4, h100:4, "
-                "a6000:4 @8h,24h,72h,7d). Each shape is gated on "
-                "accessibility — vendor CPU shapes only emit if that vendor "
-                "is detected on the user's rows; GPU shapes only emit if "
-                "the user has a row exposing that GPU type. Vendor-tagged "
-                "CPU shapes pass `--constraint=` to sbatch so the probe "
-                "lands on matching hardware. Pairs where the shape can't "
-                "run on the row are dropped from output.",
+                "a6000:4 @8h,24h,72h,7d). Pass --tier dev|research|premium "
+                "(repeatable) to restrict to one or more tiers. Each shape "
+                "is gated on accessibility — vendor CPU shapes only emit if "
+                "that vendor is detected on the user's rows; GPU shapes only "
+                "emit if the user has a row exposing that GPU type. "
+                "Vendor-tagged CPU shapes pass `--constraint=` to sbatch so "
+                "the probe lands on matching hardware. Pairs where the "
+                "shape can't run on the row are dropped from output.",
                 "By default, rows are hidden when the probe returned `?`, "
                 "the QOS has no MaxWall, the shape's walltime exceeds the "
                 "QOS MaxWall, or the allocation has zero free capacity. "
@@ -2685,6 +2727,7 @@ def pivot_output(
     seen_keys: Set[Tuple[str, str, str]] = set()
     shape_labels: List[str] = []
     seen_labels: Set[str] = set()
+    shape_by_label: Dict[str, ProbeShape] = {}
     cells: Dict[Tuple[Tuple[str, str, str], str], str] = {}
     for row, shape in pairs:
         if shape is None:
@@ -2696,11 +2739,22 @@ def pivot_output(
         if shape.label not in seen_labels:
             seen_labels.add(shape.label)
             shape_labels.append(shape.label)
+            shape_by_label[shape.label] = shape
         wait_secs = row.wait_by_shape.get(shape.label)
         cells[(key, shape.label)] = _format_wait(wait_secs)
     if not row_keys or not shape_labels:
         return "(no matching allocations)"
-    headers = ["CLUSTER", "ACCOUNT", "QOS"] + [s.upper() for s in shape_labels]
+    # Prefix each shape header with its tier so users can visually group the
+    # columns (e.g. "[DEV] 2080TI:1@4H"). Suppress the bracket when only one
+    # tier is present — it'd be pure noise.
+    tier_by_label = {s: _shape_tier(shape_by_label[s]) for s in shape_labels}
+    if len(set(tier_by_label.values())) > 1:
+        shape_headers = [
+            f"[{tier_by_label[s].upper()}] {s.upper()}" for s in shape_labels
+        ]
+    else:
+        shape_headers = [s.upper() for s in shape_labels]
+    headers = ["CLUSTER", "ACCOUNT", "QOS"] + shape_headers
     body: List[List[str]] = []
     for key in row_keys:
         cluster, account, qos = key
@@ -3176,8 +3230,8 @@ def run_self_test() -> int:
     assert _to_sbatch_wall("01:30:00") == "01:30:00"
     assert _to_sbatch_wall("garbage") == "garbage"
 
-    # default_shape_set: four-tier probe set; each shape probed at multiple
-    # walltimes; each emission gated on accessibility.
+    # default_shape_set: three-tier probe set; each shape probed at one or
+    # more walltimes; each emission gated on accessibility.
     # Case A — full accessibility: Intel + AMD CPUs and 2080ti, v100, 3090,
     # a100, h100, h200, a6000 GPUs.
     intel_a100_row = AllocationRow(
@@ -3199,11 +3253,10 @@ def run_self_test() -> int:
     gpu_full = [s.label for s in default_shape_set(rows_full, kind="gpu", full=True)]
     cpu_full = [s.label for s in default_shape_set(rows_full, kind="cpu", full=True)]
     expected_gpu_full = {
-        # dev (30m, 1h, 4h, 12h)
-        "2080ti:1@30m", "2080ti:1@1h", "2080ti:1@4h", "2080ti:1@12h",
-        # middle (1h, 4h, 12h, 24h)
-        "v100:1@1h", "v100:1@4h", "v100:1@12h", "v100:1@24h",
-        "3090:1@1h", "3090:1@4h", "3090:1@12h", "3090:1@24h",
+        # dev (4h, 24h) — 2080ti, v100, 3090
+        "2080ti:1@4h", "2080ti:1@24h",
+        "v100:1@4h", "v100:1@24h",
+        "3090:1@4h", "3090:1@24h",
         # research (1h, 2h, 4h, 12h, 24h, 72h → 3d label)
         "a100:1@1h", "a100:1@2h", "a100:1@4h",
         "a100:1@12h", "a100:1@24h", "a100:1@3d",
@@ -3217,8 +3270,7 @@ def run_self_test() -> int:
         "a6000:4@8h", "a6000:4@24h", "a6000:4@3d", "a6000:4@7d",
     }
     expected_cpu_full = {
-        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
-        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+        "cpu:16@4h", "cpu:16@24h",
         "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
         "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
         "cpu-amd:32@1h", "cpu-amd:32@2h", "cpu-amd:32@4h",
@@ -3230,26 +3282,23 @@ def run_self_test() -> int:
     # Dedup picks the shortest matching concrete type per pattern (a100 over
     # a100_80gb_pcie; h100nvl is the shortest 'h100' match here).
     assert "a100_80gb_pcie:1@4h" not in gpu_full, gpu_full
-    # Tier ordering: dev → mid → research → premium; within tier, walltimes
-    # appear in declared order (shorter first).
+    # Tier ordering: dev → research → premium; within tier, walltimes appear
+    # in declared order (shorter first).
     cpu_idx = {label: idx for idx, label in enumerate(cpu_full)}
     gpu_idx = {label: idx for idx, label in enumerate(gpu_full)}
-    assert cpu_idx["cpu:4@30m"] < cpu_idx["cpu:4@12h"]
-    assert cpu_idx["cpu:4@12h"] < cpu_idx["cpu:16@1h"]
+    assert cpu_idx["cpu:16@4h"] < cpu_idx["cpu:16@24h"]
     assert cpu_idx["cpu:16@24h"] < cpu_idx["cpu-intel:32@1h"]
     assert cpu_idx["cpu-intel:32@1h"] < cpu_idx["cpu-intel:32@3d"]
     assert cpu_idx["cpu-intel:32@3d"] < cpu_idx["cpu-amd:64@8h"]
+    assert gpu_idx["2080ti:1@4h"] < gpu_idx["a100:1@1h"]
     assert gpu_idx["a100:1@1h"] < gpu_idx["a100:4@8h"]
     assert gpu_idx["a100:4@8h"] < gpu_idx["a100:4@7d"]
 
     # Trimmed default (full=False): fewer walltimes per tier, same tier set.
     gpu_trim = [s.label for s in default_shape_set(rows_full, kind="gpu")]
     expected_gpu_trim = {
-        # dev (30m, 12h)
-        "2080ti:1@30m", "2080ti:1@12h",
-        # middle (4h, 24h)
-        "v100:1@4h", "v100:1@24h",
-        "3090:1@4h", "3090:1@24h",
+        # dev (4h)
+        "2080ti:1@4h", "v100:1@4h", "3090:1@4h",
         # research (1h, 24h, 72h)
         "a100:1@1h", "a100:1@24h", "a100:1@3d",
         "h100nvl:1@1h", "h100nvl:1@24h", "h100nvl:1@3d",
@@ -3261,6 +3310,24 @@ def run_self_test() -> int:
     }
     assert set(gpu_trim) == expected_gpu_trim, sorted(set(gpu_trim) ^ expected_gpu_trim)
     assert len(gpu_trim) < len(gpu_full)
+
+    # tiers= filter: passing a subset restricts emissions; an empty/None tiers
+    # value emits all tiers; an unknown tier raises CommandError.
+    dev_only = [s.label for s in default_shape_set(rows_full, kind="gpu", tiers=["dev"])]
+    assert set(dev_only) == {"2080ti:1@4h", "v100:1@4h", "3090:1@4h"}, dev_only
+    rp = [
+        s.label for s in default_shape_set(
+            rows_full, kind="gpu", tiers=["research", "premium"]
+        )
+    ]
+    assert all(not lbl.startswith(("2080ti", "v100", "3090")) for lbl in rp), rp
+    assert any(lbl.startswith("a100:4") for lbl in rp), rp
+    try:
+        default_shape_set(rows_full, kind="gpu", tiers=["bogus"])
+    except CommandError:
+        pass
+    else:
+        raise AssertionError("default_shape_set should reject unknown tier names")
 
     # MIG-slice noise: shortest match wins over MIG variants.
     h200_row = AllocationRow(
@@ -3295,23 +3362,19 @@ def run_self_test() -> int:
         "a100:4@8h", "a100:4@24h", "a100:4@3d", "a100:4@7d",
     }, sorted(minimal_gpu)
     assert set(minimal_cpu) == {
-        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
-        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
+        "cpu:16@4h", "cpu:16@24h",
         "cpu-intel:32@1h", "cpu-intel:32@2h", "cpu-intel:32@4h",
         "cpu-intel:32@12h", "cpu-intel:32@24h", "cpu-intel:32@3d",
     }, sorted(minimal_cpu)
 
-    # Case C — vendor-less rows: CPU dev + middle shapes still emit (they're
+    # Case C — vendor-less rows: CPU dev shapes still emit (they're
     # vendor-agnostic) but research/premium vendor-tagged shapes are dropped.
     # GPU side is empty (no gpu_types).
     cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
     cpu_only_row.gpu_types = ()
     assert default_shape_set([cpu_only_row], kind="gpu", full=True) == []
     cpu_only = [s.label for s in default_shape_set([cpu_only_row], kind="cpu", full=True)]
-    assert cpu_only == [
-        "cpu:4@30m", "cpu:4@1h", "cpu:4@4h", "cpu:4@12h",
-        "cpu:16@1h", "cpu:16@4h", "cpu:16@12h", "cpu:16@24h",
-    ], cpu_only
+    assert cpu_only == ["cpu:16@4h", "cpu:16@24h"], cpu_only
 
     # _is_low_information_pair drops the four noise categories.
     li_shape = ProbeShape(cpus=4, time="01:00:00")
@@ -3641,31 +3704,47 @@ def run_self_test() -> int:
     assert parser_fmt.parse_args(["--list-tiers"]).list_tiers is True
     assert parser_fmt.parse_args(["--quick"]).quick is True
 
-    # format_tier_listing renders a table with both tier names and shape labels.
-    gpu_tiers = format_tier_listing(kind="gpu", full=False)
-    assert "Default GPU tier set" in gpu_tiers
-    assert "dev" in gpu_tiers and "premium" in gpu_tiers
-    assert "research" in gpu_tiers and "middle" in gpu_tiers
-    assert "@30m" in gpu_tiers and "@7d" in gpu_tiers
-    cpu_tiers = format_tier_listing(kind="cpu", full=False)
-    assert "Default CPU tier set" in cpu_tiers
-    assert "cpu:4@" in cpu_tiers
-    assert "cpu-intel:32" in cpu_tiers and "cpu-amd:32" in cpu_tiers
-    assert "cpu-amd:64" in cpu_tiers
-    # --full produces a strict superset of walltimes per tier.
-    gpu_tiers_full = format_tier_listing(kind="gpu", full=True)
-    # Trimmed dev is 30m + 12h; full adds 1h and 4h.
-    assert "@1h" in gpu_tiers_full and "@4h" in gpu_tiers_full
+    # format_tier_listing renders section-grouped sections with both gpu and
+    # cpu shapes under each tier (dev / research / premium).
+    listing = format_tier_listing(full=False)
+    assert "Default tier set" in listing
+    assert "DEV" in listing and "RESEARCH" in listing and "PREMIUM" in listing
+    assert "middle" not in listing.lower()  # collapsed into dev
+    # Default trimmed dev walltime is 4h.
+    assert "2080ti:1@4h" in listing and "cpu:16@4h" in listing
+    assert "cpu-intel:32" in listing and "cpu-amd:32" in listing
+    assert "cpu-amd:64" in listing
+    assert "@7d" in listing  # premium
+    # --full produces a strict superset of walltimes per tier (dev gains 24h).
+    listing_full = format_tier_listing(full=True)
+    assert "2080ti:1@24h" in listing_full and "cpu:16@24h" in listing_full
+    # show_gpu/show_cpu narrow output.
+    gpu_only = format_tier_listing(show_gpu=True, show_cpu=False)
+    assert "cpu:16" not in gpu_only and "2080ti:1@4h" in gpu_only
+    cpu_only_listing = format_tier_listing(show_gpu=False, show_cpu=True)
+    assert "2080ti" not in cpu_only_listing and "cpu:16@4h" in cpu_only_listing
 
     # _shape_tier maps each shape back to its tier label correctly.
-    assert _shape_tier(ProbeShape(cpus=DEV_CPU_CORES, time="30m")) == "dev"
-    assert _shape_tier(ProbeShape(cpus=MID_CPU_CORES, time="4h")) == "middle"
+    assert _shape_tier(ProbeShape(cpus=DEV_CPU_CORES, time="4h")) == "dev"
     assert _shape_tier(ProbeShape(cpus=RESEARCH_CPU_CORES, time="1h", cpu_vendor="intel")) == "research"
     assert _shape_tier(ProbeShape(cpus=PREMIUM_CPU_AMD_CORES, time="24h", cpu_vendor="amd")) == "premium"
     assert _shape_tier(ProbeShape(gpu_type="2080ti", gpu_count=1)) == "dev"
-    assert _shape_tier(ProbeShape(gpu_type="v100", gpu_count=1)) == "middle"
+    assert _shape_tier(ProbeShape(gpu_type="v100", gpu_count=1)) == "dev"
+    assert _shape_tier(ProbeShape(gpu_type="3090", gpu_count=1)) == "dev"
     assert _shape_tier(ProbeShape(gpu_type="a100", gpu_count=1)) == "research"
     assert _shape_tier(ProbeShape(gpu_type="a100", gpu_count=4)) == "premium"
+
+    # --tier flag parses and rejects unknown values.
+    assert parser_fmt.parse_args(["-t", "dev"]).tier == ["dev"]
+    assert parser_fmt.parse_args(
+        ["-t", "dev", "--tier", "research"]
+    ).tier == ["dev", "research"]
+    try:
+        parser_fmt.parse_args(["--tier", "bogus"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("--tier should reject unknown values")
 
     # Group membership: each flag must be DEFINED inside its group's section
     # (not just mentioned in DESCRIPTION/EPILOG). argparse renders each flag
@@ -3737,7 +3816,11 @@ def main(argv: Sequence[str]) -> int:
         args.no_availability = True
         args.no_usage = True
     if args.list_tiers:
-        print(format_tier_listing(kind="cpu" if args.cpu else "gpu", full=args.full))
+        print(format_tier_listing(
+            full=args.full,
+            show_gpu=not args.cpu,
+            show_cpu=not args.gpu,
+        ))
         return 0
     apply_wait_for_shorthand(args)
     # Catches the awkward old-alias cross-pair combos (e.g. --freecycle
@@ -3786,11 +3869,15 @@ def main(argv: Sequence[str]) -> int:
         and _user_supplied_shape_flags(args)
         and (args.verbose or sys.stderr.isatty())
     ):
+        tier_note = (
+            " (--tier is ignored without the multi-tier default)"
+            if args.tier else ""
+        )
         print(
             f"[chpc-allocs] using a single explicit shape ({shape.label}); "
-            "the multi-tier default is disabled. Drop --cpus/--nodes/--gpus/"
-            "--mem/--time to restore it, or pass --shape (repeatable) for "
-            "multi-shape probing.",
+            f"the multi-tier default is disabled{tier_note}. Drop --cpus/"
+            "--nodes/--gpus/--mem/--time to restore it, or pass --shape "
+            "(repeatable) for multi-shape probing.",
             file=sys.stderr,
         )
 
@@ -3842,7 +3929,10 @@ def main(argv: Sequence[str]) -> int:
             shapes = [shape]
         else:
             shapes = default_shape_set(
-                rows, kind="cpu" if args.cpu else "gpu", full=args.full
+                rows,
+                kind="cpu" if args.cpu else "gpu",
+                full=args.full,
+                tiers=args.tier,
             )
 
     # --explain: print the resolved plan and exit before any probes run.
