@@ -103,6 +103,29 @@ CPU_ARCH_ALIASES = {
     "genoa": "gen",
 }
 
+# Display name for each canonical short arch token. Surfaced by --list-cpus
+# so users see "Cascade Lake" rather than the sinfo feature token "csl".
+# Add new entries here when you extend CPU_ARCH_ALIASES so a future arch
+# isn't displayed only as its short token.
+CPU_ARCH_LONG = {
+    "skl": "Skylake",
+    "csl": "Cascade Lake",
+    "icx": "Ice Lake",
+    "spr": "Sapphire Rapids",
+    "emr": "Emerald Rapids",
+    "cpx": "Cooper Lake",
+    "bro": "Broadwell",
+    "hsw": "Haswell",
+    "ivy": "Ivy Bridge",
+    "snb": "Sandy Bridge",
+    "knl": "Knights Landing",
+    "nap": "Naples",
+    "rom": "Rome",
+    "mil": "Milan",
+    "gen": "Genoa",
+    **{f"zen{i}": f"Zen {i}" for i in range(1, 6)},
+}
+
 # `zen<N>` literals (zen1..zen5) recognized as arch atoms. Stored in cpu_archs
 # verbatim so `--constraint=zen4` filters to that exact feature, while bare
 # `zen` falls through CPU_ARCH_ALIASES into the substring-match path.
@@ -838,7 +861,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inv.add_argument(
         "--list-cpus", action="store_true",
-        help="Cluster/partition CPU features inventory from sinfo.",
+        help=(
+            "Cluster/partition CPU inventory from sinfo: vendor, "
+            "architecture, and per-node layout (cores×sockets, memory). "
+            "SLURM does not expose specific CPU SKU strings on this cluster."
+        ),
     )
 
     return parser
@@ -1108,11 +1135,17 @@ class PartitionAvail:
         self.cpus_free = 0
         self.cpus_total = 0
         self.gpus: Dict[str, List[int]] = {}  # type -> [free, total]
+        # (arch_short, cores_per_socket, sockets, mem_gib) -> node count.
+        # arch_short is "" when no feature classifies; mem_gib is mem_mb//1024.
+        self.node_types: Dict[Tuple[str, int, int, int], int] = {}
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
         slot[0] += free
         slot[1] += total
+
+    def add_node_type(self, sig: Tuple[str, int, int, int]) -> None:
+        self.node_types[sig] = self.node_types.get(sig, 0) + 1
 
 
 def _strip_partition_marker(name: str) -> str:
@@ -1120,12 +1153,31 @@ def _strip_partition_marker(name: str) -> str:
     return name[:-1] if name.endswith("*") else name
 
 
+def _node_arch_short(features_blob: str) -> str:
+    """Resolve a node's feature blob to a canonical short arch token, or "".
+
+    Tokenizes lowercased comma-separated features and returns the first one
+    that classifies via _canon_cpu_arch. Used to bucket per-node layout
+    signatures even on mixed-vendor partitions.
+    """
+    if not features_blob or features_blob == "(null)":
+        return ""
+    for tok in features_blob.lower().split(","):
+        canon = _canon_cpu_arch(tok.strip())
+        if canon:
+            return canon
+    return ""
+
+
 def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
     """Return {cluster: {partition: PartitionAvail}} from a single per-node sinfo.
 
     Counts nodes_total/cpus_total/gpus_total from configured capacity (every
     listed node), but only credits a node's idle CPUs/GPUs as 'free' when the
-    node state is idle or mix (and not '*'/non-responding).
+    node state is idle or mix (and not '*'/non-responding). Also accumulates
+    per-node layout signatures (arch, cores_per_socket, sockets, mem_gib) into
+    bucket.node_types so --list-cpus can surface specific node types per
+    partition.
     """
     sinfo = require_tool("sinfo")
     args = [
@@ -1134,7 +1186,9 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         "-h",
         "-N",
         "-O",
-        "Cluster:|,NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Gres:1024|,GresUsed:1024|",
+        ("Cluster:|,NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,"
+         "Gres:1024|,GresUsed:1024|,Cores:|,Sockets:|,Memory:|,"
+         "Features:1024"),
     ]
     result: Dict[str, Dict[str, PartitionAvail]] = {}
     try:
@@ -1144,10 +1198,10 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
     for line in output.splitlines():
         if not line.strip():
             continue
-        # The Gres/GresUsed columns are 1024-wide so the line is fixed-width;
-        # split off the first 5 pipe-fields, the rest is the two GRES blobs.
+        # Gres/GresUsed/Features are 1024-wide so the line is fixed-width;
+        # split into 11 pipe-delimited fields.
         fields = line.split("|")
-        if len(fields) < 7:
+        if len(fields) < 11:
             continue
         cluster = fields[0].strip()
         node = fields[1].strip()
@@ -1156,6 +1210,10 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         cpus_state = fields[4].strip()
         gres_total = fields[5].strip()
         gres_used = fields[6].strip()
+        cores_per_socket_s = fields[7].strip()
+        sockets_s = fields[8].strip()
+        memory_s = fields[9].strip()
+        features_blob = fields[10].strip()
         if not cluster or not partition or not node:
             continue
         free_node = is_free_node_state(state)
@@ -1173,6 +1231,15 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             used = gpu_used.get(gtype, 0)
             free = max(0, total - used) if free_node else 0
             bucket.add_gpu(gtype, free, total)
+
+        try:
+            cps = int(cores_per_socket_s)
+            sockets = int(sockets_s)
+            mem_mb = int(memory_s)
+        except ValueError:
+            continue
+        arch_short = _node_arch_short(features_blob)
+        bucket.add_node_type((arch_short, cps, sockets, mem_mb // 1024))
     return result
 
 
@@ -2025,27 +2092,64 @@ def resolve_row_gpu_types(
     return tuple(sorted(seen))
 
 
+def _render_simple_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Render a left-justified text table: HEADERS, dashed rule, then rows."""
+    cols = len(headers)
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i in range(cols):
+            cell = row[i] if i < len(row) else ""
+            if len(cell) > widths[i]:
+                widths[i] = len(cell)
+    header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    rule_line = "  ".join("-" * widths[i] for i in range(cols))
+    out = [header_line, rule_line]
+    for row in rows:
+        out.append(
+            "  ".join(
+                (row[i] if i < len(row) else "").ljust(widths[i])
+                for i in range(cols)
+            )
+        )
+    return "\n".join(out)
+
+
 def format_gpu_summary(
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
 ) -> str:
-    """Render cluster/partition GPU inventory as 'gtype:free/total'."""
-    pairs: List[Tuple[str, str, Dict[str, List[int]]]] = []
-    for cluster, parts in partition_avail.items():
-        for partition, bucket in parts.items():
-            if bucket.gpus:
-                pairs.append((cluster, partition, bucket.gpus))
-    if not pairs:
+    """Render GPU inventory as a table with one row per (cluster, partition, gtype).
+
+    Annotates each GRES token with vendor, NVIDIA generation, and SM compute
+    capability via _classify_gpu_token. Unrecognized tokens still render —
+    GENERATION/SM cells are blank rather than absent.
+    """
+    rows: List[List[str]] = []
+    for cluster in sorted(partition_avail):
+        for partition in sorted(partition_avail[cluster]):
+            bucket = partition_avail[cluster][partition]
+            if not bucket.gpus:
+                continue
+            nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}"
+            cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}"
+            for gtype, (free, total) in sorted(bucket.gpus.items()):
+                cls = _classify_gpu_token(gtype)
+                if cls is None:
+                    vendor, gen, sm_cell = "", "", ""
+                else:
+                    gen, sm = cls
+                    vendor = "nvidia"
+                    sm_cell = f"sm_{sm}"
+                rows.append([
+                    cluster, partition, gtype, vendor, gen, sm_cell,
+                    f"{free}/{total}", nodes_ft, cpus_ft,
+                ])
+    if not rows:
         return "(no GPU partitions found)"
-    cluster_w = max(len(c) for c, _, _ in pairs)
-    partition_w = max(len(p) for _, p, _ in pairs)
-    lines = []
-    for cluster, partition, gpus in sorted(pairs):
-        rendered = ", ".join(
-            f"{gtype}:{free}/{total}"
-            for gtype, (free, total) in sorted(gpus.items())
-        )
-        lines.append(f"{cluster.ljust(cluster_w)}  {partition.ljust(partition_w)}  {rendered}")
-    return "\n".join(lines)
+    return _render_simple_table(
+        ["CLUSTER", "PARTITION", "GTYPE", "VENDOR", "GENERATION", "SM",
+         "FREE/TOTAL", "NODES_F/T", "CPUS_F/T"],
+        rows,
+    )
 
 
 def parse_features_line(line: str) -> Tuple[str, str, Set[str]]:
@@ -2092,39 +2196,107 @@ def resolve_row_features(
     return tuple(sorted(seen))
 
 
+_VENDOR_DISPLAY = {"intel": "Intel", "amd": "AMD", "mixed": "mixed"}
+
+# Cap on the number of distinct node-type signatures rendered per partition
+# in --list-cpus. Guest partitions can have 30+ unique configs; uncapped
+# they blow out the column width past usable terminal sizes.
+_NODE_TYPE_TOP_N = 3
+
+
+def _format_mem_gib(mem_gib: int) -> str:
+    """Render a node's memory tier compactly: '746G' or '1.5T'."""
+    if mem_gib < 1024:
+        return f"{mem_gib}G"
+    tib = mem_gib / 1024
+    return f"{tib:.1f}T"
+
+
+def _format_node_type(sig: Tuple[str, int, int, int], count: int) -> str:
+    """Render a (arch, cores_per_socket, sockets, mem_gib) signature with count."""
+    arch, cores, sockets, mem_gib = sig
+    arch_long = CPU_ARCH_LONG.get(arch, arch) if arch else "?"
+    return f"{arch_long} {cores}c×{sockets} {_format_mem_gib(mem_gib)} ×{count}"
+
+
+def _arch_display_list(feats: Iterable[str]) -> str:
+    """Return a comma-joined list of long-form architecture names for FEATS.
+
+    Each feature is canonicalized via _canon_cpu_arch, then mapped to its
+    long-form display name via CPU_ARCH_LONG. Unknown short tokens fall
+    through unchanged so a future arch addition is still visible.
+    """
+    seen: Dict[str, None] = {}
+    for feat in feats or ():
+        canon = _canon_cpu_arch(feat)
+        if not canon:
+            continue
+        seen[CPU_ARCH_LONG.get(canon, canon)] = None
+    return ", ".join(sorted(seen))
+
+
 def format_cpu_summary(
     partition_features: Dict[str, Dict[str, Set[str]]],
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
 ) -> str:
-    """Render cluster/partition feature inventory; appends node/cpu free/total
-    when availability data is provided."""
+    """Render CPU-only partitions as a table.
+
+    GPU partitions (those whose PartitionAvail.gpus is non-empty) are filtered
+    out so the listing complements --list-gpus. Architecture names are
+    long-form (e.g. "Cascade Lake", "Genoa") via CPU_ARCH_LONG.
+
+    With partition_avail: emits NODE_TYPE (per-partition node-layout
+    signatures) and availability columns; ARCHITECTURE is omitted because
+    each NODE_TYPE entry already carries its arch.
+
+    Without partition_avail: emits an ARCHITECTURE column and no filtering.
+    """
     if not partition_features:
         return "(no partition features found)"
-    pairs: List[Tuple[str, str, Set[str]]] = []
-    for cluster in partition_features:
-        for partition, feats in partition_features[cluster].items():
-            pairs.append((cluster, partition, feats))
-    if not pairs:
-        return "(no partition features found)"
-    cluster_w = max(len(c) for c, _, _ in pairs)
-    partition_w = max(len(p) for _, p, _ in pairs)
-
-    def _avail_for(cluster: str, partition: str) -> str:
-        if partition_avail is None:
-            return ""
-        bucket = partition_avail.get(cluster, {}).get(partition)
-        if bucket is None:
-            return ""
-        return f"  nodes:{bucket.nodes_free}/{bucket.nodes_total} cpus:{bucket.cpus_free}/{bucket.cpus_total}"
-
-    lines = []
-    for cluster, partition, feats in sorted(pairs):
-        rendered = ",".join(sorted(feats))
-        lines.append(
-            f"{cluster.ljust(cluster_w)}  {partition.ljust(partition_w)}  "
-            f"{rendered}{_avail_for(cluster, partition)}"
-        )
-    return "\n".join(lines)
+    rows: List[List[str]] = []
+    show_avail = partition_avail is not None
+    for cluster in sorted(partition_features):
+        for partition in sorted(partition_features[cluster]):
+            feats = partition_features[cluster][partition]
+            avail_bucket = (
+                partition_avail.get(cluster, {}).get(partition)
+                if partition_avail is not None
+                else None
+            )
+            if avail_bucket is not None and avail_bucket.gpus:
+                continue
+            vendor_short = classify_cpu_vendor(feats)
+            vendor = _VENDOR_DISPLAY.get(vendor_short, "")
+            row = [cluster, partition, vendor]
+            if show_avail:
+                node_types = avail_bucket.node_types if avail_bucket else {}
+                if node_types:
+                    sorted_sigs = sorted(
+                        node_types.items(), key=lambda kv: (-kv[1], kv[0])
+                    )
+                    head = sorted_sigs[:_NODE_TYPE_TOP_N]
+                    rendered = "; ".join(_format_node_type(s, c) for s, c in head)
+                    if len(sorted_sigs) > _NODE_TYPE_TOP_N:
+                        rendered += f"; +{len(sorted_sigs) - _NODE_TYPE_TOP_N} more"
+                    row.append(rendered)
+                else:
+                    row.append("")
+                if avail_bucket is None:
+                    row.extend(["", ""])
+                else:
+                    row.append(f"{avail_bucket.nodes_free}/{avail_bucket.nodes_total}")
+                    row.append(f"{avail_bucket.cpus_free}/{avail_bucket.cpus_total}")
+            else:
+                row.append(_arch_display_list(feats))
+            rows.append(row)
+    if not rows:
+        return "(no CPU-only partitions found)"
+    headers = ["CLUSTER", "PARTITION", "VENDOR"]
+    if show_avail:
+        headers += ["NODE_TYPE", "NODES_F/T", "CPUS_F/T"]
+    else:
+        headers.append("ARCHITECTURE")
+    return _render_simple_table(headers, rows)
 
 
 def attach_metadata(
@@ -3239,7 +3411,12 @@ def run_self_test() -> int:
     fake_avail = {"notchpeak": {"notchpeak-gpu": PartitionAvail()}}
     fake_avail["notchpeak"]["notchpeak-gpu"].add_gpu("a100", 3, 4)
     summary = format_gpu_summary(fake_avail)
-    assert "notchpeak-gpu" in summary and "a100:3/4" in summary
+    assert "CLUSTER" in summary and "GTYPE" in summary, summary
+    assert "notchpeak-gpu" in summary, summary
+    # a100 row carries vendor/generation/SM annotations.
+    a100_line = next(ln for ln in summary.splitlines() if "a100" in ln)
+    assert "nvidia" in a100_line and "ampere" in a100_line, a100_line
+    assert "sm_80" in a100_line and "3/4" in a100_line, a100_line
 
     fc_row = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
@@ -3288,7 +3465,17 @@ def run_self_test() -> int:
         fc_row2, {"granite": {"granite-gpu": {"gen", "h100nvl"}}}
     ) == ("gen", "h100nvl")
     cpu_summary = format_cpu_summary({"granite": {"granite-gpu": {"gen", "h100nvl"}}})
-    assert "granite-gpu" in cpu_summary and "gen" in cpu_summary
+    assert "granite-gpu" in cpu_summary and "Genoa" in cpu_summary, cpu_summary
+    assert "AMD" in cpu_summary, cpu_summary
+    # Long-form display, never the short feature token.
+    assert "gen," not in cpu_summary and " gen " not in cpu_summary, cpu_summary
+    # Multi-feature Intel CPU partition surfaces sorted long-form names.
+    cpu_intel = format_cpu_summary(
+        {"notchpeak": {"notchpeak-shared-short": {"csl", "emr", "skl"}}}
+    )
+    intel_line = next(ln for ln in cpu_intel.splitlines() if "shared-short" in ln)
+    assert "Intel" in intel_line, intel_line
+    assert "Cascade Lake, Emerald Rapids, Skylake" in intel_line, intel_line
 
     # Live-availability parsing.
     assert parse_cpus_state("96/0/0/96") == (0, 96)
@@ -3337,12 +3524,71 @@ def run_self_test() -> int:
     assert record["free_gpus"] == "h100nvl:4/16"
     assert "free_nodes" not in fc_row3.to_dict()  # opt-in only
 
-    # CPU summary appends nodes/cpus when availability is supplied.
-    cpu_summary_avail = format_cpu_summary(
-        {"granite": {"granite-gpu": {"gen", "h100nvl"}}}, avail
+    # CPU summary: GPU partitions are filtered out when partition_avail
+    # carries gpus, and a CPU-only partition surfaces availability columns.
+    cpu_only_avail = {"notchpeak": {"notchpeak-shared-short": PartitionAvail()}}
+    cb = cpu_only_avail["notchpeak"]["notchpeak-shared-short"]
+    cb.nodes_total = 10
+    cb.nodes_free = 5
+    cb.cpus_total = 200
+    cb.cpus_free = 80
+    cpu_features = {
+        "granite": {"granite-gpu": {"gen", "h100nvl"}},  # filtered (has gpus)
+        "notchpeak": {"notchpeak-shared-short": {"csl", "emr", "skl"}},
+    }
+    cpu_only_avail["granite"] = {"granite-gpu": PartitionAvail()}
+    cpu_only_avail["granite"]["granite-gpu"].add_gpu("h100nvl", 4, 16)
+    cpu_summary_avail = format_cpu_summary(cpu_features, cpu_only_avail)
+    assert "granite-gpu" not in cpu_summary_avail, cpu_summary_avail
+    assert "notchpeak-shared-short" in cpu_summary_avail, cpu_summary_avail
+    assert "5/10" in cpu_summary_avail and "80/200" in cpu_summary_avail
+    assert "NODES_F/T" in cpu_summary_avail and "CPUS_F/T" in cpu_summary_avail
+
+    # Memory + node-type formatters.
+    assert _format_mem_gib(746) == "746G"
+    assert _format_mem_gib(1024) == "1.0T"
+    assert _format_mem_gib(1496) == "1.5T"
+    assert _format_node_type(("gen", 96, 1, 746), 5) == "Genoa 96c×1 746G ×5"
+    assert _format_node_type(("", 64, 2, 1496), 1) == "? 64c×2 1.5T ×1"
+
+    # _node_arch_short picks the first feature that classifies.
+    assert _node_arch_short("chpc,gen,c96,m768") == "gen"
+    assert _node_arch_short("chpc,c96,m768") == ""
+    assert _node_arch_short("(null)") == ""
+
+    # NODE_TYPE column renders sorted by descending count, joined with '; '.
+    nt_avail = {"granite": {"granite": PartitionAvail()}}
+    nb = nt_avail["granite"]["granite"]
+    nb.nodes_total = 8
+    nb.nodes_free = 3
+    nb.cpus_total = 768
+    nb.cpus_free = 96
+    for _ in range(5):
+        nb.add_node_type(("gen", 96, 1, 746))
+    for _ in range(3):
+        nb.add_node_type(("gen", 96, 2, 1496))
+    nt_summary = format_cpu_summary(
+        {"granite": {"granite": {"gen", "chpc"}}}, nt_avail
     )
-    assert "nodes:1/2" in cpu_summary_avail
-    assert "cpus:32/128" in cpu_summary_avail
+    assert "NODE_TYPE" in nt_summary, nt_summary
+    nt_line = next(
+        ln for ln in nt_summary.splitlines() if " granite " in f" {ln} "
+    )
+    # Higher-count signature comes first.
+    assert nt_line.index("Genoa 96c×1") < nt_line.index("Genoa 96c×2"), nt_line
+    assert "; " in nt_line, nt_line
+    assert "×5" in nt_line and "×3" in nt_line
+
+    # _render_simple_table emits header + rule + rows, all width-aligned.
+    rendered_table = _render_simple_table(
+        ["A", "BB"], [["x", "yyyy"], ["zz", "w"]]
+    )
+    table_lines = rendered_table.splitlines()
+    assert len(table_lines) == 4, rendered_table
+    assert table_lines[0].startswith("A "), table_lines[0]
+    assert table_lines[1].startswith("--"), table_lines[1]
+    # Every row reaches the same width (left-justified).
+    assert len(set(len(ln) for ln in table_lines)) == 1, table_lines
 
     # GPU-list wrapper: single line when it fits, multi-line with trailing
     # commas when it doesn't, oversized tokens never crash.
