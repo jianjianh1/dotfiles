@@ -2223,6 +2223,7 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
       cpu:N      -> cores per node (per-node when nodes>1)
       total:N    -> N cores total across the job (escape from per-node default)
       gpu:N      -> any GPU x N
+      N<unit>    -> mem=N<unit> (e.g. 128G, 64gb, 512M)
       N (digits) -> cores per node (alias for cpu:N)
       vendor / arch / gen / sm atoms -> hardware filter
       <type>:N or <type> -> GPU type pin
@@ -2256,6 +2257,9 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
             low, "gpu:", spec,
             "gpu:N where N > 0 (e.g. gpu:4); use <type>:N to pin a GPU type",
         )
+        return
+    if _MEM_RE.match(low):
+        state["mem"] = low
         return
     if low.isdigit():
         if int(low) <= 0:
@@ -2308,6 +2312,7 @@ def parse_resource_spec(spec: str) -> ResourceSpec:
       gpu:N        -> any GPU type, count N (per node, per SLURM --gres)
       <type>:N     -> gpus=<type>:N
       <type>       -> gpus=<type> (count 1)
+      N<unit>      -> mem=N<unit> (e.g. 128G, 64gb, 512M)
       N (digits)   -> cores per node (alias for cpu:N)
       intel|amd    -> vendor filter
       <microarch>  -> arch filter (skl, genoa, rome, zen4, ...)
@@ -2326,6 +2331,7 @@ def parse_resource_spec(spec: str) -> ResourceSpec:
       'a100:1@30m'                 -> 1 a100, 30-minute wall
       'a100:4,mem=32G,time=24h'    -> 4 a100, 32G mem, 24-hour wall
       'cpu:32,mem=128G,time=12h'   -> 32 cores (CPU job), 128G, 12h
+      'cpu:32,128G,12h'            -> same, using positional shorthands
       '2n,cpu:32'                  -> 2 nodes, 32 cores/node = 64 total
       '2n,total:64'                -> 2 nodes, 64 cores total
       'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
