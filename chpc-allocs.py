@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import StringIO
@@ -3908,6 +3909,96 @@ def _wrap_gpu_list(text: str, width: int) -> List[str]:
     return lines
 
 
+_COMPACT_TABLE_LABELS = {
+    "tags": "FLAGS",
+    "free_nodes": "NODES",
+    "free_cpus": "CPUS",
+    "free_gpus": "GPUS",
+}
+
+_COMPACT_TABLE_HIDE = {"cpu_vendor"}
+_COMPACT_TABLE_WRAP = {
+    "account",
+    "qos",
+    "shape",
+    "note",
+    "tags",
+    "free_cpus",
+    "free_gpus",
+}
+_COMPACT_TAG_LABELS = {
+    "freecycle": "fc",
+    "guest": "guest",
+    "reservation": "res",
+    "default": "def",
+}
+_COMPACT_TAG_OMIT = {"gpu", "cpu"}
+
+
+def _compact_table_enabled(wide: bool, include_avail: bool, tty: bool) -> bool:
+    return bool(tty and include_avail and not wide)
+
+
+def _display_column_label(column: str, compact: bool) -> str:
+    if compact:
+        return _COMPACT_TABLE_LABELS.get(column, column.upper())
+    return column.upper()
+
+
+def _compact_tags(raw: str) -> str:
+    tags = [t.strip() for t in raw.split(",") if t.strip()]
+    labels = [
+        _COMPACT_TAG_LABELS.get(tag, tag)
+        for tag in tags
+        if tag not in _COMPACT_TAG_OMIT
+    ]
+    return ",".join(labels)
+
+
+def _display_cell_value(column: str, raw: str, compact: bool) -> str:
+    if compact and column == "tags":
+        return _compact_tags(raw)
+    return raw
+
+
+def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
+    if not text:
+        return [""]
+    if column in {"free_cpus", "free_gpus", "tags"}:
+        tokens = [t.strip() for t in text.split(",") if t.strip()]
+        if not tokens:
+            return [""]
+        lines: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for index, tok in enumerate(tokens):
+            suffix = "," if index < len(tokens) - 1 else ""
+            pieces = textwrap.wrap(
+                tok + suffix,
+                width=max(1, width),
+                break_long_words=True,
+                break_on_hyphens=True,
+            ) or [tok + suffix]
+            for piece in pieces:
+                sep_cost = 1 if current else 0
+                if current and current_len + sep_cost + len(piece) > width:
+                    lines.append(" ".join(current))
+                    current = [piece]
+                    current_len = len(piece)
+                else:
+                    current.append(piece)
+                    current_len += sep_cost + len(piece)
+        if current:
+            lines.append(" ".join(current))
+        return lines or [""]
+    return textwrap.wrap(
+        text,
+        width=max(1, width),
+        break_long_words=True,
+        break_on_hyphens=True,
+    ) or [""]
+
+
 # ANSI styling — opt-out via NO_COLOR (https://no-color.org). Color is
 # applied only when stdout is a TTY at render time, so piped output stays
 # byte-identical to the pre-color era.
@@ -3957,7 +4048,8 @@ def _wait_color(raw: str) -> str:
 
 def _tag_color(raw: str) -> str:
     """Dim freecycle/guest tags — they're preemptable, worth flagging quietly."""
-    if "freecycle" in raw or "guest" in raw:
+    tags = {t.strip() for t in raw.split(",") if t.strip()}
+    if tags.intersection({"freecycle", "guest", "fc"}):
         return _ANSI_DIM
     return ""
 
@@ -4039,27 +4131,73 @@ def table_output(
     if term_width is None:
         term_width = shutil.get_terminal_size((120, 24)).columns
     color = _color_enabled(tty)
+    compact = _compact_table_enabled(wide, include_avail, tty)
+    if compact:
+        columns = [c for c in columns if c not in _COMPACT_TABLE_HIDE]
+    labels = {column: _display_column_label(column, compact) for column in columns}
+    display_records = [
+        {
+            column: _display_cell_value(column, record.get(column, ""), compact)
+            for column in columns
+        }
+        for record in records
+    ]
 
     # Wrap list-style columns (free_cpus, free_gpus) onto continuation lines
     # when we're rendering for a tty. The wrap helper is content-agnostic —
     # it only splits on ", " — so it handles both columns identically.
     wrap_candidates = ("free_cpus", "free_gpus")
     wrap_targets: List[str] = []
-    if include_avail and tty and columns:
+    if compact:
+        for col in columns:
+            if col in _COMPACT_TABLE_WRAP and any(record.get(col) for record in display_records):
+                wrap_targets.append(col)
+    elif include_avail and tty and columns:
         for col in wrap_candidates:
-            if col in columns and any(record.get(col) for record in records):
+            if col in columns and any(record.get(col) for record in display_records):
                 wrap_targets.append(col)
 
     base_widths = {
         column: max(
-            len(column),
-            max((len(record.get(column, "")) for record in records), default=0),
+            len(labels[column]),
+            max((len(record.get(column, "")) for record in display_records), default=0),
         )
         for column in columns
     }
 
     wrapped_cells: Dict[str, List[List[str]]] = {}
-    if wrap_targets:
+    if compact and wrap_targets:
+        non_wrap_cell_width = sum(
+            base_widths[c] for c in columns if c not in wrap_targets
+        )
+        separator_chars = 2 * (len(columns) - 1) if len(columns) > 1 else 0
+        available = max(0, term_width - non_wrap_cell_width - separator_chars)
+        minimums = {col: len(labels[col]) for col in wrap_targets}
+        min_total = sum(minimums.values())
+        natural_extra = {
+            col: max(0, base_widths[col] - minimums[col]) for col in wrap_targets
+        }
+        extra_total = sum(natural_extra.values()) or 1
+        spare = max(0, available - min_total)
+        budgets: Dict[str, int] = {}
+        for col in wrap_targets:
+            extra = int(spare * natural_extra[col] / extra_total) if spare else 0
+            budgets[col] = min(base_widths[col], minimums[col] + extra)
+        for col in wrap_targets:
+            wrapped_cells[col] = [
+                _wrap_table_cell(col, r.get(col, ""), budgets[col])
+                for r in display_records
+            ]
+        widths = dict(base_widths)
+        for col in wrap_targets:
+            widths[col] = max(
+                len(labels[col]),
+                max(
+                    (max(len(line) for line in cell) for cell in wrapped_cells[col] if cell),
+                    default=0,
+                ),
+            )
+    elif wrap_targets:
         non_wrap_cell_width = sum(
             base_widths[c] for c in columns if c not in wrap_targets
         )
@@ -4073,7 +4211,7 @@ def table_output(
             budgets[col] = min(natural[col], share) if natural[col] > 0 else 20
         for col in wrap_targets:
             wrapped_cells[col] = [
-                _wrap_gpu_list(r.get(col, ""), budgets[col]) for r in records
+                _wrap_gpu_list(r.get(col, ""), budgets[col]) for r in display_records
             ]
         widths = dict(base_widths)
         for col in wrap_targets:
@@ -4087,7 +4225,7 @@ def table_output(
     else:
         widths = base_widths
 
-    header = "  ".join(column.upper().ljust(widths[column]) for column in columns)
+    header = "  ".join(labels[column].ljust(widths[column]) for column in columns)
     rule = "  ".join("-" * widths[column] for column in columns)
     lines = [header, rule]
     # When any record wraps onto continuation lines, separate records with a
@@ -4112,12 +4250,12 @@ def table_output(
                         cell_lines = wrapped_cells[c][index] or [""]
                         text = cell_lines[li] if li < len(cell_lines) else ""
                     else:
-                        text = record.get(c, "") if li == 0 else ""
+                        text = display_records[index].get(c, "") if li == 0 else ""
                     parts.append(_styled_cell(c, text.ljust(widths[c]), text, color))
                 lines.append("  ".join(parts))
         else:
             def cell(c: str) -> str:
-                value = record.get(c, "")
+                value = display_records[index].get(c, "")
                 return _styled_cell(c, value.ljust(widths[c]), value, color)
             lines.append("  ".join(cell(c) for c in columns))
     if not records:
@@ -4990,7 +5128,7 @@ def run_self_test() -> int:
         "x:1/2",
     ]
 
-    # table_output wraps free_gpus into continuation lines when tty + narrow.
+    # table_output wraps compact TTY cells so rows fit normal terminals.
     avail_row = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu", "granite-gpu"
     )
@@ -5003,21 +5141,23 @@ def run_self_test() -> int:
         "rtxpr4000bl:1/43, rtxpr6000bl:5/36, h200_1g.18gb:55/56"
     )
     rendered = table_output(
-        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=60
+        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=80
     )
     rendered_lines = rendered.splitlines()
     # Header + rule + first data line + at least one indented continuation.
     assert len(rendered_lines) >= 4, rendered
-    continuation = rendered_lines[3]
-    assert continuation.startswith(" "), repr(continuation)
-    assert "a100" in continuation or "h100" in continuation \
-        or "l40s" in continuation or "rtx" in continuation \
-        or "h200" in continuation, repr(continuation)
+    assert max(len(line) for line in rendered_lines) <= 80, rendered
+    assert "FLAGS" in rendered_lines[0] and "NODES" in rendered_lines[0]
+    assert "CPU_VENDOR" not in rendered_lines[0]
+    assert "def" in rendered and "gpu,default" not in rendered
+    assert "a100" in rendered and "h200" in rendered, rendered
     # When piped (tty=False) we get a single physical line per row.
     rendered_piped = table_output(
         [(avail_row, None)], wide=False, include_avail=True, tty=False, term_width=60
     )
     assert len(rendered_piped.splitlines()) == 3  # header + rule + one row
+    assert "TAGS" in rendered_piped.splitlines()[0]
+    assert "CPU_VENDOR" in rendered_piped.splitlines()[0]
 
     # free_cpus also wraps when its content is long and we're rendering for tty.
     wide_cpu_row = AllocationRow(
@@ -5032,16 +5172,29 @@ def run_self_test() -> int:
     )
     wide_cpu_row.free_gpus = ""
     rendered_cpu = table_output(
-        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=60
+        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=80
     )
     rendered_cpu_lines = rendered_cpu.splitlines()
     assert len(rendered_cpu_lines) >= 4, rendered_cpu
+    assert max(len(line) for line in rendered_cpu_lines) <= 80, rendered_cpu
     # At least one line after the data row should carry a CPU shape token.
     assert any(
         "gen96c" in ln or "skl16c" in ln or "csl20c" in ln
             or "icx32c" in ln or "spr48c" in ln
         for ln in rendered_cpu_lines[3:]
     ), rendered_cpu
+    fc_row = AllocationRow(
+        "granite", "acct", "me", "", "granite-gpu-freecycle", "granite-gpu-freecycle"
+    )
+    fc_row.qos_info = QOSInfo("granite-gpu-freecycle")
+    fc_row.tags = classify(fc_row)
+    fc_row.free_nodes = "1/2"
+    fc_row.free_cpus = "32/128"
+    fc_row.free_gpus = "a100:1/4"
+    rendered_fc = table_output(
+        [(fc_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+    )
+    assert "fc" in rendered_fc and "freecycle" not in rendered_fc, rendered_fc
 
     # Compact column set with availability keeps tags visible because
     # freecycle/guest are decision-critical, but hides score/debug columns.
