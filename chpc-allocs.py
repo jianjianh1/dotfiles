@@ -275,7 +275,8 @@ Common entry points:
   chpc-allocs                       print this help
   chpc-allocs a100:4                a single a100x4 probe
   chpc-allocs cpu:32                a single 32-core CPU probe
-  chpc-allocs 'a100:4;cpu:32'       compose two shapes (semicolon-separated; quote it)
+  chpc-allocs a100:4+cpu:32         two alternatives ('+' = OR, no quoting)
+  chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
   chpc-allocs --quick               list allocations, no probes
   chpc-allocs --explain a100:4      preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
@@ -287,8 +288,10 @@ Examples
 Quickstart:
   chpc-allocs a100:4                          # when can my a100x4 job run?
   chpc-allocs cpu:32                          # ... or a 32-core CPU job
-  chpc-allocs 'a100:4;cpu:32@12h'             # compose two shapes
-  chpc-allocs 'a100:1;a100:4' --pivot         # compare shapes side-by-side
+  chpc-allocs a100:4+cpu:32@12h               # two alternatives ('+' = OR)
+  chpc-allocs 'a100:4*cpu:32@12h'             # one combined job ('*' = AND)
+  chpc-allocs 'a100:4*cpu:32+h100:1'          # AND inside, OR across (precedence: '*' before '+')
+  chpc-allocs a100:1+a100:4 --pivot           # compare shapes side-by-side
   chpc-allocs --explain a100:4                # preview the plan, run nothing
 
 Common queries:
@@ -323,18 +326,22 @@ def _build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
 
-    # Positional probe spec. Single shape ('a100:4') or semicolon-separated
-    # list ('a100:4;cpu:32;h100:1@30m'). Quote because ';' is a shell
-    # metacharacter. Parsed in main() via parse_shape_list.
+    # Positional probe spec. Two-level grammar:
+    #   '+' = OR (separate independent probes)
+    #   '*' = AND (combine pieces into one job; binds tighter than '+')
+    # E.g. 'a100:4*cpu:32+h100:1' = (a100:4 with 32 cpus) OR (h100:1).
+    # Quote when '*' might glob in your shell. Parsed in main() via
+    # parse_shape_list.
     parser.add_argument(
         "shape_pos", nargs="?", metavar="SHAPE_LIST", default=None,
-        help="Probe shape, or ';'-separated list of shapes. Per-shape "
-        "grammar: 'a100:4' (GPU), 'cpu:32' (32-core CPU), 'gpu:4' (any GPU "
-        "x 4), '32' (= cpu:32). Append '@DUR' for walltime: 'a100:1@30m', "
-        "'cpu:32@12h'. Comma-separated key=value tokens (cores=, mem=, "
-        "time=, gpus=, nodes=) also accepted, e.g. "
-        "'a100:4,mem=32G,time=24h'. Quote multi-shape lists: "
-        "'a100:4;cpu:32;h100:1@30m'.",
+        help="Probe shape, or list joined with '+' (alternatives, OR) and "
+        "'*' (combine into one job, AND; binds tighter than '+'). "
+        "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32-core CPU), "
+        "'gpu:4' (any GPU x 4), '32' (= cpu:32). Append '@DUR' for walltime: "
+        "'a100:1@30m', 'cpu:32@12h'. Comma-separated key=value tokens "
+        "(cores=, mem=, time=, gpus=, nodes=) also accepted, e.g. "
+        "'a100:4,mem=32G,time=24h'. Combined example: "
+        "'a100:4*cpu:32+h100:1@30m'. Quote when your shell would expand '*'.",
     )
 
     # ----- Filtering -------------------------------------------------------
@@ -1221,21 +1228,35 @@ def parse_shape_spec(spec: str) -> ProbeShape:
 
 
 def parse_shape_list(spec: str) -> List[ProbeShape]:
-    """Split a ';'-separated SHAPE_LIST and parse each piece via parse_shape_spec."""
+    """Parse a SHAPE_LIST: '+' joins alternatives, '*' combines into one job.
+
+    Top-level '+' separates independent probes (OR). Inside each group, '*'
+    merges pieces into a single shape (AND): the AND-joined pieces are
+    comma-concatenated and handed to parse_shape_spec, so later tokens
+    overwrite earlier same-field values (last-wins, matching how duplicate
+    keys behave inside one comma-token shape).
+    """
     s = (spec or "").strip()
-    _LIST_HINT = "a shape, or ';'-separated shapes (e.g. 'a100:4', 'a100:4;cpu:32@12h')"
+    _LIST_HINT = (
+        "shapes joined with '+' (alternatives) and '*' (combine), "
+        "e.g. 'a100:4', 'a100:4*cpu:32', 'a100:4*cpu:32+h100:1'"
+    )
     if not s:
         raise _shape_error(spec, "empty SHAPE_LIST", _LIST_HINT)
     shapes: List[ProbeShape] = []
-    for raw in s.split(";"):
-        piece = raw.strip()
-        if not piece:
+    for or_raw in s.split("+"):
+        or_piece = or_raw.strip()
+        if not or_piece:
             raise _shape_error(
-                spec,
-                "empty piece between ';' separators",
-                _LIST_HINT,
+                spec, "empty piece between '+' separators", _LIST_HINT,
             )
-        shapes.append(parse_shape_spec(piece))
+        and_pieces = [p.strip() for p in or_piece.split("*")]
+        if any(not p for p in and_pieces):
+            raise _shape_error(
+                spec, "empty piece between '*' separators", _LIST_HINT,
+            )
+        merged = ",".join(and_pieces)
+        shapes.append(parse_shape_spec(merged))
     return shapes
 
 
@@ -2955,17 +2976,39 @@ def run_self_test() -> int:
     # predict_wait honors should_skip even with sbatch on PATH.
     assert predict_wait(gpu_row, shape=ProbeShape(gpu_type="a100", gpu_count=4)) is None
 
-    # parse_shape_list: split on ';', each piece goes through parse_shape_spec.
+    # parse_shape_list: '+' splits OR groups; '*' merges AND pieces into one shape.
     parser = _build_parser()
     shapes_one = parse_shape_list("a100:4")
     assert len(shapes_one) == 1 and shapes_one[0].gpu_type == "a100" and shapes_one[0].gpu_count == 4
-    shapes_many = parse_shape_list("a100:4;cpu:32@12h;h100:1@30m")
+    shapes_many = parse_shape_list("a100:4+cpu:32@12h+h100:1@30m")
     assert [s.label for s in shapes_many] == ["a100:4@1h", "cpu:32@12h", "h100:1@30m"]
-    # Whitespace around ';' tolerated.
-    shapes_ws = parse_shape_list(" a100:4 ; cpu:32 ")
+    # Whitespace around '+' tolerated.
+    shapes_ws = parse_shape_list(" a100:4 + cpu:32 ")
     assert [s.label for s in shapes_ws] == ["a100:4@1h", "cpu:32@1h"]
-    # Empty/blank input and empty pieces raise.
-    for bad in ("", " ", ";", "a100:4;", ";a100:4", "a100:4;;cpu:32"):
+    # AND ('*'): one combined shape with both gpu and cpu fields populated.
+    shapes_and = parse_shape_list("a100:4*cpu:32")
+    assert len(shapes_and) == 1
+    assert shapes_and[0].gpu_type == "a100" and shapes_and[0].gpu_count == 4
+    assert shapes_and[0].cpus == 32
+    # AND with @-suffix on one piece: time flows through to the merged shape.
+    shapes_and_t = parse_shape_list("a100:4@2h*cpu:32")
+    assert shapes_and_t[0].time == "2h" and shapes_and_t[0].cpus == 32
+    # Mixed: '*' binds tighter than '+'. First shape is the AND-merged piece.
+    shapes_mix = parse_shape_list("a100:4*cpu:32+h100:1")
+    assert len(shapes_mix) == 2
+    assert shapes_mix[0].gpu_type == "a100" and shapes_mix[0].cpus == 32
+    assert shapes_mix[1].gpu_type == "h100" and shapes_mix[1].cpus == DEFAULT_PROBE_CPUS
+    # Whitespace around '*' tolerated.
+    shapes_and_ws = parse_shape_list(" a100:4 * cpu:32 ")
+    assert shapes_and_ws[0].gpu_type == "a100" and shapes_and_ws[0].cpus == 32
+    # Same-field collision in AND group: last-wins (consistent with intra-shape tokens).
+    shapes_collide = parse_shape_list("a100:4@1h*cpu:32@2h")
+    assert shapes_collide[0].time == "2h"
+    # Empty/blank input and empty pieces raise (both '+' and '*' separators).
+    for bad in (
+        "", " ", "+", "a100:4+", "+a100:4", "a100:4++cpu:32",
+        "*a100:4", "a100:4*", "a100:4**cpu:32", "a100:4*+h100:1",
+    ):
         try:
             parse_shape_list(bad)
         except CommandError:
@@ -2976,8 +3019,8 @@ def run_self_test() -> int:
     # Positional SHAPE_LIST flows into args.shape_pos and is parsed in main().
     a = parser.parse_args(["a100:4"])
     assert a.shape_pos == "a100:4"
-    a = parser.parse_args(["a100:4;cpu:32"])
-    assert a.shape_pos == "a100:4;cpu:32"
+    a = parser.parse_args(["a100:4+cpu:32"])
+    assert a.shape_pos == "a100:4+cpu:32"
 
     sh = parse_shape_spec("a100:1@30m")
     assert sh.gpu_type == "a100" and sh.gpu_count == 1 and sh.time == "30m"
@@ -3133,8 +3176,8 @@ def run_self_test() -> int:
     assert a.shape_pos == "cpu:32"
     a = parser.parse_args(["32"])
     assert a.shape_pos == "32"
-    a = parser.parse_args(["a100:4;cpu:32@12h"])
-    assert a.shape_pos == "a100:4;cpu:32@12h"
+    a = parser.parse_args(["a100:4+cpu:32@12h"])
+    assert a.shape_pos == "a100:4+cpu:32@12h"
 
     # expand_rows_by_shape filters skipped pairs (gpu shape on cpu row).
     a100_only = ProbeShape(gpu_type="a100", gpu_count=1)
