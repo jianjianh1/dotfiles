@@ -801,7 +801,9 @@ def _build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--wide", action="store_true",
         help="Show extra columns: partition, gpu_types, cpu_features, "
-        "default_qos, TRES limits, QOS flags, full sshare detail. "
+        "default_qos, TRES limits, QOS flags, full sshare detail. Also "
+        "restores priority/fairshare/usage/default/tags when availability "
+        "columns are present (otherwise hidden so the free_* columns fit). "
         "e.g. --wide --quick --format csv",
     )
     out.add_argument(
@@ -976,19 +978,32 @@ def split_parsable(output: str, field_count: int) -> List[List[str]]:
     return rows
 
 
-def show_associations(user: Optional[str], all_visible: bool) -> List[AllocationRow]:
+def _sacctmgr_query(
+    entity: str,
+    fields: Sequence[str],
+    where_clauses: Sequence[str] = (),
+) -> List[List[str]]:
+    """Run `sacctmgr show ENTITY [where ...] format=... -n -P` and return parsed rows.
+
+    Centralizes the boilerplate shared by show_associations / show_qos so a
+    single place handles tool resolution, argument shaping, and parsing.
+    """
     sacctmgr = require_tool("sacctmgr")
-    args = [
-        sacctmgr,
-        "show",
-        "association",
-    ]
+    args = [sacctmgr, "show", entity]
+    if where_clauses:
+        args.append("where")
+        args.extend(where_clauses)
+    args.extend(["format=" + ",".join(fields), "-n", "-P"])
+    return split_parsable(run_command(args), len(fields))
+
+
+def show_associations(user: Optional[str], all_visible: bool) -> List[AllocationRow]:
+    where: List[str] = []
     if user and not all_visible:
-        args.extend(["where", f"user={user}"])
-    args.extend(["format=" + ",".join(ASSOC_FIELDS), "-n", "-P"])
+        where.append(f"user={user}")
 
     rows = []
-    for fields in split_parsable(run_command(args), len(ASSOC_FIELDS)):
+    for fields in _sacctmgr_query("association", ASSOC_FIELDS, where):
         cluster, account, assoc_user, partition, qos_list, default_qos = [x.strip() for x in fields]
         if not cluster or not account:
             continue
@@ -1028,23 +1043,14 @@ def show_qos(names: Iterable[str]) -> Dict[str, QOSInfo]:
     unique_names = sorted({name for name in names if name})
     if not unique_names:
         return {}
-    sacctmgr = require_tool("sacctmgr")
     info: Dict[str, QOSInfo] = {}
 
+    # sacctmgr accepts comma-joined name= lists; chunk to keep argv well under
+    # any plausible exec line-length limit on systems with many QOSes.
     chunk_size = 80
     for index in range(0, len(unique_names), chunk_size):
         chunk = unique_names[index : index + chunk_size]
-        args = [
-            sacctmgr,
-            "show",
-            "qos",
-            "where",
-            "name=" + ",".join(chunk),
-            "format=" + ",".join(QOS_FIELDS),
-            "-n",
-            "-P",
-        ]
-        for fields in split_parsable(run_command(args), len(QOS_FIELDS)):
+        for fields in _sacctmgr_query("qos", QOS_FIELDS, ["name=" + ",".join(chunk)]):
             qos = QOSInfo(
                 name=fields[0].strip(),
                 priority=fields[1].strip(),
@@ -1722,6 +1728,14 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     return int(count_text)
 
 
+# All known keys for `key=value` shape tokens. Used both by `_apply_kv_token`
+# (to dispatch) and by its unknown-key suggestion via difflib.get_close_matches.
+_KV_TOKEN_KEYS = (
+    "cores", "mem", "nodes", "time", "gpus", "vendor", "arch",
+    "gen", "sm", "gen_min", "sm_min",
+)
+
+
 # `gen=`/`gen_min=`/`sm=`/`sm_min=` share a common parse-and-store shape;
 # this table parametrizes the four otherwise-near-duplicate handlers.
 _GEN_SM_KV_KEYS = {
@@ -1817,9 +1831,13 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
             )
         state[state_key] = parsed
     else:
+        problem = f"unknown key {key!r}"
+        suggestions = difflib.get_close_matches(key, _KV_TOKEN_KEYS, n=2, cutoff=0.6)
+        if suggestions:
+            problem += f" (did you mean {' or '.join(repr(s) for s in suggestions)}?)"
         raise _shape_error(
             spec,
-            f"unknown key {key!r}",
+            problem,
             "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
             "gen=, sm=, gen_min=, sm_min=",
         )
@@ -2082,6 +2100,11 @@ def predict_wait(
         # `--test-only` prints to stderr regardless of success.
         start = parse_test_only_stderr(result.stderr) or parse_test_only_stderr(result.stdout)
         if start is not None:
+            # Both sides are naive local datetimes: SLURM emits the predicted
+            # start in the cluster's local timezone (no offset in the string,
+            # parsed as naive by parse_test_only_stderr) and `datetime.now()`
+            # returns naive local. Don't "fix" this into a UTC conversion —
+            # that would break the math on a single-TZ cluster like CHPC.
             delta = (start - datetime.now()).total_seconds()
             return max(0, int(delta))
     return None
@@ -2112,7 +2135,15 @@ def predict_wait_times(
         return
     if not shapes:
         shapes = [ProbeShape()]
-    pair_count = sum(1 for r in rows for s in shapes if not s.should_skip(r))
+    probe_pairs = [
+        (row, shape)
+        for row in rows
+        for shape in shapes
+        if not shape.should_skip(row)
+    ]
+    pair_count = len(probe_pairs)
+    if pair_count == 0:
+        return
     threshold_hit = pair_count >= _PROGRESS_NOTICE_THRESHOLD
     # Rolling counter would garble the per-row [v] narration verbose emits,
     # so verbose runs keep the original static notice and skip rolling.
@@ -2125,9 +2156,8 @@ def predict_wait_times(
         )
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
-        for row in rows:
-            for shape in shapes:
-                futures[pool.submit(predict_wait, row, shape=shape)] = (row, shape)
+        for row, shape in probe_pairs:
+            futures[pool.submit(predict_wait, row, shape=shape)] = (row, shape)
         completed = 0
         for future in as_completed(futures):
             row, shape = futures[future]
@@ -2172,6 +2202,14 @@ _QOS_SUFFIXES = ("-freecycle", "-guest", "-res")
 
 
 def _candidate_partitions(row: "AllocationRow") -> List[str]:
+    """Return partition names to try for a given row, most-specific first.
+
+    `sacctmgr show association` doesn't always pin a partition (Partition is
+    blank for many account/qos combinations on CHPC), and even when it does,
+    the matching partition name is sometimes the QOS name with a suffix
+    stripped (e.g. QOS `granite-gpu-freecycle` runs on partition `granite-gpu`).
+    Probes try each candidate in order and stop at the first one SLURM accepts.
+    """
     candidates: List[str] = []
     if row.partition:
         candidates.append(row.partition)
@@ -2607,8 +2645,8 @@ def parse_wall_seconds(value: str) -> Optional[int]:
         hours = 0
         minutes, seconds = map(int, parts)
     elif len(parts) == 1:
-        hours = int(parts[0])
-        minutes = 0
+        hours = 0
+        minutes = int(parts[0])
         seconds = 0
     else:
         return None
@@ -2830,6 +2868,35 @@ def expand_rows_by_shape(
     ]
 
 
+def filter_rows_by_shapes(
+    rows: List["AllocationRow"],
+    shapes: Optional[Sequence[ProbeShape]],
+) -> List["AllocationRow"]:
+    """Keep rows compatible with at least one supplied shape.
+
+    This lets SHAPE_LIST narrow output consistently even when wait probing is
+    disabled. Missing hardware metadata follows ProbeShape.should_skip()'s
+    existing best-effort convention.
+    """
+    if not shapes:
+        return rows
+    return [
+        row for row in rows
+        if any(not shape.should_skip(row) for shape in shapes)
+    ]
+
+
+def _filter_signature(filter_: HardwareFilter) -> Tuple[object, ...]:
+    return (
+        filter_.cpu_vendor,
+        filter_.cpu_archs,
+        filter_.gpu_gen,
+        filter_.gpu_sm,
+        filter_.gpu_gen_min,
+        filter_.gpu_sm_min,
+    )
+
+
 def _shape_signature(shape: ProbeShape) -> Tuple[object, ...]:
     """Stable identity for a shape ignoring walltime — used for grouping."""
     return (
@@ -2838,6 +2905,7 @@ def _shape_signature(shape: ProbeShape) -> Tuple[object, ...]:
         shape.mem,
         shape.gpu_type,
         shape.gpu_count,
+        _filter_signature(shape.filter),
     )
 
 
@@ -2890,6 +2958,7 @@ def collapse_uniform_walltimes(
             gpu_type=first_shape.gpu_type,
             gpu_count=first_shape.gpu_count,
             time=first_shape.time,
+            filter=first_shape.filter,
         )
         collapsed.label = collapsed._compute_label(time_label=time_label)
         first_row.wait_by_shape[collapsed.label] = waits[0]
@@ -3311,6 +3380,71 @@ def json_output(
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def _effective_partition(row: AllocationRow) -> str:
+    """Best partition directive for paste-ready sbatch output.
+
+    Association rows often omit Partition. For CHPC's freecycle/reservation
+    QOSes, the runnable partition is usually the QOS name with that suffix
+    stripped. Guest QOSes commonly use a partition that keeps the `-guest`
+    suffix, so preserve the full QOS name unless sacctmgr provided Partition.
+    """
+    if row.partition:
+        return row.partition
+    if row.qos:
+        for suffix in ("-freecycle", "-res"):
+            if row.qos.endswith(suffix):
+                stripped = row.qos[: -len(suffix)]
+                if stripped:
+                    return stripped
+        return row.qos
+    return ""
+
+
+def _shape_sbatch_directive_lines(
+    row: AllocationRow,
+    shape: Optional[ProbeShape],
+) -> List[str]:
+    if shape is None:
+        return []
+    lines: List[str] = []
+    args = shape.to_sbatch_args(row)
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-N" and i + 1 < len(args):
+            lines.append(f"#SBATCH --nodes={args[i + 1]}")
+            i += 2
+        elif arg == "-n" and i + 1 < len(args):
+            lines.append(f"#SBATCH --ntasks={args[i + 1]}")
+            i += 2
+        elif arg == "-t" and i + 1 < len(args):
+            lines.append(f"#SBATCH --time={args[i + 1]}")
+            i += 2
+        else:
+            lines.append(f"#SBATCH {arg}")
+            i += 1
+    return lines
+
+
+def sbatch_directive_lines(
+    row: AllocationRow,
+    shape: Optional[ProbeShape] = None,
+) -> List[str]:
+    """Return paste-ready #SBATCH lines for an allocation and optional shape."""
+    lines = []
+    if row.cluster:
+        lines.append(f"#SBATCH --clusters={row.cluster}")
+    if row.account:
+        lines.append(f"#SBATCH --account={row.account}")
+    partition = _effective_partition(row)
+    if partition:
+        lines.append(f"#SBATCH --partition={partition}")
+    if row.qos:
+        lines.append(f"#SBATCH --qos={row.qos}")
+    lines.extend(_shape_sbatch_directive_lines(row, shape))
+    return lines
+
+
 def best_output(
     pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     fmt: str,
@@ -3328,27 +3462,25 @@ def best_output(
     row, shape = pairs[0]
     wait_secs = row.wait_by_shape.get(shape.label) if shape else None
     alternatives = len(pairs) - 1
+    directives = sbatch_directive_lines(row, shape)
     if fmt == "json":
         return json.dumps(
             {
                 "cluster": row.cluster,
                 "account": row.account,
                 "partition": row.partition,
+                "effective_partition": _effective_partition(row),
                 "qos": row.qos,
                 "time": shape.time if shape else "",
+                "shape_label": shape.label if shape else "",
+                "sbatch_directives": directives,
                 "predicted_wait_seconds": wait_secs,
                 "alternatives": alternatives,
             },
             indent=2,
             sort_keys=True,
         )
-    lines = [f"#SBATCH --account={row.account}"]
-    if row.partition:
-        lines.append(f"#SBATCH --partition={row.partition}")
-    if row.qos:
-        lines.append(f"#SBATCH --qos={row.qos}")
-    if shape and shape.time:
-        lines.append(f"#SBATCH --time={shape.time}")
+    lines = list(directives)
     suffix = (
         f"  ({alternatives} alternative{'s' if alternatives != 1 else ''} — "
         "drop --best to see them)"
@@ -3546,6 +3678,7 @@ def run_self_test() -> int:
     assert parsed == [["a", "b", "c"], ["1", "2", "3"]]
     assert parse_wall_seconds("3-00:00:00") == 259200
     assert parse_wall_seconds("12:00:00") == 43200
+    assert parse_wall_seconds("60") == 3600  # bare SLURM walltime is minutes
     assert parse_wall_seconds("14d") == 1209600
     row = AllocationRow("notchpeak", "soc-gpu-np", "me", "", "soc-gpu-np", "soc-gpu-np")
     row.qos_info = QOSInfo("soc-gpu-np", max_wall="12:00:00", flags="DenyOnLimit")
@@ -4314,6 +4447,7 @@ def run_self_test() -> int:
 
     # _to_sbatch_wall canonicalizes compact forms for sbatch -t.
     assert _to_sbatch_wall("1h") == "01:00:00"
+    assert _to_sbatch_wall("60") == "01:00:00"
     assert _to_sbatch_wall("24h") == "1-00:00:00"
     assert _to_sbatch_wall("3-00:00:00") == "3-00:00:00"
     assert _to_sbatch_wall("01:30:00") == "01:30:00"
@@ -4409,6 +4543,40 @@ def run_self_test() -> int:
     assert ("q-cpu", "cpu:8@1h") in pair_labels
     assert ("q-cpu", "a100:1@1h") not in pair_labels  # skipped: cpu row, gpu shape
     assert ("q-a100", "a100:1@1h") in pair_labels
+    # SHAPE_LIST also narrows row output when wait probing is disabled.
+    assert filter_rows_by_shapes([cpu_only_row, a100_row], [a100_only]) == [a100_row]
+    assert filter_rows_by_shapes([cpu_only_row, a100_row], None) == [cpu_only_row, a100_row]
+
+    # predict_wait_times submits only non-skipped pairs; no sbatch calls for
+    # impossible row/shape combinations.
+    fake_calls: List[Tuple[str, str]] = []
+    orig_predict_wait = globals()["predict_wait"]
+    orig_shutil_which = shutil.which
+
+    def fake_predict_wait(row, timeout=10.0, shape=None):
+        fake_calls.append((row.qos, shape.label))
+        return 0
+
+    def fake_which(name):
+        if name == "sbatch":
+            return "/bin/true"
+        return orig_shutil_which(name)
+
+    try:
+        globals()["predict_wait"] = fake_predict_wait
+        shutil.which = fake_which
+        a100_row.wait_by_shape = {}
+        cpu_only_row.wait_by_shape = {}
+        predict_wait_times(
+            [cpu_only_row, a100_row],
+            shapes=[cpu_only_shape, a100_only],
+            max_workers=1,
+        )
+    finally:
+        globals()["predict_wait"] = orig_predict_wait
+        shutil.which = orig_shutil_which
+    assert ("q-cpu", "a100:1@1h") not in fake_calls
+    assert len(fake_calls) == 3, fake_calls
 
     # collapse_uniform_walltimes: uniform-wait groups merge to one row,
     # non-uniform groups pass through unchanged.
@@ -4427,6 +4595,27 @@ def run_self_test() -> int:
     merged_shape = merged[0][1]
     assert merged_shape.label == "h100nvl:1@1h..3d", merged_shape.label
     assert coll_row.wait_by_shape[merged_shape.label] == 0
+    # Collapsed shapes preserve hardware filters, and distinct filters never
+    # collapse together.
+    h_hop_1h = ProbeShape(
+        gpu_count=1, time="01:00:00", filter=HardwareFilter(gpu_gen="hopper")
+    )
+    h_hop_24h = ProbeShape(
+        gpu_count=1, time="1-00:00:00", filter=HardwareFilter(gpu_gen="hopper")
+    )
+    coll_row.wait_by_shape = {h_hop_1h.label: 0, h_hop_24h.label: 0}
+    merged_hop = collapse_uniform_walltimes(
+        [(coll_row, h_hop_1h), (coll_row, h_hop_24h)]
+    )
+    assert len(merged_hop) == 1, merged_hop
+    assert merged_hop[0][1].filter.gpu_gen == "hopper"
+    assert merged_hop[0][1].label == "gpu:1@1h..24h,hopper"
+    h_amp_1h = ProbeShape(
+        gpu_count=1, time="01:00:00", filter=HardwareFilter(gpu_gen="ampere")
+    )
+    coll_row.wait_by_shape = {h_hop_1h.label: 0, h_amp_1h.label: 0}
+    separated = collapse_uniform_walltimes([(coll_row, h_hop_1h), (coll_row, h_amp_1h)])
+    assert len(separated) == 2, separated
     # Non-uniform waits → no collapse.
     coll_row.wait_by_shape = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 600}
     assert len(collapse_uniform_walltimes(triple)) == 3
@@ -4628,6 +4817,9 @@ def run_self_test() -> int:
     assert "#SBATCH --account=research" in best_text
     assert "#SBATCH --qos=q-piv" in best_text
     assert "#SBATCH --time=01:00:00" in best_text
+    assert "#SBATCH --nodes=1" in best_text
+    assert "#SBATCH --ntasks=1" in best_text
+    assert "#SBATCH --gres=gpu:a100:1" in best_text
     assert "predicted wait: now" in best_text
     assert "1 alternative" in best_text and "drop --best" in best_text
     best_json = json.loads(best_output([(pivot_row, s_a1), (pivot_row, s_a4)], "json"))
@@ -4635,6 +4827,40 @@ def run_self_test() -> int:
     assert best_json["qos"] == "q-piv"
     assert best_json["predicted_wait_seconds"] == 0
     assert best_json["alternatives"] == 1
+    assert best_json["effective_partition"] == "q-piv"
+    assert best_json["shape_label"] == "a100:1@1h"
+    assert "#SBATCH --gres=gpu:a100:1" in best_json["sbatch_directives"]
+    full_best_row = AllocationRow(
+        "granite", "acct", "u", "", "granite-gpu-freecycle", "granite-gpu-freecycle"
+    )
+    full_best_row.tags = ("gpu",)
+    full_best_row.gpu_types = ("h100nvl",)
+    full_best_shape = ProbeShape(
+        nodes=2,
+        cpus=8,
+        mem="32G",
+        gpu_type="h100",
+        gpu_count=4,
+        time="24h",
+        filter=HardwareFilter(cpu_vendor="amd"),
+    )
+    full_best_row.wait_by_shape = {full_best_shape.label: 0}
+    full_best_text = best_output([(full_best_row, full_best_shape)], "text")
+    assert "#SBATCH --clusters=granite" in full_best_text
+    assert "#SBATCH --partition=granite-gpu" in full_best_text
+    assert "#SBATCH --nodes=2" in full_best_text
+    assert "#SBATCH --ntasks=8" in full_best_text
+    assert "#SBATCH --time=1-00:00:00" in full_best_text
+    assert "#SBATCH --mem=32G" in full_best_text
+    assert "#SBATCH --gres=gpu:h100nvl:4" in full_best_text
+    assert "#SBATCH --constraint=zen|nap|rom|mil|gen" in full_best_text
+    guest_best_row = AllocationRow(
+        "granite", "acct", "u", "", "granite-gpu-guest", "granite-gpu-guest"
+    )
+    guest_best_row.tags = ("gpu",)
+    guest_best_text = best_output([(guest_best_row, ProbeShape())], "text")
+    assert "#SBATCH --partition=granite-gpu-guest" in guest_best_text
+    assert "#SBATCH --partition=granite-gpu\n" not in guest_best_text
     assert best_output([], "text") == "# no allocations matched"
     assert json.loads(best_output([], "json")) is None
 
@@ -4895,6 +5121,7 @@ def main(argv: Sequence[str]) -> int:
         shapes=user_shapes,
     )
     rows = filter_rows(rows, args)
+    rows = filter_rows_by_shapes(rows, user_shapes)
     shapes: List[ProbeShape] = list(user_shapes) if include_wait and user_shapes else []
 
     # --explain: print the resolved plan and exit before any probes run.
