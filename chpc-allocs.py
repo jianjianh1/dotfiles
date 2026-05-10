@@ -75,6 +75,14 @@ DEFAULT_SORT = ("cluster", "account", "qos")
 # and "a100_80gb_pcie", and "h100" matches "h100nvl".
 PREMIUM_GPUS = ("a100", "h100", "h200", "a6000")
 
+# CPU archs treated as "premium" for default sort ranking — newest Intel and
+# AMD generations available at CHPC. Matched after canonicalizing each
+# row.cpu_features token via _canon_cpu_arch, so long-form aliases like
+# "genoa"/"sapphirerapids" work too. Mirror of PREMIUM_GPUS so the `premium`
+# (a.k.a. `gpu-tier`) sort key surfaces newer CPU rows before older ones,
+# parallel to how it surfaces a100/h100 GPU rows first.
+PREMIUM_CPU_ARCHS = ("gen", "spr", "emr", "icx", "zen4", "zen5")
+
 # CPU microarchitecture tokens grouped by vendor. Substring-matched
 # case-insensitively against row.cpu_features (sinfo lowercases features).
 # `zen` covers zen1..zen5 via substring match; no need to enumerate them.
@@ -345,6 +353,18 @@ def _gpu_token_satisfies(
     return True
 
 
+def classify_gpu_vendor(gpu_types) -> str:
+    """Return 'nvidia' when any GRES token in `gpu_types` classifies as a known
+    NVIDIA part, else ''. CHPC has only NVIDIA GPUs today; this exists for
+    symmetry with `classify_cpu_vendor` and so a future AMD/Intel GPU would
+    slot in here cleanly. Empty string for CPU-only rows.
+    """
+    for tok in gpu_types or ():
+        if _classify_gpu_token(tok) is not None:
+            return "nvidia"
+    return ""
+
+
 def classify_cpu_vendor(features) -> str:
     """Map a row's cpu_features to 'intel', 'amd', 'mixed', or '' (unknown).
 
@@ -497,6 +517,7 @@ class AllocationRow:
         self.gpu_types = gpu_types
         self.cpu_features = cpu_features
         self.cpu_vendor = classify_cpu_vendor(cpu_features)
+        self.gpu_vendor = classify_gpu_vendor(gpu_types)
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
@@ -512,7 +533,7 @@ class AllocationRow:
         return bool(self.default_qos) and self.qos == self.default_qos
 
     def _gpus_cell(self, shape: Optional["ProbeShape"]) -> str:
-        """Compact cell for the `gpus` column: the row's GPU type resolved
+        """Compact cell for the `gpu` column: the row's GPU type resolved
         from the probe shape's gpu_type (e.g. shape says 'h100', row exposes
         'h100nvl'). Empty for CPU-only rows or shapes without a gpu_type.
         """
@@ -520,6 +541,25 @@ class AllocationRow:
             return ""
         resolved = shape.resolved_gpu_type(self)
         return resolved or ""
+
+    def _cpu_cell(self, shape: Optional["ProbeShape"]) -> str:
+        """Compact cell for the `cpu` column: the row's CPU arch resolved
+        from the probe shape's cpu_archs (e.g. shape says 'genoa', row
+        exposes 'gen' → cell shows 'Genoa'). Empty for shapes without
+        cpu_archs or rows whose features don't satisfy any of them.
+
+        Mirror of `_gpus_cell` so users running `cpu:32*genoa` see which
+        rows resolve to which arch without having to pass `--wide`.
+        """
+        if not self.cpu_features or shape is None or not shape.filter.cpu_archs:
+            return ""
+        wanted = set(shape.filter.cpu_archs)
+        seen: Dict[str, None] = {}
+        for feat in self.cpu_features:
+            canon = _canon_cpu_arch(feat)
+            if canon and canon in wanted and canon not in seen:
+                seen[canon] = None
+        return ", ".join(CPU_ARCH_LONG.get(c, c) for c in seen)
 
     def _availability_for_shape(
         self, shape: Optional["ProbeShape"]
@@ -558,7 +598,8 @@ class AllocationRow:
         include_avail: bool = False,
         include_wait: bool = True,
         shape: Optional["ProbeShape"] = None,
-        show_gpus: bool = False,
+        show_gpu: bool = False,
+        show_cpu: bool = False,
     ) -> Dict[str, str]:
         # Column order is intentional: identity → probe → "will it fit" →
         # QOS metadata → wide diagnostics → live availability. Python dict
@@ -580,8 +621,11 @@ class AllocationRow:
             data["note"] = self._note_for_shape(shape)
         data["wall"] = self.qos_info.max_wall
         data["tags"] = ",".join(self.tags)
-        if show_gpus:
-            data["gpus"] = self._gpus_cell(shape)
+        if show_gpu:
+            data["gpu"] = self._gpus_cell(shape)
+        data["gpu_vendor"] = self.gpu_vendor
+        if show_cpu:
+            data["cpu"] = self._cpu_cell(shape)
         data["cpu_vendor"] = self.cpu_vendor
         data["default"] = "yes" if self.is_default else ""
         data["priority"] = self.qos_info.priority
@@ -592,7 +636,7 @@ class AllocationRow:
                 {
                     "partition": self.partition,
                     "gpu_types": ",".join(self.gpu_types),
-                    "cpu_features": ",".join(self.cpu_features),
+                    "cpu_archs": ",".join(self.cpu_features),
                     "default_qos": self.default_qos,
                     "max_tres_per_user": self.qos_info.max_tres_pu,
                     "max_tres_per_account": self.qos_info.max_tres_pa,
@@ -890,7 +934,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     out.add_argument(
         "--wide", action="store_true",
-        help="Show extra columns: partition, gpu_types, cpu_features, "
+        help="Show extra columns: partition, gpu_types, cpu_archs, "
         "default_qos, TRES limits, QOS flags, full sshare detail. Also "
         "restores priority/fairshare/usage/default when availability "
         "columns are present (otherwise hidden so the free_* columns fit; "
@@ -901,7 +945,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Categories: "
         "Time: wait, shape, wall. "
-        "Quality: premium (alias: gpu-tier; a100/h100/h200/a6000 first), "
+        "Quality: premium (alias: gpu-tier; a100/h100/h200/a6000 first, "
+        "then genoa/sapphirerapids/emeraldrapids/icelake/zen4/zen5 CPU rows), "
         "vendor (intel<amd<mixed<unknown), default, tags. "
         "Identity: cluster, account, qos. "
         "Score: priority, fairshare, usage. "
@@ -1858,6 +1903,18 @@ class ProbeShape:
         gpu_constraint = self.filter.has_gpu_constraint()
         if self.requires_gpu() and "gpu" not in row.tags:
             return True
+        # Mirror: an explicit CPU shape (the user typed cpu/total/mem/vendor/arch)
+        # shouldn't probe GPU rows. Most GPU partitions require a GRES, so
+        # leaving them in produces probe rows reporting GPU contention for a
+        # job that only asked for CPUs — and a paste-ready --sbatch with an
+        # injected --gres=gpu:1. A bare default ProbeShape() makes no such
+        # statement, so it stays unrestricted (the self-test asserts this).
+        if (
+            not self.requires_gpu()
+            and self.has_explicit_cpu_intent()
+            and "gpu" in row.tags
+        ):
+            return True
         # Empty row.gpu_types means metadata wasn't loaded — don't skip.
         if row.gpu_types and (self.gpu_type or gpu_constraint):
             if not self._candidate_tokens(row):
@@ -1872,6 +1929,21 @@ class ProbeShape:
             self.gpu_type is not None
             or self.gpu_count is not None
             or self.filter.has_gpu_constraint()
+        )
+
+    def has_explicit_cpu_intent(self) -> bool:
+        """True when the user typed a CPU-side atom (cpu:N, total:N, per-node,
+        mem=, vendor=, or an arch). Used by `should_skip` to keep GPU rows
+        out of CPU-shape probes; a bare ProbeShape() returns False so the
+        legacy 'default probe doesn't skip anything' contract still holds.
+        """
+        return (
+            self.cpus_per_node is not None
+            or self.cpus_is_total
+            or self.cpus != DEFAULT_PROBE_CPUS
+            or self.mem is not None
+            or self.filter.cpu_vendor is not None
+            or bool(self.filter.cpu_archs)
         )
 
     def accepts_gpu_token(self, token: str) -> bool:
@@ -2755,8 +2827,9 @@ def format_gpu_summary(
             )
             if cpu_ok_shapes is not None and not cpu_ok_shapes:
                 continue
-            nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}"
-            cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}"
+            nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}n"
+            cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}c"
+            node_type_cell = _render_node_types_cell(bucket.node_types)
             for gtype, (free, total) in sorted(bucket.gpus.items()):
                 if cpu_ok_shapes is not None and not any(
                     s.accepts_gpu_token(gtype) for s in cpu_ok_shapes
@@ -2770,16 +2843,16 @@ def format_gpu_summary(
                     vendor = "nvidia"
                     sm_cell = f"sm_{sm}"
                 rows.append([
-                    cluster, partition, gtype, vendor, gen, sm_cell,
-                    f"{free}/{total}", nodes_ft, cpus_ft,
+                    cluster, partition, vendor, gtype, gen, sm_cell,
+                    f"{free}/{total}", node_type_cell, nodes_ft, cpus_ft,
                 ])
     if not rows:
         if shapes:
             return "(no GPU resources match shape)"
         return "(no GPU partitions found)"
     return _render_simple_table(
-        ["CLUSTER", "PARTITION", "GTYPE", "VENDOR", "GENERATION", "SM",
-         "FREE/TOTAL", "NODES_F/T", "CPUS_F/T"],
+        ["CLUSTER", "PARTITION", "VENDOR", "GTYPE", "GENERATION", "SM",
+         "GPUS_F/T", "NODE_TYPE", "NODES_F/T", "CPUS_F/T"],
         rows,
     )
 
@@ -2851,6 +2924,22 @@ def _format_node_type(sig: Tuple[str, int, int, int], count: int) -> str:
     return f"{arch_long} {cores}c×{sockets} {_format_mem_gib(mem_gib)} ×{count}"
 
 
+def _render_node_types_cell(node_types) -> str:
+    """Render bucket.node_types as a compact 'sig×count; sig×count; +N more' cell.
+
+    Used by both --list-cpus and --list-gpus so the host hardware breakdown
+    looks the same on either inventory.
+    """
+    if not node_types:
+        return ""
+    sorted_sigs = sorted(node_types.items(), key=lambda kv: (-kv[1], kv[0]))
+    head = sorted_sigs[:_NODE_TYPE_TOP_N]
+    rendered = "; ".join(_format_node_type(s, c) for s, c in head)
+    if len(sorted_sigs) > _NODE_TYPE_TOP_N:
+        rendered += f"; +{len(sorted_sigs) - _NODE_TYPE_TOP_N} more"
+    return rendered
+
+
 def _arch_display_list(feats: Iterable[str]) -> str:
     """Return a comma-joined list of long-form architecture names for FEATS.
 
@@ -2879,10 +2968,10 @@ def format_cpu_summary(
     long-form (e.g. "Cascade Lake", "Genoa") via CPU_ARCH_LONG.
 
     With partition_avail: emits NODE_TYPE (per-partition node-layout
-    signatures) and availability columns; ARCHITECTURE is omitted because
+    signatures) and availability columns; ARCH is omitted because
     each NODE_TYPE entry already carries its arch.
 
-    Without partition_avail: emits an ARCHITECTURE column and no filtering.
+    Without partition_avail: emits an ARCH column and no filtering.
     """
     if not partition_features:
         return "(no partition features found)"
@@ -2907,18 +2996,9 @@ def format_cpu_summary(
             vendor = _VENDOR_DISPLAY.get(vendor_short, "")
             row = [cluster, partition, vendor]
             if show_avail:
-                node_types = avail_bucket.node_types if avail_bucket else {}
-                if node_types:
-                    sorted_sigs = sorted(
-                        node_types.items(), key=lambda kv: (-kv[1], kv[0])
-                    )
-                    head = sorted_sigs[:_NODE_TYPE_TOP_N]
-                    rendered = "; ".join(_format_node_type(s, c) for s, c in head)
-                    if len(sorted_sigs) > _NODE_TYPE_TOP_N:
-                        rendered += f"; +{len(sorted_sigs) - _NODE_TYPE_TOP_N} more"
-                    row.append(rendered)
-                else:
-                    row.append("")
+                row.append(_render_node_types_cell(
+                    avail_bucket.node_types if avail_bucket else {}
+                ))
                 if avail_bucket is None:
                     row.extend(["", ""])
                 else:
@@ -2935,7 +3015,7 @@ def format_cpu_summary(
     if show_avail:
         headers += ["NODE_TYPE", "NODES_F/T", "CPUS_F/T"]
     else:
-        headers.append("ARCHITECTURE")
+        headers.append("ARCH")
     return _render_simple_table(headers, rows)
 
 
@@ -2958,6 +3038,7 @@ def attach_metadata(
         row.gpu_types = resolve_row_gpu_types(row, partition_gpus)
         row.cpu_features = resolve_row_features(row, partition_features)
         row.cpu_vendor = classify_cpu_vendor(row.cpu_features)
+        row.gpu_vendor = classify_gpu_vendor(row.gpu_types)
         row.tags = classify(row)
         if partition_avail is not None:
             attach_row_availability(
@@ -3774,6 +3855,18 @@ def collapse_uniform_walltimes(
     return [replaced.get(i, pair) for i, pair in enumerate(pairs) if i not in drop]
 
 
+def _row_has_premium_cpu(row: "AllocationRow") -> bool:
+    """True iff any cpu_features token canonicalizes to a PREMIUM_CPU_ARCHS
+    entry. Canonical match (not substring) so feature tokens like 'geforce'
+    don't accidentally count as 'gen' (Genoa).
+    """
+    for feat in row.cpu_features or ():
+        canon = _canon_cpu_arch(feat)
+        if canon and canon in PREMIUM_CPU_ARCHS:
+            return True
+    return False
+
+
 def sort_pairs(
     pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
     sort_spec: str,
@@ -3824,7 +3917,14 @@ def sort_pairs(
             elif key == "shape":
                 values.append(shape.label if shape is not None else "")
             elif key == "premium":
-                values.append(0 if any_glob_match(row.gpu_types, PREMIUM_GPUS) else 1)
+                # 3-tier so a premium-GPU row beats a premium-CPU row beats
+                # a plain row. Mirrors PREMIUM_GPUS / PREMIUM_CPU_ARCHS.
+                if any_glob_match(row.gpu_types, PREMIUM_GPUS):
+                    values.append(0)
+                elif _row_has_premium_cpu(row):
+                    values.append(1)
+                else:
+                    values.append(2)
             elif key == "vendor":
                 values.append({"intel": 0, "amd": 1, "mixed": 2}.get(row.cpu_vendor, 3))
             elif key == "wall":
@@ -3923,7 +4023,7 @@ _COMPACT_TABLE_LABELS = {
     "free_gpus": "INVENTORY",
 }
 
-_COMPACT_TABLE_HIDE = {"cpu_vendor"}
+_COMPACT_TABLE_HIDE = {"cpu_vendor", "gpu_vendor"}
 # Identity columns (account, qos, shape) are intentionally excluded — splitting
 # them mid-token (e.g. `owner-\ngpu-guest`, `a:1@1\nh`) hurts readability more
 # than the extra width costs.
@@ -4268,7 +4368,8 @@ def table_output(
     *,
     tty: Optional[bool] = None,
     term_width: Optional[int] = None,
-    show_gpus: bool = False,
+    show_gpu: bool = False,
+    show_cpu: bool = False,
 ) -> str:
     records = [
         row.to_dict(
@@ -4276,7 +4377,8 @@ def table_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
-            show_gpus=show_gpus,
+            show_gpu=show_gpu,
+            show_cpu=show_cpu,
         )
         for row, shape in pairs
     ]
@@ -4462,7 +4564,8 @@ def csv_output(
     include_avail: bool = False,
     include_wait: bool = True,
     *,
-    show_gpus: bool = False,
+    show_gpu: bool = False,
+    show_cpu: bool = False,
 ) -> str:
     records = [
         row.to_dict(
@@ -4470,7 +4573,8 @@ def csv_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
-            show_gpus=show_gpus,
+            show_gpu=show_gpu,
+            show_cpu=show_cpu,
         )
         for row, shape in pairs
     ]
@@ -4493,7 +4597,8 @@ def json_output(
     include_wait: bool = True,
     include_help: bool = False,
     *,
-    show_gpus: bool = False,
+    show_gpu: bool = False,
+    show_cpu: bool = False,
 ) -> str:
     records = [
         row.to_dict(
@@ -4501,7 +4606,8 @@ def json_output(
             include_avail=include_avail,
             include_wait=include_wait,
             shape=shape,
-            show_gpus=show_gpus,
+            show_gpu=show_gpu,
+            show_cpu=show_cpu,
         )
         for row, shape in pairs
     ]
@@ -4511,6 +4617,7 @@ def json_output(
         "_help": {
             "schema_version": 2,
             "premium_gpus": list(PREMIUM_GPUS),
+            "premium_cpu_archs": list(PREMIUM_CPU_ARCHS),
             "intel_cpu_features": list(INTEL_CPU_FEATURES),
             "amd_cpu_features": list(AMD_CPU_FEATURES),
             "fields": {
@@ -4551,11 +4658,16 @@ def json_output(
                         "host the shape contribute, and only matching GPU "
                         "types are listed",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
-                "gpus": "the row's GPU type resolved from the probe shape's "
+                "gpu": "the row's GPU type resolved from the probe shape's "
                         "gpu_type (e.g. shape 'h100' resolves to row 'h100nvl'). "
                         "Shown when an active probe shape carries a gpu_type.",
-                "cpu_features": "node feature tags for the partition (with --wide)",
-                "cpu_vendor": "derived from cpu_features: 'intel', 'amd', "
+                "gpu_vendor": "'nvidia' for rows with recognized GPU types, "
+                        "else ''. Pair of cpu_vendor.",
+                "cpu": "the row's CPU arch resolved from the probe shape's "
+                        "arch atom (e.g. shape '*genoa' resolves to row 'Genoa'). "
+                        "Shown when an active probe shape carries a CPU arch.",
+                "cpu_archs": "node arch/feature tags for the partition (with --wide)",
+                "cpu_vendor": "derived from cpu_archs: 'intel', 'amd', "
                         "'mixed', or '' when unknown. Sort key 'vendor' ranks "
                         "intel<amd<mixed<unknown.",
                 "tags": "quality flags: gpu, cpu, freecycle (preemptable), "
@@ -4858,7 +4970,7 @@ def _shape_unknown_metadata_fields(
 ) -> List[str]:
     fields: List[str] = []
     if shape.filter.has_cpu_constraint() and not row.cpu_features:
-        fields.append("cpu_features")
+        fields.append("cpu_archs")
     if (shape.gpu_type or shape.filter.has_gpu_constraint()) and not row.gpu_types:
         fields.append("gpu_types")
     return fields
@@ -5547,9 +5659,36 @@ def run_self_test() -> int:
     assert h100_row._gpus_cell(None) == ""
     assert h100_row._gpus_cell(ProbeShape(cpus=32)) == ""
     assert cpu_row._gpus_cell(ProbeShape(gpu_type="h100")) == ""
+    # _cpu_cell mirrors _gpus_cell for CPU arch atoms.
+    arch_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    arch_row.tags = ("cpu",)
+    arch_row.cpu_features = ("gen", "zen4", "m768")
+    genoa_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("gen",)))
+    spr_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("spr",)))
+    assert arch_row._cpu_cell(genoa_shape) == "Genoa"
+    assert arch_row._cpu_cell(spr_shape) == ""  # no spr feature on row
+    assert arch_row._cpu_cell(None) == ""
+    assert arch_row._cpu_cell(ProbeShape(cpus=8)) == ""  # no cpu_archs in shape
+    # zen<N> literals and short forms both resolve.
+    zen4_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("zen4",)))
+    assert arch_row._cpu_cell(zen4_shape) == "Zen 4"
     # Default probe never skips.
     assert ProbeShape().should_skip(gpu_row) is False
     assert ProbeShape().should_skip(cpu_row) is False
+    # Explicit CPU shapes skip GPU rows: cpu:N, total:N, mem=, vendor=, arch.
+    # Without this, `chpc-allocs cpu:32` probes notchpeak-gpu and emits
+    # `--sbatch cpu:32` blocks that inject `--gres=gpu:1`.
+    assert ProbeShape(cpus=32, cpus_per_node=32).should_skip(gpu_row) is True
+    assert ProbeShape(cpus=32, cpus_per_node=32).should_skip(cpu_row) is False
+    assert ProbeShape(cpus=64, cpus_is_total=True).should_skip(gpu_row) is True
+    assert ProbeShape(mem="64G").should_skip(gpu_row) is True
+    assert ProbeShape(filter=HardwareFilter(cpu_vendor="amd")).should_skip(gpu_row) is True
+    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(gpu_row) is True
+    # Bare ProbeShape() is *not* an explicit CPU shape — preserves the
+    # default-probe-doesn't-skip contract above.
+    assert ProbeShape().has_explicit_cpu_intent() is False
+    assert ProbeShape(cpus=1).has_explicit_cpu_intent() is False  # matches default
+    assert ProbeShape(cpus=2).has_explicit_cpu_intent() is True
     # predict_wait honors should_skip even with sbatch on PATH.
     assert predict_wait(gpu_row, shape=ProbeShape(gpu_type="a100", gpu_count=4)) is None
 
@@ -5922,6 +6061,26 @@ def run_self_test() -> int:
     by_premium_rev = sort_pairs(prem_pairs, "premium,qos", reverse=True)
     assert by_premium_rev[0][0].qos == "q-v100"
 
+    # CPU premium tier: a Genoa (canonicalizes to "gen") row outranks a
+    # Skylake row, and a premium-GPU row still beats both.
+    cpu_prem_rows = [
+        AllocationRow("notchpeak", "x", "u", "", "q-skl", "q-skl"),
+        AllocationRow("granite",   "x", "u", "", "q-gen", "q-gen"),
+        AllocationRow("notchpeak", "x", "u", "", "q-a100",  "q-a100"),
+    ]
+    cpu_prem_rows[0].cpu_features = ("skl",)
+    cpu_prem_rows[1].cpu_features = ("gen", "zen4")
+    cpu_prem_rows[2].gpu_types = ("a100",)
+    cpu_prem_pairs = [(row, None) for row in cpu_prem_rows]
+    by_cpu_prem = sort_pairs(cpu_prem_pairs, "premium,qos", reverse=False)
+    assert [r.qos for r, _ in by_cpu_prem] == ["q-a100", "q-gen", "q-skl"], \
+        [r.qos for r, _ in by_cpu_prem]
+    # _row_has_premium_cpu doesn't false-match on substrings (e.g. "geforce"
+    # contains "gen" but isn't Genoa).
+    decoy = AllocationRow("notchpeak", "x", "u", "", "q-decoy", "q-decoy")
+    decoy.cpu_features = ("geforce",)
+    assert _row_has_premium_cpu(decoy) is False
+
     payload = json.loads(json_output(prem_pairs, wide=True, include_help=True))
     assert isinstance(payload, dict)
     assert set(payload.keys()) == {"_help", "rows"}
@@ -6149,7 +6308,9 @@ def run_self_test() -> int:
         globals()["predict_wait_result"] = orig_predict_wait_result
         shutil.which = orig_shutil_which
     assert ("q-cpu", "a100:1@1h") not in fake_calls
-    assert len(fake_calls) == 3, fake_calls
+    # Mirror skip: an explicit CPU shape (cpu:8) doesn't probe a GPU row.
+    assert ("q-a100", "cpu:8@1h") not in fake_calls
+    assert len(fake_calls) == 2, fake_calls
 
     # collapse_uniform_walltimes: uniform-wait groups merge to one row,
     # non-uniform groups pass through unchanged.
@@ -6847,16 +7008,12 @@ def main(argv: Sequence[str]) -> int:
     if args.list_gpus or args.list_cpus:
         _maybe_emit_inventory_atom_notice(args, user_shapes)
     if args.list_gpus:
-        # Fetch features only when shapes carry CPU atoms — the second sinfo
-        # call is the same cost as the existing --list-cpus path.
-        feats = (
-            show_partition_features()
-            if user_shapes and any(s.filter.has_cpu_constraint() for s in user_shapes)
-            else None
-        )
+        # Always fetch features so the inventory shows host CPU detail (NODE_TYPE
+        # cell, vendor classification) the same way --list-cpus does. Both paths
+        # pay the same two sinfo calls.
         print(format_gpu_summary(
             show_partition_availability(),
-            partition_features=feats,
+            partition_features=show_partition_features(),
             shapes=user_shapes,
         ))
         return 0
@@ -6967,27 +7124,30 @@ def main(argv: Sequence[str]) -> int:
     elif args.pivot:
         output = pivot_output(pairs)
     else:
-        show_gpus = any(s is not None and s.requires_gpu() for _, s in pairs)
+        show_gpu = any(s is not None and s.requires_gpu() for _, s in pairs)
+        show_cpu = any(
+            s is not None and bool(s.filter.cpu_archs) for _, s in pairs
+        )
         _maybe_emit_gpu_resolution_notice(pairs, args.verbose, quiet=args.quiet)
         if fmt == "csv":
             output = csv_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
-                show_gpus=show_gpus,
+                show_gpu=show_gpu, show_cpu=show_cpu,
             )
         elif fmt == "json":
             output = json_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
                 include_help=not args.no_json_help,
-                show_gpus=show_gpus,
+                show_gpu=show_gpu, show_cpu=show_cpu,
             )
         else:
             _maybe_emit_column_swap_notice(args, include_avail)
             output = table_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
-                show_gpus=show_gpus,
+                show_gpu=show_gpu, show_cpu=show_cpu,
             )
             if getattr(args, "legend", False):
                 output = output + "\n" + render_legend()
