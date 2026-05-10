@@ -163,6 +163,16 @@ remove_bashrc_lines() {
     clean_line_from_file "$HOME/.profile" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
 }
 
+remove_git_hooks_config() {
+    # setup.sh wires core.hooksPath to .githooks; reset it so the repo falls
+    # back to the default hooks path if the user later deletes .githooks.
+    if git -C "$DIR" config --get core.hooksPath >/dev/null 2>&1; then
+        echo "Resetting git config..."
+        git -C "$DIR" config --unset core.hooksPath 2>/dev/null || true
+        echo "  Unset core.hooksPath in $(display_path "$DIR")"
+    fi
+}
+
 remove_tools() {
     echo "Removing CLI tools..."
     for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin chpc-allocs; do
@@ -271,6 +281,8 @@ main() {
     confirm "Remove CLI tools from ~/.local/bin?" && remove_tools
     echo ""
     confirm "Clean up empty directories?" && remove_dirs
+    echo ""
+    remove_git_hooks_config
 
     echo ""
     echo "Uninstall complete. Open a new shell to pick up changes."

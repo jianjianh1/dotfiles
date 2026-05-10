@@ -57,10 +57,19 @@ is_linux() {
 }
 
 is_chpc() {
+    # Hostname is the most reliable signal — login/compute nodes always
+    # present *.chpc.utah.edu.
     case "${HOSTNAME:-$(hostname 2>/dev/null)}" in
         *.chpc.utah.edu) return 0 ;;
     esac
-    [ -d "/uufs/chpc.utah.edu" ] && return 0
+    # Explicit override for ambiguous cases (sshfs/NFS mounts of CHPC home
+    # on a personal machine, container images that ship the path, etc.).
+    [ "${CHPC:-}" = 1 ] && return 0
+    # Path-only detection turned out too eager: any laptop with /uufs
+    # sshfs-mounted from CHPC would trigger CHPC mode. Require both a
+    # CHPC-only path AND the `module` command, which are only co-present
+    # on actual CHPC systems.
+    [ -d "/uufs/chpc.utah.edu/sys" ] && command -v module &>/dev/null && return 0
     return 1
 }
 
@@ -141,9 +150,13 @@ quote_for_bash_lc() {
 }
 
 path_is_manifest_managed() {
+    # Only paths under $HOME are eligible for manifest tracking. /usr/local/bin
+    # was historically allowed too, but that opened a footgun on shared Linux
+    # hosts: setup.sh installing into /usr/local/bin (when writable) would
+    # record system binaries that uninstall.sh would later sudo-remove.
     local path="$1"
     case "$path" in
-        "$HOME"/*|/usr/local/bin/*) return 0 ;;
+        "$HOME"/*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -164,6 +177,25 @@ manifest_add_path() {
     manifest_contains_path "$path" || printf '%s\n' "$path" >> "$INSTALL_MANIFEST"
 }
 
+# Internal: rotate an existing $dst.bak to a timestamped name unless it is
+# byte-identical to $dst (in which case the existing backup already captures
+# the same state and can be safely overwritten). Protects against
+# destroying a backup the user has edited by hand between setup runs.
+_rotate_backup() {
+    local dst="$1" bak="${dst}.bak" rotated ts
+    [ -e "$bak" ] || return 0
+    if [ -f "$bak" ] && [ -f "$dst" ] && cmp -s "$bak" "$dst" 2>/dev/null; then
+        rm -f "$bak"
+        return 0
+    fi
+    ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || printf '%s' "$$")"
+    rotated="${bak}.${ts}"
+    while [ -e "$rotated" ]; do rotated="${rotated}~"; done
+    if mv -f "$bak" "$rotated"; then
+        echo "  Preserved edited backup as $rotated"
+    fi
+}
+
 # Internal: back up $dst to ${dst}.bak if it exists and isn't already a link
 # to $src. Leaves the slot empty on return.
 _backup_existing() {
@@ -174,7 +206,7 @@ _backup_existing() {
             rm -f "$dst"
             return 0
         fi
-        rm -rf "${dst}.bak" 2>/dev/null || true
+        _rotate_backup "$dst"
         echo "  Backing up $dst -> ${dst}.bak"
         mv -f "$dst" "${dst}.bak"
     elif [ -e "$dst" ]; then
@@ -182,7 +214,7 @@ _backup_existing() {
         if [ "${3:-link}" = "copy" ] && cmp -s "$src" "$dst" 2>/dev/null; then
             return 0
         fi
-        rm -rf "${dst}.bak" 2>/dev/null || true
+        _rotate_backup "$dst"
         echo "  Backing up $dst -> ${dst}.bak"
         mv -f "$dst" "${dst}.bak"
     fi
