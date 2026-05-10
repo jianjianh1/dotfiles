@@ -4690,7 +4690,12 @@ def _render_width_capped_table(
                     else:
                         text = record.get(column, "") if line_index == 0 else ""
                     parts.append(
-                        _styled_cell(column, text.ljust(widths[column]), text, color)
+                        _styled_cell(
+                            column,
+                            text.ljust(widths[column]),
+                            record.get(column, ""),
+                            color,
+                        )
                     )
                 lines.append("  ".join(parts))
         else:
