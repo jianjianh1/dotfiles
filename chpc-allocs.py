@@ -231,6 +231,7 @@ GPU_TOKEN_CLASSIFIERS = (
     ("rtx6000ada",     "ada",        89),
     ("rtx5000ada",     "ada",        89),
     ("rtx4500ada",     "ada",        89),
+    ("rtx4500",        "ada",        89),
     ("rtx4000ada",     "ada",        89),
     ("rtx2000ada",     "ada",        89),
     ("l40s",           "ada",        89),
@@ -259,6 +260,7 @@ GPU_TOKEN_CLASSIFIERS = (
     ("titanv",         "volta",      70),
     ("v100",           "volta",      70),
     # Pascal (sm_61). p40 = sm_61, p100 = sm_60; we report the family minimum.
+    ("1080ti",         "pascal",     61),
     ("p100",           "pascal",     60),
     ("p40",            "pascal",     61),
     ("p4",             "pascal",     61),
@@ -406,6 +408,14 @@ DEFAULT_PROBE_TIME = "01:00:00"
 NOTE_QUEUE = "queue"
 NOTE_FRAGMENTED = "fragmented"
 NOTE_TOO_SMALL = "too-small"
+NOTE_QOS_LIMIT = "qos-limit"
+NOTE_INVALID_ACCOUNT = "invalid-account"
+NOTE_INVALID_QOS = "invalid-qos"
+NOTE_INVALID_PARTITION = "invalid-partition"
+NOTE_INVALID_CONSTRAINT = "invalid-constraint"
+NOTE_UNAVAILABLE = "unavailable"
+NOTE_PROBE_TIMEOUT = "probe-timeout"
+NOTE_PROBE_ERROR = "probe-error"
 
 
 class QOSInfo:
@@ -491,6 +501,7 @@ class AllocationRow:
         # Empty when the bucket lacked per-node records.
         self.fit_by_shape: Dict[str, Tuple[int, int]] = {}
         self.wait_by_shape: Dict[str, Optional[int]] = {}
+        self.probe_reason_by_shape: Dict[str, str] = {}
 
     @property
     def is_default(self) -> bool:
@@ -523,7 +534,9 @@ class AllocationRow:
         if shape is None:
             return ""
         wait_secs = self.wait_by_shape.get(shape.label)
-        if wait_secs is None or wait_secs <= 60:
+        if wait_secs is None:
+            return self.probe_reason_by_shape.get(shape.label, "")
+        if wait_secs <= 60:
             return ""
         fit = self.fit_by_shape.get(shape.label)
         if fit is None:
@@ -2322,6 +2335,52 @@ def parse_test_only_stderr(text: str) -> Optional[datetime]:
         return None
 
 
+def _clean_probe_message(text: str) -> str:
+    """Return a compact one-line scheduler message for unknown probe failures."""
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"^sbatch:\s*(?:error:\s*)?", "", line, flags=re.IGNORECASE)
+        if line:
+            lines.append(line)
+    if not lines:
+        return NOTE_PROBE_ERROR
+    msg = "; ".join(lines)
+    return msg[:77] + "..." if len(msg) > 80 else msg
+
+
+def classify_probe_failure(text: str) -> str:
+    """Map `sbatch --test-only` rejection text to a short note token.
+
+    The raw scheduler output is often verbose or repeats boilerplate. The note
+    column needs a compact, stable hint that explains why `wait` is unknown.
+    """
+    lower = (text or "").lower()
+    if not lower.strip():
+        return NOTE_PROBE_ERROR
+    if "timed out" in lower:
+        return NOTE_PROBE_TIMEOUT
+    if "invalid account" in lower or "invalid account" in lower.replace("_", " "):
+        return NOTE_INVALID_ACCOUNT
+    if "invalid qos" in lower or "qos is invalid" in lower:
+        return NOTE_INVALID_QOS
+    if "invalid partition" in lower or "partition" in lower and "invalid" in lower:
+        return NOTE_INVALID_PARTITION
+    if "invalid feature" in lower or "feature specification" in lower:
+        return NOTE_INVALID_CONSTRAINT
+    if "qosmax" in lower or "violates accounting/qos policy" in lower:
+        return NOTE_QOS_LIMIT
+    if (
+        "requested node configuration is not available" in lower
+        or "requested node configuration not available" in lower
+        or "node configuration" in lower and "not available" in lower
+    ):
+        return NOTE_UNAVAILABLE
+    return _clean_probe_message(text)
+
+
 def _format_wait(seconds: Optional[int]) -> str:
     """Render a wait-time delta compactly. None → '?'; 0 → 'now'; etc."""
     if seconds is None:
@@ -2342,14 +2401,12 @@ def _format_wait(seconds: Optional[int]) -> str:
     return f"{days}d"
 
 
-def predict_wait(
+def predict_wait_result(
     row: "AllocationRow",
     timeout: float = 10.0,
     shape: Optional[ProbeShape] = None,
-) -> Optional[int]:
-    """Return seconds-until-start for a probe job shaped like `shape`
-    (default: 1 CPU + 1 GPU on GPU rows + 1-minute wall), or None if SLURM
-    rejects the probe / can't predict.
+) -> Tuple[Optional[int], str]:
+    """Return (seconds-until-start, failure-reason) for a shaped probe job.
 
     Iterates through `_candidate_partitions(row)` because some QOS names don't
     match the partition (e.g. `granite-freecycle` QOS lives on `granite`
@@ -2358,13 +2415,16 @@ def predict_wait(
     if shape is None:
         shape = ProbeShape()
     if shape.should_skip(row):
-        return None
+        return None, "incompatible"
     sbatch = shutil.which("sbatch")
-    if not sbatch or not row.account or not row.qos:
-        return None
+    if not sbatch:
+        return None, "missing-sbatch"
+    if not row.account or not row.qos:
+        return None, "missing-account-or-qos"
     candidates = [c for c in _candidate_partitions(row) if c]
     if not candidates:
-        return None
+        return None, "missing-partition"
+    failure_reason = ""
     for partition in candidates:
         args = [
             sbatch,
@@ -2385,8 +2445,10 @@ def predict_wait(
                 universal_newlines=True,
                 timeout=timeout,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
+        except subprocess.TimeoutExpired:
+            return None, NOTE_PROBE_TIMEOUT
+        except OSError:
+            return None, NOTE_PROBE_ERROR
         # `--test-only` prints to stderr regardless of success.
         start = parse_test_only_stderr(result.stderr) or parse_test_only_stderr(result.stdout)
         if start is not None:
@@ -2396,8 +2458,21 @@ def predict_wait(
             # returns naive local. Don't "fix" this into a UTC conversion —
             # that would break the math on a single-TZ cluster like CHPC.
             delta = (start - datetime.now()).total_seconds()
-            return max(0, int(delta))
-    return None
+            return max(0, int(delta)), ""
+        failure_reason = classify_probe_failure(
+            "\n".join(part for part in (result.stderr, result.stdout) if part)
+        )
+    return None, failure_reason or NOTE_PROBE_ERROR
+
+
+def predict_wait(
+    row: "AllocationRow",
+    timeout: float = 10.0,
+    shape: Optional[ProbeShape] = None,
+) -> Optional[int]:
+    """Return seconds-until-start, preserving the historical scalar API."""
+    wait_secs, _reason = predict_wait_result(row, timeout=timeout, shape=shape)
+    return wait_secs
 
 
 _PROGRESS_NOTICE_THRESHOLD = 24
@@ -2447,14 +2522,23 @@ def predict_wait_times(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for row, shape in probe_pairs:
-            futures[pool.submit(predict_wait, row, shape=shape)] = (row, shape)
+            futures[pool.submit(predict_wait_result, row, shape=shape)] = (row, shape)
         completed = 0
         for future in as_completed(futures):
             row, shape = futures[future]
             try:
-                row.wait_by_shape[shape.label] = future.result()
+                result = future.result()
+                if isinstance(result, tuple):
+                    wait_secs, reason = result
+                else:
+                    # Compatibility for tests or callers that monkeypatch the
+                    # historical scalar predict_wait API into this slot.
+                    wait_secs, reason = result, ""
+                row.wait_by_shape[shape.label] = wait_secs
+                row.probe_reason_by_shape[shape.label] = reason
             except Exception:
                 row.wait_by_shape[shape.label] = None
+                row.probe_reason_by_shape[shape.label] = NOTE_PROBE_ERROR
             completed += 1
             if use_rolling:
                 sys.stderr.write(
@@ -3399,7 +3483,12 @@ def _is_default_output_mode(args: argparse.Namespace) -> bool:
     return not (args.sbatch or args.best or args.pivot)
 
 
-def _zero_results_hint(args: argparse.Namespace) -> str:
+def _zero_results_hint(
+    args: argparse.Namespace,
+    *,
+    matched_allocations: Optional[int] = None,
+    hidden_pairs: int = 0,
+) -> str:
     """Build a stderr hint shown when filtering left no rows.
 
     The hint itemizes which filters were applied and points at common
@@ -3407,11 +3496,24 @@ def _zero_results_hint(args: argparse.Namespace) -> str:
     """
     bits = _format_applied_filters(args)
     lines: List[str] = []
+    if hidden_pairs:
+        lines.append(
+            f"0 runnable rows shown; {hidden_pairs} compatible probe row"
+            f"{'s were' if hidden_pairs != 1 else ' was'} hidden."
+        )
+        lines.append("Hints:")
+        lines.append("  - Re-run with --show-all to see scheduler rejection reasons")
+        lines.append("  - Try a smaller shape or shorter walltime")
+        lines.append("  - Re-run with -v to see which filter dropped each row")
+        return "\n".join(lines)
     if bits:
         lines.append("0 allocations match. Filters applied:")
         lines.append(f"  {', '.join(bits)}")
     else:
-        lines.append("0 allocations match (no filters applied).")
+        if matched_allocations in (None, 0):
+            lines.append("0 allocations match (no filters applied).")
+        else:
+            lines.append("0 allocations match after compatibility filtering.")
     lines.append("Hints:")
     lines.append("  - Verify your associations: sacctmgr show association user=$USER")
     if args.account or args.qos or args.cluster:
@@ -3428,13 +3530,12 @@ _WAIT_SENTINEL = 10**12  # sorts unknown waits to the end (still < float('inf') 
 def _is_unprobeable_row(row: "AllocationRow") -> bool:
     """True if probing this row would yield no actionable wait info.
 
-    Rows without QOS MaxWall metadata or with zero free capacity always
-    yield useless probes; pre-filtering them avoids expensive sbatch
-    --test-only subprocess calls.
+    Rows without QOS MaxWall metadata usually yield useless probes; pre-filter
+    them to avoid expensive sbatch --test-only subprocess calls. Do not drop
+    zero-free rows here: `sbatch --test-only` can still return an actionable
+    future start time for busy-but-runnable allocations.
     """
     if not row.qos_info.max_wall:
-        return True
-    if not row.free_nodes or row.free_nodes.startswith("0/"):
         return True
     return False
 
@@ -3444,16 +3545,14 @@ def _is_low_information_pair(
 ) -> bool:
     """True if the (row, shape) pair should be hidden from the default view.
 
-    Drops noise that's not actionable: failed probes, QOSes without
-    MaxWall metadata, shapes whose walltime exceeds the QOS MaxWall,
-    and rows with zero free capacity.
+    Drops noise that's not actionable: failed probes, QOSes without MaxWall
+    metadata, and shapes whose walltime exceeds the QOS MaxWall. Rows with
+    zero currently fitting nodes stay visible when the scheduler returns a
+    valid future start time.
     """
     if row.wait_by_shape.get(shape.label) is None:
         return True
     if not row.qos_info.max_wall:
-        return True
-    free_nodes = row._availability_for_shape(shape)[0]
-    if not free_nodes or free_nodes.startswith("0/"):
         return True
     qos_max = parse_wall_seconds(row.qos_info.max_wall)
     shape_secs = parse_wall_seconds(shape.time)
@@ -3781,7 +3880,17 @@ def _note_color(raw: str) -> str:
         return _ANSI_DIM
     if raw == NOTE_FRAGMENTED:
         return _ANSI_YELLOW
-    if raw == NOTE_TOO_SMALL:
+    if raw in {
+        NOTE_TOO_SMALL,
+        NOTE_QOS_LIMIT,
+        NOTE_INVALID_ACCOUNT,
+        NOTE_INVALID_QOS,
+        NOTE_INVALID_PARTITION,
+        NOTE_INVALID_CONSTRAINT,
+        NOTE_UNAVAILABLE,
+        NOTE_PROBE_TIMEOUT,
+        NOTE_PROBE_ERROR,
+    }:
         return _ANSI_RED
     return ""
 
@@ -4002,8 +4111,11 @@ def json_output(
                         "'fragmented' (sized nodes exist but no single node "
                         "has the shape's CPUs+GPUs+memory free at once), "
                         "'too-small' (no node in the partition is large "
-                        "enough). Empty when wait is 'now' or '?'. Only "
-                        "populated when sinfo gave per-node records.",
+                        "enough). When wait is '?', contains a compact "
+                        "sbatch rejection reason such as 'qos-limit', "
+                        "'invalid-account', 'invalid-qos', or "
+                        "'invalid-partition' when available. Empty when wait "
+                        "is 'now'.",
                 "free_nodes": "with no shape: idle/total nodes from sinfo. "
                         "With an active shape: 'fitting / could-host' — "
                         "nodes that can host one shape instance right now, "
@@ -4145,7 +4257,15 @@ def best_output(
     if not pairs:
         if fmt == "json":
             return json.dumps(None)
-        return "# no allocations matched"
+        return "# no runnable allocations matched"
+    pairs = [
+        (row, shape) for row, shape in pairs
+        if shape is None or row.wait_by_shape.get(shape.label) is not None
+    ]
+    if not pairs:
+        if fmt == "json":
+            return json.dumps(None)
+        return "# no runnable allocations matched"
     row, shape = pairs[0]
     wait_secs = row.wait_by_shape.get(shape.label) if shape else None
     alternatives = len(pairs) - 1
@@ -4809,6 +4929,13 @@ def run_self_test() -> int:
     assert parsed == datetime(2026, 5, 8, 3, 0, 0)
     assert parse_test_only_stderr("allocation failure: invalid account") is None
     assert parse_test_only_stderr("") is None
+    assert classify_probe_failure("sbatch: error: QOSMaxCpuPerJobLimit") == NOTE_QOS_LIMIT
+    assert classify_probe_failure("allocation failure: Invalid account") == NOTE_INVALID_ACCOUNT
+    assert classify_probe_failure("sbatch: error: invalid qos") == NOTE_INVALID_QOS
+    assert classify_probe_failure("sbatch: error: invalid partition specified") == NOTE_INVALID_PARTITION
+    assert classify_probe_failure("Invalid feature specification") == NOTE_INVALID_CONSTRAINT
+    assert classify_probe_failure("Requested node configuration is not available") == NOTE_UNAVAILABLE
+    assert classify_probe_failure("") == NOTE_PROBE_ERROR
 
     # Sort by wait: None pushes to the end; 0 first, then 3600, 7200.
     rows_for_sort = [
@@ -5124,6 +5251,7 @@ def run_self_test() -> int:
     assert _classify_gpu_token("a100_80gb_pcie") == ("ampere", 80)
     assert _classify_gpu_token("a100_80gb_pcie_1g.10gb") == ("ampere", 80)
     assert _classify_gpu_token("a6000") == ("ampere", 86)
+    assert _classify_gpu_token("rtx4500") == ("ada", 89)
     assert _classify_gpu_token("h200") == ("hopper", 90)
     assert _classify_gpu_token("h200_1g.18gb") == ("hopper", 90)
     assert _classify_gpu_token("h100nvl") == ("hopper", 90)
@@ -5135,6 +5263,7 @@ def run_self_test() -> int:
     assert _classify_gpu_token("v100") == ("volta", 70)
     assert _classify_gpu_token("titanv") == ("volta", 70)
     assert _classify_gpu_token("p40") == ("pascal", 61)
+    assert _classify_gpu_token("1080ti") == ("pascal", 61)
     assert _classify_gpu_token("2080ti") == ("turing", 75)
     assert _classify_gpu_token("madeupgpu") is None
 
@@ -5354,7 +5483,8 @@ def run_self_test() -> int:
     assert _to_sbatch_wall("01:30:00") == "01:30:00"
     assert _to_sbatch_wall("garbage") == "garbage"
 
-    # _is_low_information_pair drops the four noise categories.
+    # _is_low_information_pair drops non-actionable rows, but keeps valid
+    # future-start predictions even when no node fits right now.
     li_shape = ProbeShape(cpus=4, time="01:00:00")
     big_shape = ProbeShape(cpus=4, time="7-00:00:00")
     ok_li_row = AllocationRow(
@@ -5392,7 +5522,7 @@ def run_self_test() -> int:
     )
     empty_cap_row.free_nodes = "0/10"
     empty_cap_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(empty_cap_row, li_shape) is True
+    assert _is_low_information_pair(empty_cap_row, li_shape) is False
     shape_empty_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-se", "q-se",
         qos_info=QOSInfo("q-se", max_wall="3-00:00:00"),
@@ -5400,7 +5530,7 @@ def run_self_test() -> int:
     shape_empty_row.free_nodes = "5/10"
     shape_empty_row.availability_by_shape[li_shape.label] = ("0/2", "0/64", "")
     shape_empty_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(shape_empty_row, li_shape) is True
+    assert _is_low_information_pair(shape_empty_row, li_shape) is False
 
     a100_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-a100", "q-a100",
@@ -5414,6 +5544,18 @@ def run_self_test() -> int:
     # --wait-for/--gpu/--cpu/--gpu-type/--cpu-type and legacy aliases) all
     # raise SystemExit at parse time.
     parser = _build_parser()
+
+    def assert_parse_exits(parser_obj, argv):
+        old_stderr = sys.stderr
+        try:
+            sys.stderr = StringIO()
+            parser_obj.parse_args(argv)
+        except SystemExit:
+            return
+        finally:
+            sys.stderr = old_stderr
+        raise AssertionError(f"argparse should have rejected {argv}")
+
     for removed in (
         ["--cores", "16"], ["--cpus", "16"], ["--time", "4h"],
         ["--shape", "a100:1"], ["--gpus", "a100:4"], ["--mem", "32G"],
@@ -5423,12 +5565,7 @@ def run_self_test() -> int:
         ["--show-unknown"], ["--no-avail"],
         ["--tier", "dev"], ["--list-tiers"],
     ):
-        try:
-            parser.parse_args(removed)
-        except SystemExit:
-            pass
-        else:
-            raise AssertionError(f"removed flag still accepted: {removed}")
+        assert_parse_exits(parser, removed)
 
     # Positional SHAPE_LIST parses cleanly into args.shape_pos.
     a = parser.parse_args(["a100:4"])
@@ -5459,12 +5596,12 @@ def run_self_test() -> int:
     # predict_wait_times submits only non-skipped pairs; no sbatch calls for
     # impossible row/shape combinations.
     fake_calls: List[Tuple[str, str]] = []
-    orig_predict_wait = globals()["predict_wait"]
+    orig_predict_wait_result = globals()["predict_wait_result"]
     orig_shutil_which = shutil.which
 
-    def fake_predict_wait(row, timeout=10.0, shape=None):
+    def fake_predict_wait_result(row, timeout=10.0, shape=None):
         fake_calls.append((row.qos, shape.label))
-        return 0
+        return 0, ""
 
     def fake_which(name):
         if name == "sbatch":
@@ -5472,7 +5609,7 @@ def run_self_test() -> int:
         return orig_shutil_which(name)
 
     try:
-        globals()["predict_wait"] = fake_predict_wait
+        globals()["predict_wait_result"] = fake_predict_wait_result
         shutil.which = fake_which
         a100_row.wait_by_shape = {}
         cpu_only_row.wait_by_shape = {}
@@ -5482,7 +5619,7 @@ def run_self_test() -> int:
             max_workers=1,
         )
     finally:
-        globals()["predict_wait"] = orig_predict_wait
+        globals()["predict_wait_result"] = orig_predict_wait_result
         shutil.which = orig_shutil_which
     assert ("q-cpu", "a100:1@1h") not in fake_calls
     assert len(fake_calls) == 3, fake_calls
@@ -5569,12 +5706,7 @@ def run_self_test() -> int:
         ["--freecycle-only", "--exclude-freecycle"],
         ["--guest-only", "--exclude-guest"],
     ):
-        try:
-            parser_fmt.parse_args(combo)
-        except SystemExit:
-            pass
-        else:
-            raise AssertionError(f"argparse should have rejected {combo}")
+        assert_parse_exits(parser_fmt, combo)
 
     # Help text shows argument groups + key DESCRIPTION/EPILOG sections + does
     # NOT show any of the removed flags or legacy aliases.
@@ -5669,6 +5801,8 @@ def run_self_test() -> int:
     # No filters → still produces a hint with the no-filters phrasing.
     hint_empty = _zero_results_hint(parser_fmt.parse_args([]))
     assert "no filters applied" in hint_empty
+    hint_hidden = _zero_results_hint(a, matched_allocations=1, hidden_pairs=1)
+    assert "--show-all" in hint_hidden and "scheduler rejection" in hint_hidden
 
     # render_explain_plan: text and JSON forms, with shape accessibility tags.
     amd_row = AllocationRow(
@@ -5777,10 +5911,13 @@ def run_self_test() -> int:
         "granite", "acct", "u", "", "granite-gpu-guest", "granite-gpu-guest"
     )
     guest_best_row.tags = ("gpu",)
-    guest_best_text = best_output([(guest_best_row, ProbeShape())], "text")
+    guest_shape = ProbeShape()
+    guest_best_row.wait_by_shape = {guest_shape.label: 0}
+    guest_best_text = best_output([(guest_best_row, guest_shape)], "text")
     assert "#SBATCH --partition=granite-gpu-guest" in guest_best_text
     assert "#SBATCH --partition=granite-gpu\n" not in guest_best_text
-    assert best_output([], "text") == "# no allocations matched"
+    assert best_output([(pivot_row, s_h1)], "text") == "# no runnable allocations matched"
+    assert best_output([], "text") == "# no runnable allocations matched"
     assert json.loads(best_output([], "json")) is None
 
     # sbatch_json_output: deduplicated array of {cluster, account, qos, partition}.
@@ -5814,12 +5951,7 @@ def run_self_test() -> int:
     assert parser_fmt.parse_args(["--pivot", "--format", "json"]).pivot is True
 
     # --avail (legacy hidden no-op) was removed; argparse rejects it now.
-    try:
-        parser_fmt.parse_args(["--avail"])
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("--avail should have been removed")
+    assert_parse_exits(parser_fmt, ["--avail"])
 
     # --quick parses and produces the expected dest value.
     assert parser_fmt.parse_args(["--quick"]).quick is True
@@ -5897,6 +6029,9 @@ def run_self_test() -> int:
     fit_row.wait_by_shape[a100x4.label] = None
     rec_unk = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
     assert rec_unk["note"] == "", rec_unk
+    fit_row.probe_reason_by_shape[a100x4.label] = NOTE_QOS_LIMIT
+    rec_reason = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_reason["note"] == NOTE_QOS_LIMIT, rec_reason
 
     # Memory check. Shape requests 256G; one node has 200G total (too-small),
     # one has 512G but only 100G free (fragmented), one has 512G fully free.
@@ -6120,6 +6255,7 @@ def main(argv: Sequence[str]) -> int:
         shapes=user_shapes,
     )
     rows = filter_rows(rows, args)
+    matched_allocations = len(rows)
     rows = filter_rows_by_shapes(rows, user_shapes)
     shapes: List[ProbeShape] = list(user_shapes) if include_wait and user_shapes else []
 
@@ -6135,6 +6271,7 @@ def main(argv: Sequence[str]) -> int:
             rows = [r for r in rows if not _is_unprobeable_row(r)]
         predict_wait_times(rows, shapes=shapes, verbose=args.verbose)
     pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
+    pairs_before_low_info = len(pairs)
     if include_wait and not args.show_all:
         pairs = [p for p in pairs if not _is_low_information_pair(*p)]
         if not args.full:
@@ -6150,7 +6287,15 @@ def main(argv: Sequence[str]) -> int:
     # If filtering left no rows, surface a hint so the user can self-debug.
     # Skip when an output-mode flag will produce its own empty-set message.
     if not pairs and _is_default_output_mode(args):
-        print(_zero_results_hint(args), file=sys.stderr)
+        hidden_pairs = pairs_before_low_info if include_wait and not args.show_all else 0
+        print(
+            _zero_results_hint(
+                args,
+                matched_allocations=matched_allocations,
+                hidden_pairs=hidden_pairs,
+            ),
+            file=sys.stderr,
+        )
 
     fmt, wide, auto_switched = _resolve_output_format(args)
     _maybe_emit_format_auto_notice(auto_switched, args.verbose)

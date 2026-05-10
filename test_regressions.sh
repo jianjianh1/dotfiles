@@ -478,6 +478,11 @@ test_pre_commit_no_staged_files() (
     "$DIR/.githooks/pre-commit" || fail "pre-commit failed with no staged files"
 )
 
+test_chpc_allocs_self_test() (
+    python3 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
+        fail "chpc-allocs.py --self-test failed"
+)
+
 run_test() {
     local name="$1"
 
@@ -502,6 +507,7 @@ main() {
     run_test test_nvim_manifest_records_only_owned_layout
     run_test test_nvim_install_selects_legacy_and_arm_assets
     run_test test_pre_commit_no_staged_files
+    run_test test_chpc_allocs_self_test
     echo "All regression tests passed."
 }
 
