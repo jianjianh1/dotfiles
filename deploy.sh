@@ -286,6 +286,7 @@ remote_upsert_env_exports() {
 # --- SSH helpers ---
 SSH_OPTS=()
 SSH_SOCKET=""
+SSH_SOCKET_DIR=""
 REMOTE_HOST=""
 
 remote_exec() {
@@ -296,6 +297,32 @@ remote_exec() {
     local cmd="$1" quoted_cmd
     quoted_cmd="$(quote_for_bash_lc "$cmd")"
     ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
+}
+
+# Like remote_exec, but captures stdout reliably even when the remote's login
+# shell prints an MOTD or `~/.profile` echoes before our command runs. The
+# remote command runs under `bash -c` (no login) and is bracketed by sentinel
+# markers; we extract the lines between them locally. Banner noise printed by
+# the outer login shell ends up outside the markers and is stripped.
+remote_capture() {
+    if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null; then
+        error "SSH connection dropped. Try re-running the script."
+        return 1
+    fi
+    local cmd="$1" quoted_cmd raw
+    local begin='__DEPLOY_CAPTURE_BEGIN__' end='__DEPLOY_CAPTURE_END__'
+    quoted_cmd="$(quote_for_bash_lc "$cmd")"
+    raw="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "
+        export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"
+        printf '%s\n' '$begin'
+        bash -c $quoted_cmd
+        printf '%s\n' '$end'
+    " 2>/dev/null)" || return 1
+    awk -v begin="$begin" -v end="$end" '
+        $0 == begin { inside = 1; next }
+        $0 == end   { inside = 0; next }
+        inside      { print }
+    ' <<<"$raw"
 }
 
 remote_copy() {
@@ -310,7 +337,9 @@ remote_copy_if_changed() {
     if [ "${FORCE_COPY:-0}" != 1 ] && [ -f "$local_path" ]; then
         local local_sum remote_sum
         local_sum="$(sha256_file "$local_path" 2>/dev/null || true)"
-        remote_sum="$(remote_exec "
+        # Use remote_capture so any login banner/MOTD on the remote shell
+        # cannot pollute the captured sha (which is then string-compared).
+        remote_sum="$(remote_capture "
             if [ -f \"$remote_path\" ]; then
                 if command -v sha256sum >/dev/null 2>&1; then
                     sha256sum \"$remote_path\" 2>/dev/null | awk '{print \$1}'
@@ -376,6 +405,9 @@ cleanup() {
     if [ -n "$SSH_SOCKET" ]; then
         ssh -O exit -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null || true
         rm -f "$SSH_SOCKET"
+    fi
+    if [ -n "$SSH_SOCKET_DIR" ]; then
+        rmdir "$SSH_SOCKET_DIR" 2>/dev/null || rm -rf "$SSH_SOCKET_DIR" 2>/dev/null || true
     fi
 }
 
@@ -479,7 +511,14 @@ if [ -n "$JUMP_HOST" ]; then
 fi
 
 # --- Establish ControlMaster (authenticates once, reuses for all commands) ---
-SSH_SOCKET="/tmp/deploy-$$-socket"
+# mktemp -d creates a mode-700 dir with a random suffix; the socket lives
+# inside it so other users on the box can't predict the path or race the
+# bind. cleanup() removes the dir on exit.
+SSH_SOCKET_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/deploy.XXXXXX")" || {
+    error "Failed to create SSH socket directory under ${TMPDIR:-/tmp}"
+    exit 1
+}
+SSH_SOCKET="$SSH_SOCKET_DIR/socket"
 
 echo ""
 info "Connecting to $REMOTE_HOST..."
@@ -822,14 +861,21 @@ step_gh_auth() {
     fi
 
     gh_token="$(gh auth token 2>/dev/null || true)"
-    if [ -n "$gh_token" ] && printf "%s\n" "$gh_token" | remote_exec "
-        set -u
+    # Reject tokens that don't match the expected shape so we never pipe
+    # arbitrary content (banners, error messages, accidentally-captured
+    # whitespace) into `gh auth login --with-token` on the remote.
+    if [ -n "$gh_token" ] && ! [[ "$gh_token" =~ ^[A-Za-z0-9_]{20,}$ ]]; then
+        warn "Local gh token failed shape validation; falling back to hosts.yml"
+        gh_token=""
+    fi
+    if [ -n "$gh_token" ] && printf "%s" "$gh_token" | remote_exec '
+        set -eu -o pipefail
         umask 077
-        mkdir -p \"\$HOME/.config/gh\" || exit 1
-        chmod 700 \"\$HOME/.config\" \"\$HOME/.config/gh\" 2>/dev/null || true
+        mkdir -p "$HOME/.config/gh"
+        chmod 700 "$HOME/.config" "$HOME/.config/gh" 2>/dev/null || true
         GH_PROMPT_DISABLED=1 gh auth login --hostname github.com --git-protocol https --with-token >/dev/null
         gh auth setup-git >/dev/null 2>&1 || true
-    "; then
+    '; then
         :
     elif local_gh_hosts_has_token "$LOCAL_GH_HOSTS_FILE" &&
         copy_local_file_to_remote "$LOCAL_GH_HOSTS_FILE" '$HOME/.config/gh/hosts.yml' 600; then
@@ -993,7 +1039,20 @@ step_clone_setup() {
 
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."
-        remote_exec "cd $REMOTE_DIR && git pull"
+        # Refuse to clobber local changes on the remote. A dirty working
+        # tree usually means someone edited a config in place; surface it
+        # instead of silently merging or losing work.
+        if ! remote_exec "cd $REMOTE_DIR && [ -z \"\$(git status --porcelain)\" ]"; then
+            error "Remote $REMOTE_DIR has uncommitted changes"
+            echo "    SSH in and resolve them (commit, stash, or revert), then re-run."
+            return 1
+        fi
+        # --ff-only avoids accidental merge commits when remote/local diverge.
+        if ! remote_exec "cd $REMOTE_DIR && git pull --ff-only"; then
+            error "git pull --ff-only failed on $REMOTE_DIR"
+            echo "    The remote branch has diverged. Reconcile manually on the remote."
+            return 1
+        fi
     else
         echo "  Cloning $REPO_SLUG..."
         if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
