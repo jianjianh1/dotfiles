@@ -23,6 +23,9 @@ from io import StringIO
 from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 
+__version__ = "0.1.0"
+
+
 ASSOC_FIELDS = [
     "Cluster",
     "Account",
@@ -615,18 +618,34 @@ class CommandError(RuntimeError):
     pass
 
 
+SHORT_HELP = """\
+chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
+
+Quickstart:
+  chpc-allocs a100:4              predict wait for one a100x4 job
+  chpc-allocs cpu:32              predict wait for one 32-core CPU job
+  chpc-allocs a100:4 cpu:32       compare alternatives ('+' also works)
+  chpc-allocs --quick             list allocations without live probes
+  chpc-allocs --best a100:4       paste-ready #SBATCH for the fastest match
+  chpc-allocs --list-gpus         show cluster GPU inventory
+  chpc-allocs --explain a100:4    preview filters and planned wait probes
+
+Run `chpc-allocs --help` for the full shape grammar, filters, and output modes.
+"""
+
 DESCRIPTION = """\
 chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
 A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
-wait time. With no args, this help is printed. Pass a SHAPE_LIST to probe
-those shapes; a one-line "Probing:" banner on stderr shows the planned
-shapes before probing.
+wait time. With no args, a short quickstart is printed. Pass one or more
+SHAPE tokens to probe those shapes; separate alternatives with spaces or '+',
+and combine requirements inside one job with '*'.
 
 Common entry points:
-  chpc-allocs                       print this help
+  chpc-allocs                       print a short quickstart
   chpc-allocs a100:4                a single a100x4 probe
   chpc-allocs cpu:32                a single 32-core CPU probe
+  chpc-allocs a100:4 cpu:32         two alternatives (space = OR)
   chpc-allocs a100:4+cpu:32         two alternatives ('+' = OR, no quoting)
   chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
   chpc-allocs 'a100:4*intel'        constrain to Intel hosts (vendor atom)
@@ -634,7 +653,7 @@ Common entry points:
   chpc-allocs 'gpu:1,sm_min=80'     any GPU with compute capability >= 8.0
   chpc-allocs --best a100:4         lowest-wait runnable triple as paste-ready #SBATCH
   chpc-allocs --quick               list allocations, no probes
-  chpc-allocs --explain a100:4      preview the probe plan, run nothing
+  chpc-allocs --explain a100:4      preview filters and wait probes; no sbatch probes
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
   chpc-allocs --list-gpus a100:1    inventory narrowed to partitions exposing a100
 """
@@ -648,7 +667,7 @@ Quickstart:
   chpc-allocs a100:4+cpu:32@12h               # two alternatives ('+' = OR)
   chpc-allocs 'a100:4*cpu:32@12h'             # one combined job ('*' = AND)
   chpc-allocs 'a100:4*cpu:32+h100:1'          # AND inside, OR across ('*' binds tighter)
-  chpc-allocs --explain a100:4                # preview the plan, run nothing
+  chpc-allocs --explain a100:4                # preview filters and wait probes; no sbatch probes
 
 Shape grammar:
   chpc-allocs h100:1                          # 'h100' resolves to actual GRES (e.g. h100nvl)
@@ -697,7 +716,7 @@ Sorting and trimming:
   chpc-allocs --sort wait,premium a100:4                # cheapest premium GPU first
   chpc-allocs --sort cluster,qos --reverse --quick      # group by cluster/qos, reversed
   chpc-allocs --full 'a100:1+a100:4'                    # don't collapse uniform-wait rows
-  chpc-allocs --show-all a100:4                         # keep '?' / over-MaxWall rows
+  chpc-allocs --show-all a100:4                         # keep '?' / rejected / over-MaxWall rows
 
 Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):
   chpc-allocs --list-gpus                               # full GPU inventory
@@ -709,7 +728,7 @@ Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):
 Recipes:
   chpc-allocs --best a100:4                             # paste-ready #SBATCH for fastest triple
   chpc-allocs --best a100:4 --format json | jq .        # same, machine-readable
-  chpc-allocs --sbatch --quick                          # all my allocations as #SBATCH blocks
+  chpc-allocs --sbatch a100:4 --quick                   # all matching allocations as #SBATCH blocks
   chpc-allocs --sbatch a100:4 --format json             # JSON array of {cluster,account,qos,partition}
   chpc-allocs --pivot 'a100:1+a100:4+h100:1'            # shapes side-by-side, table only
   chpc-allocs intel+amd --pivot                         # compare Intel vs AMD
@@ -726,7 +745,7 @@ Scripting / output:
 Diagnostics:
   chpc-allocs -v a100:1                       # narrate dropped rows + progress
   chpc-allocs --show-all a100:1               # don't hide marginal rows
-  chpc-allocs --explain 'a100:4*intel+h100:1' # show resolved probe plan, run nothing
+  chpc-allocs --explain 'a100:4*intel+h100:1' # show filters and wait probes; no sbatch probes
 """
 
 
@@ -736,13 +755,17 @@ def _lower_choice(value: str) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        usage="chpc-allocs [SHAPE_LIST | --explain] [FILTER ...] [OUTPUT ...]",
+        usage="chpc-allocs [SHAPE ...] [FILTER ...] [OUTPUT ...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         # Prefix abbreviation off: `--freecycle` no longer silently expands
         # to `--freecycle-only` (the same goes for `--guest` / `--no-guest`).
         allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"chpc-allocs {__version__}",
+        help="Print version and exit.",
     )
 
     # Positional probe spec. Two-level grammar:
@@ -752,9 +775,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # Quote when '*' might glob in your shell. Parsed in main() via
     # parse_shape_list.
     parser.add_argument(
-        "shape_pos", nargs="?", metavar="SHAPE_LIST", default=None,
-        help="Probe shape, or list joined with '+' (alternatives, OR) and "
-        "'*' (combine into one job, AND; binds tighter than '+'). "
+        "shape_pos", nargs="*", metavar="SHAPE", default=[],
+        help="Probe shape, or list joined with spaces or '+' (alternatives, OR) "
+        "and '*' (combine into one job, AND; binds tighter than '+'). "
         "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32 cores per node), "
         "'gpu:4' (any GPU x 4), '32' (= cpu:32), '2n' (2 nodes). Multi-node "
         "rule: cpu:N and cores=N are PER-NODE when nodes>1; use 'total:N' "
@@ -768,7 +791,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "gen=, sm=, gen_min=, sm_min=) also accepted, e.g. "
         "'gpu:1,sm_min=80', 'a100:4,gen=hopper', '2n,cpu:32'. Combined "
         "example: 'a100:4*intel+h100:1@30m'. Quote when your shell would "
-        "expand '*'.",
+        "expand '*'. Multiple positional shapes are treated as alternatives, "
+        "so `a100:4 cpu:32` is equivalent to `a100:4+cpu:32`.",
     )
 
     # ----- Filtering -------------------------------------------------------
@@ -851,35 +875,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "Output",
         description=(
             "Format and trim the output. Default: table on a TTY, JSON when "
-            "piped (a stderr notice fires when the auto-switch happens)."
+            "stdout is piped or redirected (a stderr notice fires when the "
+            "auto-switch happens)."
         ),
     )
     out.add_argument(
         "--format", type=_lower_choice, choices=("table", "csv", "json"),
         default=None, metavar="{table,csv,json}",
-        help="Output format (case-insensitive). Default: table on a TTY, "
-        "json (wide, with _help legend) when piped. "
-        "e.g. --format json | jq '.rows[]'",
+        help="Output format (case-insensitive). Default: table on a TTY; "
+        "json (wide, with _help legend) when stdout is piped or redirected. "
+        "Use --format=table to keep table output in a pipeline, or "
+        "--no-json-help to drop the legend. e.g. --format json | jq '.rows[]'",
     )
     out.add_argument(
         "--wide", action="store_true",
         help="Show extra columns: partition, gpu_types, cpu_features, "
         "default_qos, TRES limits, QOS flags, full sshare detail. Also "
-        "restores priority/fairshare/usage/default/tags when availability "
-        "columns are present (otherwise hidden so the free_* columns fit). "
+        "restores priority/fairshare/usage/default when availability "
+        "columns are present (otherwise hidden so the free_* columns fit; "
+        "pair with --no-availability to keep them without free_*). "
         "e.g. --wide --quick --format csv",
-    )
-    out.add_argument(
-        "--pivot", action="store_true",
-        help="Pivot layout: rows = (cluster, account, qos), columns = shape "
-        "labels, cells = wait times. Table format only; useful with a "
-        "multi-shape SHAPE_LIST. e.g. 'a100:1+a100:4' --pivot",
     )
     out.add_argument(
         "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Categories: "
         "Time: wait, shape, wall. "
-        "Quality: premium (a100/h100/h200/a6000 first), "
+        "Quality: premium (alias: gpu-tier; a100/h100/h200/a6000 first), "
         "vendor (intel<amd<mixed<unknown), default, tags. "
         "Identity: cluster, account, qos. "
         "Score: priority, fairshare, usage. "
@@ -892,8 +913,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reverse the sort order. e.g. --sort wait --reverse a100:4",
     )
     out.add_argument(
+        "--no-json-help", action="store_true",
+        help="In JSON output, drop the top-level _help legend and emit a "
+        "bare array. No effect on table/csv. "
+        "e.g. --quick --format json --no-json-help",
+    )
+    out.add_argument(
+        "--full", "--keep-walltimes", dest="full", action="store_true",
+        help="Skip the uniform-wait row collapse: keep every walltime row "
+        "even when a multi-shape SHAPE_LIST gave the same wait across them. "
+        "Alias: --keep-walltimes. e.g. --full 'a100:1+a100:4'",
+    )
+    out.add_argument(
+        "--show-all", dest="show_all", action="store_true",
+        help="Don't hide marginal rows: '?' waits, scheduler rejections, "
+        "no-MaxWall QOS, or over-MaxWall shapes. e.g. --show-all a100:4",
+    )
+
+    # Presentation modes are mutually exclusive: --best (single best triple),
+    # --sbatch (one block per matching allocation), --pivot (shapes side-by-
+    # side). Argparse enforces and renders the exclusion in usage.
+    presentation = out.add_mutually_exclusive_group()
+    presentation.add_argument(
+        "--best", action="store_true",
+        help="Print only the lowest-wait runnable triple as a ready-to-paste "
+        "#SBATCH block plus a one-line summary. Requires wait data, so "
+        "incompatible with --no-wait/--quick. With --format=json, emits a "
+        "single object. e.g. --best a100:4",
+    )
+    presentation.add_argument(
         "--sbatch", action="store_true",
-        help="Emit a paste-ready #SBATCH block per allocation "
+        help="Emit a paste-ready #SBATCH block per allocation. Requires "
+        "SHAPE so --nodes/--ntasks/--time are present "
         "(clusters/account/partition/qos plus shape directives like "
         "--time/--nodes/--ntasks/--gres/--constraint when SHAPE_LIST is "
         "given). Each block has a '# <cluster> · <account>/<qos>' header "
@@ -902,29 +953,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "with sbatch_directives, shape_label, predicted_wait_seconds. "
         "e.g. --sbatch a100:4 --quick",
     )
-    out.add_argument(
-        "--best", action="store_true",
-        help="Print only the lowest-wait runnable triple as a ready-to-paste "
-        "#SBATCH block plus a one-line summary. Requires wait data (incompatible "
-        "with --no-wait/--quick); also incompatible with --sbatch/--pivot. "
-        "With --format=json, emits a single object. e.g. --best a100:4",
-    )
-    out.add_argument(
-        "--no-json-help", action="store_true",
-        help="In JSON output, drop the top-level _help legend and emit a "
-        "bare array. No effect on table/csv. "
-        "e.g. --quick --format json --no-json-help",
-    )
-    out.add_argument(
-        "--full", action="store_true",
-        help="Skip the uniform-wait row collapse: keep every walltime row "
-        "even when a multi-shape SHAPE_LIST gave the same wait across them. "
-        "e.g. --full 'a100:1+a100:4'",
-    )
-    out.add_argument(
-        "--show-all", dest="show_all", action="store_true",
-        help="Don't hide marginal rows: '?' waits, no-MaxWall QOS, "
-        "over-MaxWall shapes, zero-free. e.g. --show-all a100:4",
+    presentation.add_argument(
+        "--pivot", action="store_true",
+        help="Pivot layout: rows = (cluster, account, qos), columns = shape "
+        "labels, cells = wait times. Table format only; useful with a "
+        "multi-shape SHAPE_LIST. e.g. 'a100:1+a100:4' --pivot",
     )
 
     # ----- Diagnostics & speed --------------------------------------------
@@ -945,7 +978,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-availability", dest="no_availability", action="store_true",
         help="Skip the live sinfo capacity query (no free_* columns). Faster. "
         "In table mode the free_* columns replace priority/fairshare/usage/"
-        "default/tags by default; --wide brings them back. "
+        "default by default; --wide keeps both sets visible together. "
         "e.g. --no-availability cpu:32",
     )
     diag.add_argument(
@@ -960,13 +993,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     diag.add_argument(
         "--explain", action="store_true",
-        help="Preview the probe plan and exit; runs no SLURM probes. "
+        help="Preview filters and planned wait probes, then exit; skips "
+        "sbatch --test-only wait probes but still reads SLURM metadata. "
         "Honors --format=json. e.g. --explain a100:4+cpu:32",
     )
-    diag.add_argument(
+    # --verbose and --quiet are mutex: one tunes stderr up, the other down.
+    chatter = diag.add_mutually_exclusive_group()
+    chatter.add_argument(
         "-v", "--verbose", action="store_true",
         help="Narrate dropped rows + probe progress to stderr. "
         "e.g. -v a100:4",
+    )
+    chatter.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Suppress informational stderr (auto-format notice, probe "
+        "banner, GPU-resolution notice, probe start/end lines). Errors "
+        "and zero-result hints still print. e.g. --quick --quiet | head",
     )
     diag.add_argument(
         "--self-test", action="store_true",
@@ -983,13 +1025,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "microarch / GPU gen / SM atoms all apply)."
         ),
     )
-    inv.add_argument(
+    # --list-gpus and --list-cpus are mutually exclusive: each prints its
+    # own inventory and exits, so combining them would mean discarding one.
+    inv_mode = inv.add_mutually_exclusive_group()
+    inv_mode.add_argument(
         "--list-gpus", action="store_true",
         help="Cluster/partition GPU type:count inventory from sinfo. "
         "A SHAPE_LIST narrows the listing. "
         "e.g. --list-gpus, --list-gpus a100:1, --list-gpus 'a100:4*intel'",
     )
-    inv.add_argument(
+    inv_mode.add_argument(
         "--list-cpus", action="store_true",
         help=(
             "Cluster/partition CPU inventory from sinfo: vendor, "
@@ -1005,6 +1050,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return _build_parser().parse_args(argv)
+
+
+def _print_short_help() -> None:
+    print(SHORT_HELP.rstrip())
+
+
+def _shape_list_from_args(shape_args: Sequence[str]) -> Optional[str]:
+    """Return the effective SHAPE_LIST from positional SHAPE tokens."""
+    parts = [s.strip() for s in shape_args if s and s.strip()]
+    if not parts:
+        return "" if shape_args else None
+    return "+".join(parts)
 
 
 def require_tool(name: str) -> str:
@@ -2490,16 +2547,20 @@ def predict_wait_times(
     rows: List["AllocationRow"],
     shapes: Optional[List[ProbeShape]] = None,
     max_workers: int = 8,
+    probe_timeout: float = 10.0,
     *,
     verbose: bool = False,
+    quiet: bool = False,
 ) -> None:
     """Populate `row.wait_by_shape[shape.label]` for every (row, shape), in parallel.
 
-    When `verbose=True`, prints a one-line `Probing N pairs...` notice to
-    stderr before the threadpool starts. The notice also fires when the
-    interactive-progress threshold is exceeded *and* stderr is a TTY — so
-    interactive runs of a wide multi-shape SHAPE_LIST get a heartbeat without
-    spamming logs from scripted invocations.
+    Unless `quiet`, prints a `Probing N wait probes...` start line and a
+    `probed N pairs in T s` end line on stderr — visible on TTY and piped
+    runs alike, so users see something even when stdout is captured. With
+    `verbose`, the same start line still fires; the end line is suppressed
+    so it doesn't trail the per-row [v] narration. The interactive rolling
+    counter (TTY only, large probe counts, non-verbose, non-quiet) is
+    unchanged.
     """
     if not rows or shutil.which("sbatch") is None:
         return
@@ -2518,16 +2579,26 @@ def predict_wait_times(
     # Rolling counter would garble the per-row [v] narration verbose emits,
     # so verbose runs keep the original static notice and skip rolling.
     is_tty = sys.stderr.isatty()
-    use_rolling = is_tty and threshold_hit and not verbose
-    if verbose:
+    use_rolling = is_tty and threshold_hit and not verbose and not quiet
+    effective_workers = min(max_workers, pair_count)
+    start_time = datetime.now()
+    if not quiet:
         print(
-            f"[chpc-allocs] Probing {pair_count} (allocation × shape) wait times...",
+            f"[chpc-allocs] Probing {pair_count} wait probes "
+            f"({effective_workers} parallel, up to {probe_timeout:g}s each)...",
             file=sys.stderr,
         )
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for row, shape in probe_pairs:
-            futures[pool.submit(predict_wait_result, row, shape=shape)] = (row, shape)
+            futures[
+                pool.submit(
+                    predict_wait_result,
+                    row,
+                    timeout=probe_timeout,
+                    shape=shape,
+                )
+            ] = (row, shape)
         completed = 0
         for future in as_completed(futures):
             row, shape = futures[future]
@@ -2553,6 +2624,14 @@ def predict_wait_times(
     if use_rolling:
         sys.stderr.write("\r" + " " * _PROGRESS_CLEAR_WIDTH + "\r")
         sys.stderr.flush()
+    # Verbose runs already narrate per-row outcomes; the duration tail is
+    # only useful for users who got the start line but no rolling counter.
+    if not quiet and not verbose:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        print(
+            f"[chpc-allocs] probed {pair_count} pairs in {elapsed:.1f}s",
+            file=sys.stderr,
+        )
 
 
 def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
@@ -3693,6 +3772,9 @@ def sort_pairs(
     reverse: bool,
 ) -> List[Tuple[AllocationRow, Optional[ProbeShape]]]:
     keys = [key.strip().lower() for key in sort_spec.split(",") if key.strip()] or list(DEFAULT_SORT)
+    # 'gpu-tier' reads more literally than 'premium'; both rank the same way
+    # (a100/h100/h200/a6000 first), so we accept either spelling.
+    keys = ["premium" if k == "gpu-tier" else k for k in keys]
     allowed = {
         "cluster",
         "account",
@@ -3706,6 +3788,7 @@ def sort_pairs(
         "wait",
         "shape",
         "premium",
+        "gpu-tier",
         "vendor",
     }
     unknown = [key for key in keys if key not in allowed]
@@ -3749,7 +3832,7 @@ def sort_pairs(
     return sorted(pairs, key=key_for, reverse=reverse)
 
 
-_AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage", "tags")
+_AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage")
 
 
 def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -> List[str]:
@@ -3770,9 +3853,10 @@ def _select_table_columns(all_columns: List[str], wide: bool, include_avail: boo
     """Pick which columns the table renderer should display.
 
     `to_dict()` produces every key for CSV/JSON consumers; the table view drops
-    columns that crowd the layout. In `--avail` mode (without `--wide`),
-    priority/fairshare/usage/default/tags are hidden so free_nodes/free_cpus/
-    free_gpus have room to breathe.
+    columns that crowd the layout. In availability mode (without `--wide`),
+    priority/fairshare/usage/default are hidden so free_nodes/free_cpus/
+    free_gpus have room to breathe; tags remain visible because
+    freecycle/guest rows change job-risk decisions.
     """
     if include_avail and not wide:
         return [c for c in all_columns if c not in _AVAIL_COMPACT_HIDE]
@@ -4175,8 +4259,8 @@ def json_output(
                 "basis; use --explain or -v to inspect uncertainty.",
                 "By default, rows are hidden when the probe returned `?`, "
                 "the QOS has no MaxWall, the shape's walltime exceeds the "
-                "QOS MaxWall, or the allocation has zero free capacity. "
-                "Pass --show-all to include them.",
+                "QOS MaxWall, or the scheduler rejected the probe. Pass "
+                "--show-all to include those marginal rows.",
             ],
         },
         "rows": records,
@@ -4449,6 +4533,53 @@ def _shape_unknown_metadata_fields(
     return fields
 
 
+def _shape_explain_details(shape: "ProbeShape") -> Dict[str, object]:
+    """Return user-facing resolved basics for a probe shape."""
+    if shape.requires_gpu():
+        gpu_type = shape.gpu_type or "gpu"
+        gpu_count = shape.gpu_count if shape.gpu_count is not None else 1
+        gpu_request = f"{gpu_type}:{gpu_count}/node"
+    else:
+        gpu_request = ""
+
+    if shape.cpus_per_node is not None:
+        cpu_request = (
+            f"{shape.cpus_per_node}/node ({shape.cpus} total)"
+            if shape.nodes > 1 else f"{shape.cpus} total"
+        )
+    elif shape.cpus_is_total:
+        cpu_request = f"{shape.cpus} total"
+    else:
+        cpu_request = f"{shape.cpus} total"
+
+    return {
+        "label": shape.label,
+        "nodes": shape.nodes,
+        "ntasks": shape.cpus,
+        "cpu_request": cpu_request,
+        "time": shape.time,
+        "sbatch_time": _to_sbatch_wall(shape.time),
+        "memory": shape.mem or "",
+        "gpu_request": gpu_request,
+        "requires_gpu": shape.requires_gpu(),
+    }
+
+
+def _format_shape_explain_details(shape: "ProbeShape") -> str:
+    details = _shape_explain_details(shape)
+    bits = [
+        f"nodes={details['nodes']}",
+        f"ntasks={details['ntasks']}",
+        f"cpus={details['cpu_request']}",
+        f"time={details['sbatch_time']}",
+    ]
+    if details["memory"]:
+        bits.append(f"mem={details['memory']}")
+    if details["gpu_request"]:
+        bits.append(f"gres={details['gpu_request']}")
+    return ", ".join(bits)
+
+
 def render_explain_plan(
     rows: List[AllocationRow],
     shapes: List[ProbeShape],
@@ -4475,21 +4606,22 @@ def render_explain_plan(
                 1 for r in rows
                 if not s.should_skip(r) and _shape_unknown_metadata_fields(r, s)
             )
-            shapes_payload.append(
+            item = _shape_explain_details(s)
+            item.update(
                 {
-                    "label": s.label,
                     "accessible_rows": accessible,
                     "skipped_rows": rows_count - accessible,
                     "unknown_metadata_rows": unknown,
                 }
             )
+            shapes_payload.append(item)
         payload = {
             "allocations_after_filter": rows_count,
             "filters_applied": applied,
             "shape_count": len(shapes),
             "shapes": shapes_payload,
             "estimated_probes": accessible_pairs,
-            "note": "Run without --explain to execute.",
+            "note": "Run without --explain to execute wait probes.",
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -4515,7 +4647,7 @@ def render_explain_plan(
                 tag = f"[probes {accessible} of {rows_count}]"
             if unknown:
                 tag = tag[:-1] + f"; {unknown} best-effort unknown metadata]"
-            lines.append(f"  {tag}  {s.label}")
+            lines.append(f"  {tag}  {s.label}  ({_format_shape_explain_details(s)})")
     else:
         lines.append("Probe shape set: (none — wait probing skipped)")
     lines.append(
@@ -4523,7 +4655,7 @@ def render_explain_plan(
         f"({rows_count} allocations × {len(shapes)} shapes, minus skipped pairs)"
     )
     lines.append("")
-    lines.append("Run without --explain to execute.")
+    lines.append("Run without --explain to execute wait probes.")
     return "\n".join(lines)
 
 
@@ -4911,11 +5043,13 @@ def run_self_test() -> int:
         for ln in rendered_cpu_lines[3:]
     ), rendered_cpu
 
-    # Compact column set: --avail (no --wide) hides priority/fairshare/usage/default/tags.
+    # Compact column set with availability keeps tags visible because
+    # freecycle/guest are decision-critical, but hides score/debug columns.
     full_cols = list(avail_row.to_dict(wide=False, include_avail=True).keys())
     compact = _select_table_columns(full_cols, wide=False, include_avail=True)
     assert "priority" not in compact and "fairshare" not in compact
-    assert "usage" not in compact and "default" not in compact and "tags" not in compact
+    assert "usage" not in compact and "default" not in compact
+    assert "tags" in compact
     assert "cluster" in compact and "free_gpus" in compact
     # --wide brings them back.
     wide_cols = _select_table_columns(full_cols, wide=True, include_avail=True)
@@ -5099,11 +5233,16 @@ def run_self_test() -> int:
         else:
             raise AssertionError(f"parse_shape_list({bad!r}) should have raised")
 
-    # Positional SHAPE_LIST flows into args.shape_pos and is parsed in main().
+    # Positional SHAPE tokens flow into args.shape_pos and are joined in main().
     a = parser.parse_args(["a100:4"])
-    assert a.shape_pos == "a100:4"
+    assert a.shape_pos == ["a100:4"]
     a = parser.parse_args(["a100:4+cpu:32"])
-    assert a.shape_pos == "a100:4+cpu:32"
+    assert a.shape_pos == ["a100:4+cpu:32"]
+    a = parser.parse_args(["a100:4", "cpu:32"])
+    assert a.shape_pos == ["a100:4", "cpu:32"]
+    assert _shape_list_from_args(a.shape_pos) == "a100:4+cpu:32"
+    assert _shape_list_from_args([]) is None
+    assert _shape_list_from_args([""]) == ""
 
     sh = parse_shape_spec("a100:1@30m")
     assert sh.gpu_type == "a100" and sh.gpu_count == 1 and sh.time == "30m"
@@ -5592,15 +5731,17 @@ def run_self_test() -> int:
     ):
         assert_parse_exits(parser, removed)
 
-    # Positional SHAPE_LIST parses cleanly into args.shape_pos.
+    # Positional SHAPE tokens parse cleanly into args.shape_pos.
     a = parser.parse_args(["a100:4"])
-    assert a.shape_pos == "a100:4"
+    assert a.shape_pos == ["a100:4"]
     a = parser.parse_args(["cpu:32"])
-    assert a.shape_pos == "cpu:32"
+    assert a.shape_pos == ["cpu:32"]
     a = parser.parse_args(["32"])
-    assert a.shape_pos == "32"
+    assert a.shape_pos == ["32"]
     a = parser.parse_args(["a100:4+cpu:32@12h"])
-    assert a.shape_pos == "a100:4+cpu:32@12h"
+    assert a.shape_pos == ["a100:4+cpu:32@12h"]
+    a = parser.parse_args(["a100:4", "cpu:32@12h"])
+    assert _shape_list_from_args(a.shape_pos) == "a100:4+cpu:32@12h"
 
     # expand_rows_by_shape filters skipped pairs (gpu shape on cpu row).
     a100_only = ProbeShape(gpu_type="a100", gpu_count=1)
@@ -5642,6 +5783,7 @@ def run_self_test() -> int:
             [cpu_only_row, a100_row],
             shapes=[cpu_only_shape, a100_only],
             max_workers=1,
+            quiet=True,
         )
     finally:
         globals()["predict_wait_result"] = orig_predict_wait_result
@@ -5699,8 +5841,10 @@ def run_self_test() -> int:
     parser_fmt = _build_parser()
     args_no_fmt = parser_fmt.parse_args([])
     assert args_no_fmt.format is None
+    assert args_no_fmt.shape_pos == []
     args_explicit = parser_fmt.parse_args(["--format", "table"])
     assert args_explicit.format == "table"
+    assert "Quickstart:" in SHORT_HELP and "--help" in SHORT_HELP
 
     # Surviving flags expose their dests.
     a = parser_fmt.parse_args(["--no-availability"])
@@ -5755,6 +5899,9 @@ def run_self_test() -> int:
         "Quality:",
     ):
         assert header in rendered, f"expected {header!r} in --help"
+    assert "spaces or '+'" in rendered
+    assert "stdout is piped or redirected" in rendered
+    assert "scheduler" in rendered and "rejections" in rendered
     # Removed flags must not appear in --help. Use a word-boundary check so
     # '--no-avail' isn't mistakenly matched against '--no-availability'.
     for removed in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
@@ -5845,14 +5992,21 @@ def run_self_test() -> int:
     assert "Allocations matching filters: 2" in text
     assert "Probe shape set (2)" in text
     assert "a100:1@1h" in text
-    assert "Run without --explain" in text
+    assert "nodes=1" in text and "time=01:00:00" in text
+    assert "gres=a100:1/node" in text
+    assert "Run without --explain to execute wait probes" in text
     payload = json.loads(render_explain_plan(explain_rows, explain_shapes, a, "json"))
     assert payload["allocations_after_filter"] == 2
     assert payload["shape_count"] == 2
     assert isinstance(payload["shapes"], list) and len(payload["shapes"]) == 2
     assert "label" in payload["shapes"][0]
+    assert payload["shapes"][0]["nodes"] == 1
+    assert payload["shapes"][0]["ntasks"] == 1
+    assert payload["shapes"][0]["gpu_request"] == "a100:1/node"
+    assert payload["shapes"][0]["sbatch_time"] == "01:00:00"
     assert "accessible_rows" in payload["shapes"][0]
     assert "unknown_metadata_rows" in payload["shapes"][0]
+    assert "wait probes" in payload["note"]
     unknown_row = AllocationRow("granite", "x", "u", "", "q-unk", "q-unk")
     unknown_row.tags = ("gpu",)
     unknown_text = render_explain_plan(
@@ -6023,6 +6177,13 @@ def run_self_test() -> int:
 
     # --quick parses and produces the expected dest value.
     assert parser_fmt.parse_args(["--quick"]).quick is True
+    try:
+        main(["--sbatch", "--quick"])
+    except CommandError as exc:
+        msg = str(exc)
+        assert "--sbatch requires SHAPE" in msg and "--ntasks" in msg, msg
+    else:
+        raise AssertionError("--sbatch without SHAPE should have raised")
 
     # Group membership: each flag must be DEFINED inside its group's section
     # (not just mentioned in DESCRIPTION/EPILOG). argparse renders each flag
@@ -6153,12 +6314,12 @@ def _print_probe_banner(
     """Print a one-line 'Probing:' banner to stderr before probes run.
 
     Makes the chosen shape set visible upfront. Suppressed under --no-wait
-    (no probe), --explain (it has its own plan output), and on non-TTY
-    stderr unless --verbose is set.
+    (no probe), --explain (it has its own plan output), or --quiet. Emits
+    on TTY or non-TTY stderr alike so piped runs see what's about to happen.
     """
     if args.no_wait or args.explain or not shapes:
         return
-    if not (args.verbose or sys.stderr.isatty()):
+    if args.quiet:
         return
     if len(shapes) == 1:
         body = f"single shape ({shapes[0].label})"
@@ -6173,13 +6334,17 @@ def _print_probe_banner(
 def _maybe_emit_gpu_resolution_notice(
     pairs: List[Tuple["AllocationRow", Optional["ProbeShape"]]],
     verbose: bool,
+    quiet: bool = False,
 ) -> None:
     """Print a one-line stderr notice when a shape's literal `gpu_type` got
     resolved to a different per-row GRES name (e.g. 'h100' → 'h100nvl').
 
-    Quiet when no resolution happened, when stderr isn't a TTY (and verbose
-    is off), or when the user already typed the exact GRES name.
+    Quiet when no resolution happened, when --quiet is set, when stderr
+    isn't a TTY (and verbose is off), or when the user already typed the
+    exact GRES name.
     """
+    if quiet:
+        return
     by_literal: Dict[str, Dict[str, Set[str]]] = {}
     for row, shape in pairs:
         if shape is None or not shape.gpu_type:
@@ -6215,27 +6380,79 @@ def _maybe_emit_gpu_resolution_notice(
             )
 
 
-def _maybe_emit_format_auto_notice(auto_switched: bool, verbose: bool) -> None:
+def _maybe_emit_column_swap_notice(
+    args: argparse.Namespace, include_avail: bool,
+) -> None:
+    """Tell verbose users that availability data hid some columns.
+
+    In table mode, when free_nodes/free_cpus/free_gpus are present and
+    --wide isn't set, _select_table_columns drops the columns listed in
+    _AVAIL_COMPACT_HIDE so the layout fits 100-col terminals.
+    """
+    if args.wide or not include_avail:
+        return
+    hidden = ", ".join(_AVAIL_COMPACT_HIDE)
+    _emit_verbose(
+        args.verbose,
+        f"availability columns present — hiding {hidden} so free_* fits; "
+        "pass --wide to keep them.",
+    )
+
+
+def _maybe_emit_inventory_atom_notice(
+    args: argparse.Namespace, shapes: Optional[Sequence["ProbeShape"]],
+) -> None:
+    """Tell verbose users that --list-gpus/--list-cpus ignored their shape's
+    walltime/mem/total atoms.
+
+    Inventory only filters by partition features (vendor / arch / GPU
+    type), so atoms like '@12h', 'mem=…', or 'total:64' are silently
+    dropped.
+    """
+    if not shapes:
+        return
+    found: Set[str] = set()
+    for shape in shapes:
+        if shape.time != DEFAULT_PROBE_TIME:
+            found.add("@time")
+        if shape.mem:
+            found.add("mem=")
+        if shape.cpus_is_total:
+            found.add("total=")
+    if not found:
+        return
+    items = ", ".join(sorted(found))
+    _emit_verbose(
+        args.verbose,
+        f"--list-gpus/--list-cpus ignores {items} (inventory filters by "
+        "partition features only).",
+    )
+
+
+def _maybe_emit_format_auto_notice(
+    auto_switched: bool, verbose: bool, quiet: bool = False,
+) -> None:
     """Print a stderr line when --format auto-switched to JSON.
 
     The notice fires only when stderr is a TTY (so logged pipelines stay
     quiet) or when --verbose is on (so users debugging an auto-switch can
-    see it under any setup).
+    see it under any setup). --quiet silences it unconditionally.
     """
-    if not auto_switched:
+    if not auto_switched or quiet:
         return
     if not (verbose or sys.stderr.isatty()):
         return
     print(
-        "[chpc-allocs] stdout is piped — output is JSON (wide). "
-        "Pass --format=table to override or --format=json to silence this notice.",
+        "[chpc-allocs] stdout is piped or redirected — defaulting to JSON "
+        "(wide, with _help). Pass --format=table to keep table output, "
+        "--format=json to silence this notice, or --no-json-help to drop the legend.",
         file=sys.stderr,
     )
 
 
 def main(argv: Sequence[str]) -> int:
     if not argv:
-        _build_parser().print_help()
+        _print_short_help()
         return 0
     args = parse_args(argv)
     if args.self_test:
@@ -6244,22 +6461,31 @@ def main(argv: Sequence[str]) -> int:
         args.no_wait = True
         args.no_availability = True
         args.no_usage = True
-    user_shapes = parse_shape_list(args.shape_pos) if args.shape_pos is not None else None
+    shape_list = _shape_list_from_args(args.shape_pos)
+    user_shapes = parse_shape_list(shape_list) if shape_list is not None else None
     if args.pivot and args.format in ("csv", "json"):
         raise CommandError(
             "--pivot is only supported with --format=table\n"
             "  hint: drop --format, or post-process the long-format JSON/CSV with jq/awk"
         )
-    if args.best:
-        if args.no_wait:
-            raise CommandError(
-                "--best needs wait data; drop --no-wait/--quick"
-            )
-        if args.sbatch or args.pivot:
-            raise CommandError(
-                "--best is incompatible with --sbatch and --pivot"
-            )
+    if args.best and args.no_wait:
+        raise CommandError(
+            "--best needs wait data; drop --no-wait/--quick "
+            "(or use --explain to dry-run the plan)"
+        )
+    if args.best and user_shapes is None:
+        raise CommandError(
+            "--best needs a SHAPE_LIST (e.g. 'chpc-allocs --best a100:4')"
+        )
+    if args.sbatch and user_shapes is None:
+        raise CommandError(
+            "--sbatch requires SHAPE so the output includes --nodes, "
+            "--ntasks, and --time\n"
+            "  example: chpc-allocs --sbatch a100:4 --quick"
+        )
 
+    if args.list_gpus or args.list_cpus:
+        _maybe_emit_inventory_atom_notice(args, user_shapes)
     if args.list_gpus:
         # Fetch features only when shapes carry CPU atoms — the second sinfo
         # call is the same cost as the existing --list-cpus path.
@@ -6337,7 +6563,10 @@ def main(argv: Sequence[str]) -> int:
         _print_probe_banner(args, shapes)
         if not args.show_all:
             rows = [r for r in rows if not _is_unprobeable_row(r)]
-        predict_wait_times(rows, shapes=shapes, verbose=args.verbose)
+        predict_wait_times(
+            rows, shapes=shapes,
+            verbose=args.verbose, quiet=args.quiet,
+        )
     pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
     pairs_before_low_info = len(pairs)
     if include_wait and not args.show_all:
@@ -6366,7 +6595,7 @@ def main(argv: Sequence[str]) -> int:
         )
 
     fmt, wide, auto_switched = _resolve_output_format(args)
-    _maybe_emit_format_auto_notice(auto_switched, args.verbose)
+    _maybe_emit_format_auto_notice(auto_switched, args.verbose, quiet=args.quiet)
 
     if args.best:
         output = best_output(pairs, fmt)
@@ -6379,7 +6608,7 @@ def main(argv: Sequence[str]) -> int:
         output = pivot_output(pairs)
     else:
         show_gpus = any(s is not None and s.requires_gpu() for _, s in pairs)
-        _maybe_emit_gpu_resolution_notice(pairs, args.verbose)
+        _maybe_emit_gpu_resolution_notice(pairs, args.verbose, quiet=args.quiet)
         if fmt == "csv":
             output = csv_output(
                 pairs, wide,
@@ -6394,6 +6623,7 @@ def main(argv: Sequence[str]) -> int:
                 show_gpus=show_gpus,
             )
         else:
+            _maybe_emit_column_swap_notice(args, include_avail)
             output = table_output(
                 pairs, wide,
                 include_avail=include_avail, include_wait=include_wait,
