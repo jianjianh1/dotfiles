@@ -6,6 +6,39 @@
 # PATH
 export PATH="$HOME/.local/bin:$PATH"
 
+# Cache slow `tool init` evals to ~/.cache/server-configs. On NFS-mounted
+# homes (CHPC), each `eval "$(atuin init bash)"` etc. costs ~50-150ms.
+# Regenerate the cache when the binary's mtime is newer than the cache.
+# setup.sh wipes ~/.cache/server-configs at install time so version bumps
+# always pick up fresh init scripts.
+_server_configs_load_cached_init() {
+    local name="$1" cmd="$2"
+    local cache_dir="$HOME/.cache/server-configs"
+    local cache_file="$cache_dir/${name}.bash"
+    local first_word bin
+
+    first_word="${cmd%% *}"
+    bin="$(command -v "$first_word" 2>/dev/null)" || return 1
+
+    if [ ! -s "$cache_file" ] || [ "$bin" -nt "$cache_file" ]; then
+        # Use `command` to bypass shell aliases (`alias mv='mv -i'`) and
+        # functions that would prompt or otherwise alter behavior.
+        if ! command mkdir -p "$cache_dir" 2>/dev/null; then
+            eval "$cmd"
+            return
+        fi
+        if eval "$cmd" > "$cache_file.tmp" 2>/dev/null; then
+            command mv -f "$cache_file.tmp" "$cache_file"
+        else
+            command rm -f "$cache_file.tmp"
+            eval "$cmd"
+            return
+        fi
+    fi
+    # shellcheck source=/dev/null
+    source "$cache_file"
+}
+
 # History
 export HISTSIZE=50000
 export HISTFILESIZE=100000
@@ -101,7 +134,7 @@ if ! shopt -oq posix; then
 fi
 
 # Atuin: SQLite-backed shell history with context (replaces Ctrl-R)
-command -v atuin &>/dev/null && eval "$(atuin init bash --disable-up-arrow)"
+_server_configs_load_cached_init atuin "atuin init bash --disable-up-arrow"
 
 if [ -f ~/.server-configs-generated/bashrc_compat ]; then
     # shellcheck source=/dev/null

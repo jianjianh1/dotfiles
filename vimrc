@@ -13,6 +13,12 @@ set timeoutlen=300
 set ttimeout
 set ttimeoutlen=10              " Fast escape key
 
+" Safe ASCII default for listchars in case ~/.server-configs-generated is
+" missing (fresh clone, before setup.sh runs). vim's built-in default
+" includes `eol:$` which clutters every line; override before optionally
+" loading the compat file (which may upgrade these to UTF-8 glyphs).
+set listchars=tab:\|\ ,trail:.,extends:>,precedes:<,nbsp:_
+
 " Version-sensitive settings are rendered by setup.sh.
 if filereadable(expand('~/.server-configs-generated/vimrc.compat'))
     execute 'source' fnameescape(expand('~/.server-configs-generated/vimrc.compat'))
@@ -167,8 +173,10 @@ augroup custom
     " 2-space indent for web files
     autocmd FileType html,css,javascript,typescript,json,yaml setlocal tabstop=2 shiftwidth=2 softtabstop=2
 
-    " Strip trailing whitespace on save
-    autocmd BufWritePre * :%s/\s\+$//e
+    " Strip trailing whitespace on save, except where whitespace is
+    " meaningful: markdown uses '  ' for <br>, gitcommit/diff have
+    " significant trailing space in templates and patch context.
+    autocmd BufWritePre * if index(['markdown', 'gitcommit', 'diff'], &filetype) == -1 | :%s/\s\+$//e | endif
 
 augroup END
 

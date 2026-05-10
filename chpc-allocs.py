@@ -5,7 +5,20 @@ Find CHPC SLURM allocations and QOS choices for the current user.
 The default mode only queries associations for the invoking user. Use
 --all-visible to search broader account/QOS metadata your normal permissions
 can read; user names are never displayed in that mode.
+
+Requires Python 3.7+. CHPC's stock /usr/bin/python3 is 3.6 on some nodes;
+load `python/3.10.3` (or newer) before running there.
 """
+
+import sys
+
+if sys.version_info < (3, 7):
+    raise SystemExit(
+        "chpc-allocs requires Python 3.7+ (found {0}.{1}). "
+        "On CHPC, run `module load python/3.10.3` first.".format(
+            sys.version_info.major, sys.version_info.minor
+        )
+    )
 
 import argparse
 import csv
@@ -17,7 +30,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime

@@ -28,12 +28,16 @@ autocmd("FileType", {
     end,
 })
 
--- Strip trailing whitespace on save
+-- Strip trailing whitespace on save, except where it's meaningful:
+-- markdown ('  ' = <br>), gitcommit (template scissors line), and diff
+-- (patch context lines).
+local strip_whitespace_skip = { markdown = true, gitcommit = true, diff = true }
 augroup("StripWhitespace", { clear = true })
 autocmd("BufWritePre", {
     group = "StripWhitespace",
     pattern = "*",
     callback = function()
+        if strip_whitespace_skip[vim.bo.filetype] then return end
         local pos = vim.api.nvim_win_get_cursor(0)
         vim.cmd([[%s/\s\+$//e]])
         vim.api.nvim_win_set_cursor(0, pos)

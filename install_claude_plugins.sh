@@ -88,8 +88,6 @@ FAILURES=()
 
 # Shared run_step (records to FAILURES array). Aliased to install_plugin
 # so existing call-sites read naturally.
-# shellcheck source=lib/common.sh
-. "$DIR/lib/common.sh"
 install_plugin() { run_step "$@"; }
 
 install_and_enable_plugin() {
