@@ -481,6 +481,7 @@ class AllocationRow:
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
+        self.availability_by_shape: Dict[str, Tuple[str, str, str]] = {}
         self.wait_by_shape: Dict[str, Optional[int]] = {}
 
     @property
@@ -496,6 +497,13 @@ class AllocationRow:
             return ""
         resolved = shape.resolved_gpu_type(self)
         return resolved or ""
+
+    def _availability_for_shape(
+        self, shape: Optional["ProbeShape"]
+    ) -> Tuple[str, str, str]:
+        if shape is not None and shape.label in self.availability_by_shape:
+            return self.availability_by_shape[shape.label]
+        return self.free_nodes, self.free_cpus, self.free_gpus
 
     def to_dict(
         self,
@@ -552,9 +560,10 @@ class AllocationRow:
                 }
             )
         if include_avail:
-            data["free_nodes"] = self.free_nodes
-            data["free_cpus"] = self.free_cpus
-            data["free_gpus"] = self.free_gpus
+            free_nodes, free_cpus, free_gpus = self._availability_for_shape(shape)
+            data["free_nodes"] = free_nodes
+            data["free_cpus"] = free_cpus
+            data["free_gpus"] = free_gpus
         return data
 
 
@@ -605,6 +614,11 @@ Shape grammar:
   chpc-allocs 'gpu:4*ampere'                  # any 4 Ampere GPUs (gen atom)
   chpc-allocs 'gpu:1,sm_min=80'               # 1 GPU with compute capability >= 8.0
   chpc-allocs 'a100:4@12h,vendor=intel'       # walltime + vendor key=value
+  chpc-allocs '2n,cpu:32'                     # 2 nodes, 32 cores PER NODE (= 64 total)
+  chpc-allocs '2n,total:64'                   # 2 nodes, 64 cores total (explicit)
+  chpc-allocs '2n*a100:4@12h'                 # 2 nodes with 4 a100s/node, 12h
+  Multi-node rule: when a node count is given (Nn or nodes=N), 'cpu:N' and
+    'cores=N' are PER NODE; use 'total:N' or 'total=N' to bypass.
   Vendors: intel, amd. Microarchitectures (short or long form):
     Intel: skl/skylake, csl/cascadelake, icx/icelake, spr/sapphirerapids,
            emr/emeraldrapids, cpx/cooperlake, bro/broadwell, hsw/haswell,
@@ -618,6 +632,8 @@ Shape grammar:
     Ranges (key=value only): sm_min=80, gen_min=ampere
     Note: '+' suffix (e.g. 'sm80+') is NOT supported — '+' is the
           shape-list OR separator. Use 'sm_min=80' instead.
+    Availability columns are shape-aware: constrained runs show matching
+          free_nodes/free_cpus/free_gpus, not broad partition totals.
 
 Filtering rows (repeatable, OR-matched, case-insensitive substrings):
   chpc-allocs --cluster notchpeak                       # one cluster only
@@ -695,15 +711,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "shape_pos", nargs="?", metavar="SHAPE_LIST", default=None,
         help="Probe shape, or list joined with '+' (alternatives, OR) and "
         "'*' (combine into one job, AND; binds tighter than '+'). "
-        "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32-core CPU), "
-        "'gpu:4' (any GPU x 4), '32' (= cpu:32). Append '@DUR' for walltime: "
-        "'a100:1@30m', 'cpu:32@12h'. CPU vendor/microarch atoms: 'intel', "
-        "'amd', 'skl', 'genoa', 'rome', 'milan', 'zen4', etc. (filter rows + "
-        "pass --constraint to sbatch). GPU generation / SM atoms: 'ampere', "
-        "'hopper', 'ada', 'sm80', 'sm_89', etc. (filter rows + pin --gres "
-        "type). Comma-separated key=value tokens (cores=, mem=, time=, "
-        "gpus=, nodes=, vendor=, arch=, gen=, sm=, gen_min=, sm_min=) also "
-        "accepted, e.g. 'gpu:1,sm_min=80', 'a100:4,gen=hopper'. Combined "
+        "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32 cores per node), "
+        "'gpu:4' (any GPU x 4), '32' (= cpu:32), '2n' (2 nodes). Multi-node "
+        "rule: cpu:N and cores=N are PER-NODE when nodes>1; use 'total:N' "
+        "or 'total=N' to specify total cores across the job. Append '@DUR' "
+        "for walltime: 'a100:1@30m', 'cpu:32@12h'. CPU vendor/microarch "
+        "atoms: 'intel', 'amd', 'skl', 'genoa', 'rome', 'milan', 'zen4', "
+        "etc. (filter rows + pass --constraint to sbatch). GPU generation "
+        "/ SM atoms: 'ampere', 'hopper', 'ada', 'sm80', 'sm_89', etc. "
+        "(filter rows + pin --gres type). Comma-separated key=value tokens "
+        "(cores=, total=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
+        "gen=, sm=, gen_min=, sm_min=) also accepted, e.g. "
+        "'gpu:1,sm_min=80', 'a100:4,gen=hopper', '2n,cpu:32'. Combined "
         "example: 'a100:4*intel+h100:1@30m'. Quote when your shell would "
         "expand '*'.",
     )
@@ -1206,8 +1225,15 @@ class PartitionAvail:
         # (arch_short, cores_per_socket, sockets, mem_gib) -> node count.
         # arch_short is "" when no feature classifies; mem_gib is mem_mb//1024.
         self.node_types: Dict[Tuple[str, int, int, int], int] = {}
-        # (arch_short, cores_per_socket) -> [cpus_free, cpus_total]
+        # (arch_short, cores_per_socket) -> [cpus_free, cpus_total,
+        # nodes_free, nodes_total]
         self.cpus_by_shape: Dict[Tuple[str, int], List[int]] = {}
+        # Per-node records used to make constrained availability shape-aware:
+        # (arch_short, cores_per_socket, is_free, cpus_idle, cpus_total,
+        #  gpu_total_by_type, gpu_used_by_type).
+        self.node_records: List[
+            Tuple[str, int, bool, int, int, Dict[str, int], Dict[str, int]]
+        ] = []
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
@@ -1217,10 +1243,32 @@ class PartitionAvail:
     def add_node_type(self, sig: Tuple[str, int, int, int]) -> None:
         self.node_types[sig] = self.node_types.get(sig, 0) + 1
 
-    def add_cpu_shape(self, arch: str, cps: int, free: int, total: int) -> None:
-        slot = self.cpus_by_shape.setdefault((arch, cps), [0, 0])
+    def add_cpu_shape(
+        self, arch: str, cps: int, free: int, total: int, is_free: bool,
+    ) -> None:
+        slot = self.cpus_by_shape.setdefault((arch, cps), [0, 0, 0, 0])
         slot[0] += free
         slot[1] += total
+        if is_free:
+            slot[2] += 1
+        slot[3] += 1
+
+    def add_node_record(
+        self,
+        arch: str,
+        cps: int,
+        is_free: bool,
+        cpus_idle: int,
+        cpus_total: int,
+        gpu_total: Dict[str, int],
+        gpu_used: Dict[str, int],
+    ) -> None:
+        self.node_records.append(
+            (
+                arch, cps, is_free, cpus_idle, cpus_total,
+                dict(gpu_total), dict(gpu_used),
+            )
+        )
 
 
 def _strip_partition_marker(name: str) -> str:
@@ -1320,6 +1368,16 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             cps,
             cpus_idle if free_node else 0,
             cpus_total,
+            free_node,
+        )
+        bucket.add_node_record(
+            arch_short,
+            cps,
+            free_node,
+            cpus_idle,
+            cpus_total,
+            gpu_total,
+            gpu_used,
         )
     return result
 
@@ -1520,6 +1578,8 @@ class ProbeShape:
         self,
         nodes: int = DEFAULT_PROBE_NODES,
         cpus: int = DEFAULT_PROBE_CPUS,
+        cpus_per_node: Optional[int] = None,
+        cpus_is_total: bool = False,
         mem: Optional[str] = None,
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
@@ -1528,6 +1588,8 @@ class ProbeShape:
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
+        self.cpus_per_node = cpus_per_node
+        self.cpus_is_total = cpus_is_total
         self.mem = mem
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
@@ -1541,6 +1603,10 @@ class ProbeShape:
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
             core = f"{gtype}:{count}@{wall}"
+        elif self.cpus_is_total:
+            core = f"total:{self.cpus}@{wall}"
+        elif self.cpus_per_node is not None:
+            core = f"cpu:{self.cpus_per_node}@{wall}"
         else:
             core = f"cpu:{self.cpus}@{wall}"
         parts = [core]
@@ -1644,21 +1710,23 @@ class ProbeShape:
 
 def _filtered_cpu_shape_items(
     bucket: "PartitionAvail", shape: "ProbeShape",
-) -> List[Tuple[Tuple[str, int], Tuple[int, int]]]:
+) -> List[Tuple[Tuple[str, int], Tuple[int, int, int, int]]]:
     """Bucket's per-(arch, cps) CPU entries restricted to those `shape` accepts.
 
     Shape with no CPU constraint → every entry passes through. Unclassified
     nodes (arch_short == "") are dropped when a constraint is set, since
     we can't prove they satisfy it.
+
+    Each value tuple is (free_cpus, total_cpus, free_nodes, total_nodes).
     """
     if not shape.filter.has_cpu_constraint():
         return [
-            ((arch, cps), (free, total))
-            for (arch, cps), (free, total) in bucket.cpus_by_shape.items()
+            ((arch, cps), (free, total, fn, tn))
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
         ]
     return [
-        ((arch, cps), (free, total))
-        for (arch, cps), (free, total) in bucket.cpus_by_shape.items()
+        ((arch, cps), (free, total, fn, tn))
+        for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
         if arch and shape.filter.cpu_satisfies({arch})
     ]
 
@@ -1776,7 +1844,7 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
 # All known keys for `key=value` shape tokens. Used both by `_apply_kv_token`
 # (to dispatch) and by its unknown-key suggestion via difflib.get_close_matches.
 _KV_TOKEN_KEYS = (
-    "cores", "mem", "nodes", "time", "gpus", "vendor", "arch",
+    "cores", "total", "mem", "nodes", "time", "gpus", "vendor", "arch",
     "gen", "sm", "gen_min", "sm_min",
 )
 
@@ -1828,7 +1896,16 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
                 f"cores value {val!r} is not a positive integer",
                 "cores=N where N > 0 (e.g. cores=8, cores=32)",
             )
+        state["cpus_per_node"] = int(val)
+    elif key == "total":
+        if not val.isdigit() or int(val) <= 0:
+            raise _shape_error(
+                spec,
+                f"total value {val!r} is not a positive integer",
+                "total=N where N > 0 (e.g. total=64); use 'cores=' for per-node",
+            )
         state["cpus"] = int(val)
+        state["cpus_is_total"] = True
     elif key == "mem":
         if not _MEM_RE.match(val):
             raise _shape_error(
@@ -1889,9 +1966,39 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
 
 
 def _apply_positional_token(low: str, state: dict, spec: str) -> None:
-    """Apply one positional shape token (cpu:/gpu:/digits/vendor/arch/gen/sm/type)."""
+    """Apply one positional shape token.
+
+    Recognized forms (checked in order):
+      Nn         -> nodes=N (e.g. '2n')
+      cpu:N      -> cores per node (per-node when nodes>1)
+      total:N    -> N cores total across the job (escape from per-node default)
+      gpu:N      -> any GPU x N
+      N (digits) -> cores per node (alias for cpu:N)
+      vendor / arch / gen / sm atoms -> hardware filter
+      <type>:N or <type> -> GPU type pin
+    """
+    # 'Nn' shorthand for nodes=N. Must precede archs/vendors so '2n' isn't
+    # mistaken for an unknown arch token.
+    if len(low) > 1 and low.endswith("n") and low[:-1].isdigit():
+        n = int(low[:-1])
+        if n <= 0:
+            raise _shape_error(
+                spec, f"node count {low!r} must be > 0",
+                "Nn where N > 0 (e.g. 2n, 4n)",
+            )
+        state["nodes"] = n
+        return
     if low.startswith("cpu:"):
-        state["cpus"] = _parse_prefix_count(low, "cpu:", spec, "cpu:N where N > 0 (e.g. cpu:32)")
+        state["cpus_per_node"] = _parse_prefix_count(
+            low, "cpu:", spec, "cpu:N where N > 0 (e.g. cpu:32)"
+        )
+        return
+    if low.startswith("total:"):
+        state["cpus"] = _parse_prefix_count(
+            low, "total:", spec,
+            "total:N where N > 0 (e.g. total:64)",
+        )
+        state["cpus_is_total"] = True
         return
     if low.startswith("gpu:"):
         state["gpu_type"] = None
@@ -1905,7 +2012,7 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
             raise _shape_error(
                 spec, f"bare integer {low!r} must be > 0", "N > 0 (treated as cores=N)",
             )
-        state["cpus"] = int(low)
+        state["cpus_per_node"] = int(low)
         return
     if low in _VENDORS:
         state["cpu_vendor"] = low
@@ -1927,7 +2034,10 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
 
 
 # Keys partitioned for ProbeShape / HardwareFilter at construction time.
-_PROBESHAPE_STATE_KEYS = ("nodes", "cpus", "mem", "gpu_type", "gpu_count", "time")
+_PROBESHAPE_STATE_KEYS = (
+    "nodes", "cpus", "cpus_per_node", "cpus_is_total",
+    "mem", "gpu_type", "gpu_count", "time",
+)
 _FILTER_STATE_KEYS = (
     "cpu_vendor", "cpu_archs",
     "gpu_gen", "gpu_sm", "gpu_gen_min", "gpu_sm_min",
@@ -1938,15 +2048,17 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     """Parse a single shape SPEC into a ProbeShape.
 
     Tokens (comma-separated, any order):
-      cores=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
+      cores=N | total=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
       vendor=intel|amd | arch=<microarch>
       gen=<NV-gen> | sm=N | gen_min=<NV-gen> | sm_min=N
     Positional shorthands (first one wins for that slot):
-      cpu:N        -> cores=N (CPU shape, no GPU)
-      gpu:N        -> any GPU type, count N
+      Nn           -> nodes=N (e.g. '2n')
+      cpu:N        -> N cores per node (when nodes>1) / total when nodes=1
+      total:N      -> N cores total (escape from per-node default)
+      gpu:N        -> any GPU type, count N (per node, per SLURM --gres)
       <type>:N     -> gpus=<type>:N
       <type>       -> gpus=<type> (count 1)
-      N (digits)   -> cores=N
+      N (digits)   -> cores per node (alias for cpu:N)
       intel|amd    -> vendor filter
       <microarch>  -> arch filter (skl, genoa, rome, zen4, ...)
       <NV-gen>     -> GPU gen filter (ampere, hopper, ada, ...)
@@ -1954,11 +2066,18 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     Walltime suffix on any positional shorthand:
       <shape>@<DUR> -> shape + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
 
+    Per-node rule:
+      cpu:N and cores=N are PER NODE; total cores = N * nodes. Use 'total:N'
+      or 'total=N' to specify total cores across the job. cpu:/cores= and
+      total:/total= cannot be combined in one spec.
+
     Examples:
       'a100:4'                     -> 1 a100, 1 core, 1-min wall
       'a100:1@30m'                 -> 1 a100, 30-minute wall
       'a100:4,mem=32G,time=24h'    -> 4 a100, 32G mem, 24-hour wall
       'cpu:32,mem=128G,time=12h'   -> 32 cores (CPU job), 128G, 12h
+      '2n,cpu:32'                  -> 2 nodes, 32 cores/node = 64 total
+      '2n,total:64'                -> 2 nodes, 64 cores total
       'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
       'a100:4,vendor=intel'        -> 4 a100 on Intel hosts
       'cpu:32,arch=genoa'          -> 32 cores on Genoa nodes
@@ -1978,6 +2097,8 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     state: Dict[str, object] = {
         "nodes": DEFAULT_PROBE_NODES,
         "cpus": DEFAULT_PROBE_CPUS,
+        "cpus_per_node": None,
+        "cpus_is_total": False,
         "mem": None,
         "time": DEFAULT_PROBE_TIME,
         "gpu_type": None,
@@ -2003,6 +2124,18 @@ def parse_shape_spec(spec: str) -> ProbeShape:
             state["time"] = dur
         _apply_positional_token(head, state, spec)
 
+    # Per-node default: if cpu:/cores= was used, multiply by nodes for the
+    # SLURM total. 'total:' / 'total=' bypass this. The two are mutually
+    # exclusive — flag the conflict early instead of silently dropping one.
+    if state["cpus_per_node"] is not None and state["cpus_is_total"]:
+        raise _shape_error(
+            spec,
+            "cannot mix per-node cores (cpu:/cores=) with total:/total= in one spec",
+            "use either per-node ('2n,cpu:32') or total ('2n,total:64'), not both",
+        )
+    if state["cpus_per_node"] is not None:
+        state["cpus"] = state["cpus_per_node"] * state["nodes"]
+
     shape_args = {k: state[k] for k in _PROBESHAPE_STATE_KEYS}
     filter_args = {k: state[k] for k in _FILTER_STATE_KEYS}
     filter_args["cpu_archs"] = tuple(filter_args["cpu_archs"])
@@ -2025,6 +2158,25 @@ def parse_shape_list(spec: str) -> List[ProbeShape]:
     )
     if not s:
         raise _shape_error(spec, "empty SHAPE_LIST", _LIST_HINT)
+    if s.endswith("+"):
+        last_atom = (
+            s[:-1]
+            .rsplit("+", 1)[-1]
+            .rsplit("*", 1)[-1]
+            .rsplit(",", 1)[-1]
+            .strip()
+            .lower()
+        )
+        if (
+            _parse_sm_token(last_atom) is not None
+            or _canon_gpu_gen(last_atom) is not None
+        ):
+            raise _shape_error(
+                spec,
+                "'+' suffix is not supported for GPU ranges",
+                "use key=value ranges such as sm_min=80 or gen_min=ampere; "
+                "'+' separates shape alternatives",
+            )
     shapes: List[ProbeShape] = []
     for or_raw in s.split("+"):
         or_piece = or_raw.strip()
@@ -2501,8 +2653,8 @@ def format_cpu_summary(
                 if avail_bucket is None:
                     row.extend(["", ""])
                 else:
-                    row.append(f"{avail_bucket.nodes_free}/{avail_bucket.nodes_total}")
-                    row.append(f"{avail_bucket.cpus_free}/{avail_bucket.cpus_total}")
+                    row.append(f"{avail_bucket.nodes_free}/{avail_bucket.nodes_total}n")
+                    row.append(f"{avail_bucket.cpus_free}/{avail_bucket.cpus_total}c")
             else:
                 row.append(_arch_display_list(feats))
             rows.append(row)
@@ -2544,6 +2696,231 @@ def attach_metadata(
             )
 
 
+class AvailabilityAccum:
+    def __init__(self) -> None:
+        self.nodes_free = 0
+        self.nodes_total = 0
+        self.cpus_free = 0
+        self.cpus_total = 0
+        # (arch, cps) -> [cpus_free, cpus_total, nodes_free, nodes_total]
+        self.cpu_shapes: Dict[Tuple[str, int], List[int]] = {}
+        self.gpus: Dict[str, List[int]] = {}
+        self.matched = False
+
+    def extend_cpu_shape(
+        self, arch: str, cps: int, free: int, total: int,
+        free_nodes: int, total_nodes: int,
+    ) -> None:
+        """Bulk accumulation from a precomputed bucket entry."""
+        slot = self.cpu_shapes.setdefault((arch, cps), [0, 0, 0, 0])
+        slot[0] += free
+        slot[1] += total
+        slot[2] += free_nodes
+        slot[3] += total_nodes
+
+    def add_cpu_shape(
+        self, arch: str, cps: int, free: int, total: int, is_free: bool,
+    ) -> None:
+        """Per-node accumulation: count this node toward the shape's totals."""
+        self.extend_cpu_shape(arch, cps, free, total, 1 if is_free else 0, 1)
+
+    def add_gpu(self, gtype: str, free: int, total: int) -> None:
+        slot = self.gpus.setdefault(gtype, [0, 0])
+        slot[0] += free
+        slot[1] += total
+
+    def render(self) -> Tuple[str, str, str]:
+        if not self.matched:
+            return "", "", ""
+        free_nodes = f"{self.nodes_free}/{self.nodes_total}"
+        if self.cpu_shapes:
+            ordered = sorted(
+                self.cpu_shapes.items(),
+                key=lambda kv: (-kv[1][1], kv[0][0] or "~", kv[0][1]),
+            )
+            free_cpus = ", ".join(
+                _format_cpu_shape_token(arch, cps, free, total, fn, tn)
+                for (arch, cps), (free, total, fn, tn) in ordered
+            )
+        else:
+            free_cpus = (
+                f"{self.nodes_free}/{self.nodes_total}n:"
+                f"{self.cpus_free}/{self.cpus_total}c"
+            )
+        free_gpus = ", ".join(
+            f"{gtype}:{free}/{total}"
+            for gtype, (free, total) in sorted(self.gpus.items())
+        )
+        return free_nodes, free_cpus, free_gpus
+
+
+def _shape_cpu_matches_node(
+    shape: "ProbeShape", arch: str, partition_features: Set[str],
+) -> bool:
+    if not shape.filter.has_cpu_constraint():
+        return True
+    if arch:
+        return shape.filter.cpu_satisfies((arch,))
+    # Best effort for genuinely missing metadata. If partition-level features
+    # exist, an unclassified node should not be counted toward a CPU constraint.
+    return not partition_features
+
+
+def _node_gpu_items_for_shape(
+    gpu_total: Dict[str, int],
+    shape: Optional["ProbeShape"],
+) -> List[Tuple[str, int]]:
+    if shape is None or not shape.requires_gpu():
+        return sorted(gpu_total.items())
+    return sorted(
+        (gtype, total) for gtype, total in gpu_total.items()
+        if shape.accepts_gpu_token(gtype)
+    )
+
+
+def _shape_matches_node(
+    shape: "ProbeShape",
+    arch: str,
+    gpu_total: Dict[str, int],
+    partition_features: Set[str],
+) -> bool:
+    if not _shape_cpu_matches_node(shape, arch, partition_features):
+        return False
+    if shape.requires_gpu() and not _node_gpu_items_for_shape(gpu_total, shape):
+        return False
+    return True
+
+
+def _accumulate_bucket_for_shape(
+    acc: AvailabilityAccum,
+    bucket: "PartitionAvail",
+    features: Set[str],
+    shape: Optional["ProbeShape"],
+) -> None:
+    if shape is not None and not _bucket_matches_shape(bucket, features, shape):
+        return
+    if bucket.node_records:
+        for record in bucket.node_records:
+            arch, cps, is_free, cpus_idle, cpus_total, gpu_total, gpu_used = record
+            if shape is not None and not _shape_matches_node(
+                shape, arch, gpu_total, features
+            ):
+                continue
+            acc.matched = True
+            acc.nodes_total += 1
+            acc.cpus_total += cpus_total
+            if is_free:
+                acc.nodes_free += 1
+                acc.cpus_free += cpus_idle
+            acc.add_cpu_shape(
+                arch, cps, cpus_idle if is_free else 0, cpus_total, is_free,
+            )
+            for gtype, total in _node_gpu_items_for_shape(gpu_total, shape):
+                used = gpu_used.get(gtype, 0)
+                free = max(0, total - used) if is_free else 0
+                acc.add_gpu(gtype, free, total)
+        return
+
+    acc.matched = True
+    acc.nodes_free += bucket.nodes_free
+    acc.nodes_total += bucket.nodes_total
+    cpu_items = (
+        _filtered_cpu_shape_items(bucket, shape)
+        if shape is not None
+        else [
+            ((arch, cps), (free, total, fn, tn))
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
+        ]
+    )
+    if cpu_items:
+        for (arch, cps), (free, total, fn, tn) in cpu_items:
+            acc.extend_cpu_shape(arch, cps, free, total, fn, tn)
+            acc.cpus_free += free
+            acc.cpus_total += total
+    else:
+        acc.cpus_free += bucket.cpus_free
+        acc.cpus_total += bucket.cpus_total
+    gpu_items = (
+        _filtered_gpu_items(bucket, shape)
+        if shape is not None
+        else bucket.gpus.items()
+    )
+    for gtype, (free, total) in gpu_items:
+        acc.add_gpu(gtype, free, total)
+
+
+def _accumulate_bucket_for_shapes(
+    acc: AvailabilityAccum,
+    bucket: "PartitionAvail",
+    features: Set[str],
+    shapes: Optional[Sequence["ProbeShape"]],
+) -> None:
+    if not shapes:
+        _accumulate_bucket_for_shape(acc, bucket, features, None)
+        return
+    accepting = [s for s in shapes if _bucket_matches_shape(bucket, features, s)]
+    if not accepting:
+        return
+    if bucket.node_records:
+        for record in bucket.node_records:
+            arch, cps, is_free, cpus_idle, cpus_total, gpu_total, gpu_used = record
+            matching = [
+                s for s in accepting
+                if _shape_matches_node(s, arch, gpu_total, features)
+            ]
+            if not matching:
+                continue
+            acc.matched = True
+            acc.nodes_total += 1
+            acc.cpus_total += cpus_total
+            if is_free:
+                acc.nodes_free += 1
+                acc.cpus_free += cpus_idle
+            acc.add_cpu_shape(
+                arch, cps, cpus_idle if is_free else 0, cpus_total, is_free,
+            )
+            allowed_gpus: Dict[str, int] = {}
+            for s in matching:
+                for gtype, total in _node_gpu_items_for_shape(gpu_total, s):
+                    allowed_gpus[gtype] = total
+            for gtype, total in sorted(allowed_gpus.items()):
+                used = gpu_used.get(gtype, 0)
+                free = max(0, total - used) if is_free else 0
+                acc.add_gpu(gtype, free, total)
+        return
+
+    # Aggregate fallback for tests or partial metadata where per-node records
+    # are unavailable.
+    acc.matched = True
+    acc.nodes_free += bucket.nodes_free
+    acc.nodes_total += bucket.nodes_total
+    if any(not s.filter.has_cpu_constraint() for s in accepting):
+        cpu_items = [
+            ((arch, cps), (free, total, fn, tn))
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
+        ]
+    else:
+        seen_cpu: Dict[Tuple[str, int], Tuple[int, int, int, int]] = {}
+        for s in accepting:
+            for key, ft in _filtered_cpu_shape_items(bucket, s):
+                seen_cpu[key] = ft
+        cpu_items = list(seen_cpu.items())
+    if cpu_items:
+        for (arch, cps), (free, total, fn, tn) in cpu_items:
+            acc.extend_cpu_shape(arch, cps, free, total, fn, tn)
+            acc.cpus_free += free
+            acc.cpus_total += total
+    else:
+        acc.cpus_free += bucket.cpus_free
+        acc.cpus_total += bucket.cpus_total
+    allowed_gpus: Dict[str, Tuple[int, int]] = {}
+    for s in accepting:
+        for gtype, ft in _filtered_gpu_items(bucket, s):
+            allowed_gpus[gtype] = ft
+    for gtype, (free, total) in allowed_gpus.items():
+        acc.add_gpu(gtype, free, total)
+
+
 def attach_row_availability(
     row: AllocationRow,
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
@@ -2552,81 +2929,35 @@ def attach_row_availability(
 ) -> None:
     """Roll up live availability across this row's candidate partitions.
 
-    When `shapes` is given, only buckets accepted by some shape's
-    HardwareFilter contribute. GPU entries within a bucket are further
-    restricted to types satisfying that shape's GPU constraint, unioned
-    across all accepting shapes.
+    When `shapes` is given, row.free_* stores a union across matching shapes
+    for no-wait output, while row.availability_by_shape stores exact
+    per-shape matching capacity for wait/probe output.
     """
     per_cluster = partition_avail.get(row.cluster, {})
     feat_per_cluster = (partition_features or {}).get(row.cluster, {})
-    nodes_free = nodes_total = 0
-    cpus_free = cpus_total = 0
-    cpu_shapes: Dict[Tuple[str, int], List[int]] = {}
-    gpus: Dict[str, List[int]] = {}
     seen_partitions: Set[str] = set()
-    matched = False
+    row_acc = AvailabilityAccum()
+    shape_accs: Dict[str, AvailabilityAccum] = {
+        s.label: AvailabilityAccum() for s in shapes or ()
+    }
     for cand in _candidate_partitions(row):
         bucket = per_cluster.get(cand)
         if bucket is None or cand in seen_partitions:
             continue
         seen_partitions.add(cand)
         features = feat_per_cluster.get(cand, set())
-        allowed_cpu_keys: Optional[Set[Tuple[str, int]]]
         if shapes:
-            accepting = [s for s in shapes if _bucket_matches_shape(bucket, features, s)]
-            if not accepting:
-                continue
-            allowed: Dict[str, Tuple[int, int]] = {}
-            for s in accepting:
-                for gtype, ft in _filtered_gpu_items(bucket, s):
-                    allowed[gtype] = ft
-            allowed_gpus = allowed.items()
-            # Any accepting shape without a CPU constraint widens the union to
-            # "all keys", so skip building the per-shape filter set entirely.
-            if any(not s.filter.has_cpu_constraint() for s in accepting):
-                allowed_cpu_keys = None
-            else:
-                allowed_cpu_keys = set()
-                for s in accepting:
-                    for key, _ft in _filtered_cpu_shape_items(bucket, s):
-                        allowed_cpu_keys.add(key)
+            _accumulate_bucket_for_shapes(row_acc, bucket, features, shapes)
+            for s in shapes:
+                _accumulate_bucket_for_shape(shape_accs[s.label], bucket, features, s)
         else:
-            allowed_gpus = bucket.gpus.items()
-            allowed_cpu_keys = None
-        matched = True
-        nodes_free += bucket.nodes_free
-        nodes_total += bucket.nodes_total
-        cpus_free += bucket.cpus_free
-        cpus_total += bucket.cpus_total
-        for shape_key, (sfree, stotal) in bucket.cpus_by_shape.items():
-            if allowed_cpu_keys is not None and shape_key not in allowed_cpu_keys:
-                continue
-            slot = cpu_shapes.setdefault(shape_key, [0, 0])
-            slot[0] += sfree
-            slot[1] += stotal
-        for gtype, (free, total) in allowed_gpus:
-            slot = gpus.setdefault(gtype, [0, 0])
-            slot[0] += free
-            slot[1] += total
-    if not matched:
+            _accumulate_bucket_for_shape(row_acc, bucket, features, None)
+    if not row_acc.matched:
         return
-    row.free_nodes = f"{nodes_free}/{nodes_total}"
-    if cpu_shapes:
-        ordered = sorted(
-            cpu_shapes.items(),
-            key=lambda kv: (-kv[1][1], kv[0][0] or "~", kv[0][1]),
-        )
-        row.free_cpus = ", ".join(
-            _format_cpu_shape_token(arch, cps, free, total)
-            for (arch, cps), (free, total) in ordered
-        )
-    else:
-        row.free_cpus = f"{cpus_free}/{cpus_total}"
-    if gpus:
-        row.free_gpus = ", ".join(
-            f"{gtype}:{free}/{total}"
-            for gtype, (free, total) in sorted(gpus.items())
-        )
+    row.free_nodes, row.free_cpus, row.free_gpus = row_acc.render()
+    row.availability_by_shape = {
+        label: acc.render() for label, acc in shape_accs.items() if acc.matched
+    }
 
 
 def classify(row: AllocationRow) -> Tuple[str, ...]:
@@ -2911,7 +3242,10 @@ def _is_low_information_pair(
     """
     if row.wait_by_shape.get(shape.label) is None:
         return True
-    if _is_unprobeable_row(row):
+    if not row.qos_info.max_wall:
+        return True
+    free_nodes = row._availability_for_shape(shape)[0]
+    if not free_nodes or free_nodes.startswith("0/"):
         return True
     qos_max = parse_wall_seconds(row.qos_info.max_wall)
     shape_secs = parse_wall_seconds(shape.time)
@@ -3133,14 +3467,19 @@ def _select_table_columns(all_columns: List[str], wide: bool, include_avail: boo
     return list(all_columns)
 
 
-def _format_cpu_shape_token(arch: str, cps: int, free: int, total: int) -> str:
-    """Render one CPU shape bucket as 'arch{cps}c:free/total'.
+def _format_cpu_shape_token(
+    arch: str, cps: int, free: int, total: int,
+    free_nodes: int, total_nodes: int,
+) -> str:
+    """Render one CPU shape bucket as 'arch{cps}c×fn/tn n:f/t c'.
 
     arch is the canonical short token (gen, skl, csl, …); falls back to '?'
-    when the node had no classifiable feature. cps is cores-per-socket.
+    when the node had no classifiable feature. cps is cores-per-socket. The
+    'n' suffix tags node counts and the 'c' suffix tags core counts so the
+    free/total ratios on each side of '×' read unambiguously.
     """
     label = arch or "?"
-    return f"{label}{cps}c:{free}/{total}"
+    return f"{label}{cps}c×{free_nodes}/{total_nodes}n:{free}/{total}c"
 
 
 def _wrap_gpu_list(text: str, width: int) -> List[str]:
@@ -3420,7 +3759,7 @@ def json_output(
         return json.dumps(records, indent=2, sort_keys=True)
     payload = {
         "_help": {
-            "schema_version": 1,
+            "schema_version": 2,
             "premium_gpus": list(PREMIUM_GPUS),
             "intel_cpu_features": list(INTEL_CPU_FEATURES),
             "amd_cpu_features": list(AMD_CPU_FEATURES),
@@ -3437,9 +3776,15 @@ def json_output(
                 "wait": "predicted seconds until job start from `sbatch --test-only` "
                         "for the shape on this row; 'now' means startable immediately, "
                         "'?' / null means probe skipped or unknown",
-                "free_nodes": "live free/total node count from sinfo",
-                "free_cpus": "live free/total CPU count from sinfo",
-                "free_gpus": "comma-separated 'gtype:free/total' per partition (live)",
+                "free_nodes": "live free/total node count from sinfo; when a "
+                        "shape is active, counts only nodes matching that shape",
+                "free_cpus": "live free/total CPU count from sinfo. Per-shape "
+                        "tokens read 'arch{cps}c×fn/tn n:fc/tc c' — fn/tn "
+                        "free/total nodes of that shape, fc/tc free/total cores "
+                        "across those nodes (suffix 'n' = nodes, 'c' = cores). "
+                        "When a shape is active, counts only CPUs on matching nodes.",
+                "free_gpus": "comma-separated 'gtype:free/total' from sinfo; "
+                        "when a shape is active, includes only matching GPU types",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
                 "gpus": "the row's GPU type resolved from the probe shape's "
                         "gpu_type (e.g. shape 'h100' resolves to row 'h100nvl'). "
@@ -3468,6 +3813,11 @@ def json_output(
                 "pair. The `shape` column tells you which shape was probed for that wait.",
                 "Each shape is gated on accessibility — pairs where the shape "
                 "can't run on the row are dropped from output.",
+                "Availability columns are shape-aware when a shape is active: "
+                "CPU and GPU constraints narrow free_nodes/free_cpus/free_gpus "
+                "to matching resources.",
+                "Rows with missing hardware metadata are kept on a best-effort "
+                "basis; use --explain or -v to inspect uncertainty.",
                 "By default, rows are hidden when the probe returned `?`, "
                 "the QOS has no MaxWall, the shape's walltime exceeds the "
                 "QOS MaxWall, or the allocation has zero free capacity. "
@@ -3705,6 +4055,17 @@ def pivot_output(
     return "\n".join(lines)
 
 
+def _shape_unknown_metadata_fields(
+    row: AllocationRow, shape: "ProbeShape"
+) -> List[str]:
+    fields: List[str] = []
+    if shape.filter.has_cpu_constraint() and not row.cpu_features:
+        fields.append("cpu_features")
+    if (shape.gpu_type or shape.filter.has_gpu_constraint()) and not row.gpu_types:
+        fields.append("gpu_types")
+    return fields
+
+
 def render_explain_plan(
     rows: List[AllocationRow],
     shapes: List[ProbeShape],
@@ -3727,11 +4088,16 @@ def render_explain_plan(
         shapes_payload = []
         for s in shapes:
             accessible = sum(1 for r in rows if not s.should_skip(r))
+            unknown = sum(
+                1 for r in rows
+                if not s.should_skip(r) and _shape_unknown_metadata_fields(r, s)
+            )
             shapes_payload.append(
                 {
                     "label": s.label,
                     "accessible_rows": accessible,
                     "skipped_rows": rows_count - accessible,
+                    "unknown_metadata_rows": unknown,
                 }
             )
         payload = {
@@ -3754,12 +4120,18 @@ def render_explain_plan(
         lines.append(f"Probe shape set ({len(shapes)}):")
         for s in shapes:
             accessible = sum(1 for r in rows if not s.should_skip(r))
+            unknown = sum(
+                1 for r in rows
+                if not s.should_skip(r) and _shape_unknown_metadata_fields(r, s)
+            )
             if accessible == 0:
                 tag = "[skipped — no compatible row]"
             elif accessible == rows_count:
                 tag = f"[probes all {rows_count}]"
             else:
                 tag = f"[probes {accessible} of {rows_count}]"
+            if unknown:
+                tag = tag[:-1] + f"; {unknown} best-effort unknown metadata]"
             lines.append(f"  {tag}  {s.label}")
     else:
         lines.append("Probe shape set: (none — wait probing skipped)")
@@ -3904,13 +4276,13 @@ def run_self_test() -> int:
     bucket.cpus_total = 128
     bucket.cpus_free = 32
     bucket.add_gpu("h100nvl", 4, 16)
-    bucket.add_cpu_shape("gen", 96, 32, 128)
+    bucket.add_cpu_shape("gen", 96, 32, 128, True)
     fc_row3 = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
     )
     attach_row_availability(fc_row3, avail)
     assert fc_row3.free_nodes == "1/2"
-    assert fc_row3.free_cpus == "gen96c:32/128"
+    assert fc_row3.free_cpus == "gen96c×1/1n:32/128c", fc_row3.free_cpus
     assert fc_row3.free_gpus == "h100nvl:4/16"
     record = fc_row3.to_dict(include_avail=True)
     assert record["free_nodes"] == "1/2"
@@ -3918,23 +4290,23 @@ def run_self_test() -> int:
     assert "free_nodes" not in fc_row3.to_dict()  # opt-in only
 
     # Per-shape CPU formatter and ordering — biggest pool first, '?' last.
-    assert _format_cpu_shape_token("gen", 96, 192, 384) == "gen96c:192/384"
-    assert _format_cpu_shape_token("", 64, 0, 64) == "?64c:0/64"
+    assert _format_cpu_shape_token("gen", 96, 192, 384, 2, 4) == "gen96c×2/4n:192/384c"
+    assert _format_cpu_shape_token("", 64, 0, 64, 0, 1) == "?64c×0/1n:0/64c"
     multi_avail = {"notchpeak": {"notchpeak-shared-short": PartitionAvail()}}
     mb = multi_avail["notchpeak"]["notchpeak-shared-short"]
     mb.nodes_total = 6
     mb.nodes_free = 4
     mb.cpus_total = 512
     mb.cpus_free = 224
-    mb.add_cpu_shape("skl", 16, 32, 128)
-    mb.add_cpu_shape("gen", 96, 192, 384)
-    mb.add_cpu_shape("", 32, 0, 0)  # empty shape ignored by sort but still appears
+    mb.add_cpu_shape("skl", 16, 32, 128, True)
+    mb.add_cpu_shape("gen", 96, 192, 384, True)
+    mb.add_cpu_shape("", 32, 0, 0, False)  # empty shape ignored by sort but still appears
     multi_row = AllocationRow(
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
     attach_row_availability(multi_row, multi_avail)
-    assert multi_row.free_cpus.startswith("gen96c:192/384"), multi_row.free_cpus
-    assert "skl16c:32/128" in multi_row.free_cpus, multi_row.free_cpus
+    assert multi_row.free_cpus.startswith("gen96c×1/1n:192/384c"), multi_row.free_cpus
+    assert "skl16c×1/1n:32/128c" in multi_row.free_cpus, multi_row.free_cpus
 
     # Shape filter narrows the CPU column to matching arch/vendor.
     multi_features = {"notchpeak": {"notchpeak-shared-short": {"gen", "skl"}}}
@@ -3943,7 +4315,7 @@ def run_self_test() -> int:
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
     attach_row_availability(arch_row, multi_avail, multi_features, [arch_shape])
-    assert "gen96c:192/384" in arch_row.free_cpus, arch_row.free_cpus
+    assert "gen96c×1/1n:192/384c" in arch_row.free_cpus, arch_row.free_cpus
     assert "skl16c" not in arch_row.free_cpus, arch_row.free_cpus
     assert "?32c" not in arch_row.free_cpus, arch_row.free_cpus  # unclassified dropped
 
@@ -3952,7 +4324,7 @@ def run_self_test() -> int:
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
     attach_row_availability(vendor_row, multi_avail, multi_features, [vendor_shape])
-    assert "gen96c:192/384" in vendor_row.free_cpus, vendor_row.free_cpus
+    assert "gen96c×1/1n:192/384c" in vendor_row.free_cpus, vendor_row.free_cpus
     assert "skl16c" not in vendor_row.free_cpus, vendor_row.free_cpus
 
     # Shape with no CPU constraint preserves the full CPU list.
@@ -3963,10 +4335,60 @@ def run_self_test() -> int:
     attach_row_availability(
         nofilter_row, multi_avail, multi_features, [nofilter_shape]
     )
-    assert "gen96c:192/384" in nofilter_row.free_cpus, nofilter_row.free_cpus
-    assert "skl16c:32/128" in nofilter_row.free_cpus, nofilter_row.free_cpus
+    assert "gen96c×1/1n:192/384c" in nofilter_row.free_cpus, nofilter_row.free_cpus
+    assert "skl16c×1/1n:32/128c" in nofilter_row.free_cpus, nofilter_row.free_cpus
 
-    # Fallback: when bucket has no per-shape data, the legacy F/T form is used.
+    # Per-node availability makes active-shape output exact: the same row can
+    # show different matching free_* values for different CPU/GPU constraints.
+    exact_avail = {"notchpeak": {"notchpeak-mixed": PartitionAvail()}}
+    exact_bucket = exact_avail["notchpeak"]["notchpeak-mixed"]
+    exact_bucket.add_gpu("a100", 3, 4)
+    exact_bucket.add_gpu("h100nvl", 4, 4)
+    exact_bucket.add_node_record(
+        "gen", 96, True, 96, 96, {"a100": 4}, {"a100": 1}
+    )
+    exact_bucket.add_node_record(
+        "skl", 16, True, 16, 16, {"h100nvl": 4}, {"h100nvl": 0}
+    )
+    exact_features = {"notchpeak": {"notchpeak-mixed": {"gen", "skl"}}}
+    exact_row = AllocationRow(
+        "notchpeak", "acct", "me", "notchpeak-mixed", "q-mixed", "q-mixed"
+    )
+    gen_cpu = ProbeShape(cpus=32, filter=HardwareFilter(cpu_archs=("gen",)))
+    hopper_gpu = ProbeShape(gpu_count=1, filter=HardwareFilter(gpu_gen="hopper"))
+    gen_a100 = ProbeShape(
+        gpu_type="a100", gpu_count=1, filter=HardwareFilter(cpu_archs=("gen",))
+    )
+    attach_row_availability(
+        exact_row, exact_avail, exact_features, [gen_cpu, hopper_gpu, gen_a100]
+    )
+    gen_cpu_record = exact_row.to_dict(
+        include_avail=True, include_wait=True, shape=gen_cpu
+    )
+    assert gen_cpu_record["free_nodes"] == "1/1", gen_cpu_record
+    assert gen_cpu_record["free_cpus"] == "gen96c×1/1n:96/96c", gen_cpu_record
+    assert gen_cpu_record["free_gpus"] == "a100:3/4", gen_cpu_record
+    hopper_record = exact_row.to_dict(
+        include_avail=True, include_wait=True, shape=hopper_gpu
+    )
+    assert hopper_record["free_nodes"] == "1/1", hopper_record
+    assert hopper_record["free_cpus"] == "skl16c×1/1n:16/16c", hopper_record
+    assert hopper_record["free_gpus"] == "h100nvl:4/4", hopper_record
+    combo_record = exact_row.to_dict(
+        include_avail=True, include_wait=True, shape=gen_a100
+    )
+    assert combo_record["free_nodes"] == "1/1", combo_record
+    assert combo_record["free_cpus"] == "gen96c×1/1n:96/96c", combo_record
+    assert combo_record["free_gpus"] == "a100:3/4", combo_record
+    assert exact_row.free_nodes == "2/2", exact_row.free_nodes
+    assert (
+        "gen96c×1/1n:96/96c" in exact_row.free_cpus
+        and "skl16c×1/1n:16/16c" in exact_row.free_cpus
+    )
+    assert "a100:3/4" in exact_row.free_gpus and "h100nvl:4/4" in exact_row.free_gpus
+
+    # Fallback: when bucket has no per-shape data, the bare-aggregate form is
+    # used with explicit n/c suffixes so it's still self-describing.
     fb_avail = {"granite": {"granite": PartitionAvail()}}
     fb = fb_avail["granite"]["granite"]
     fb.nodes_total = 1
@@ -3975,7 +4397,7 @@ def run_self_test() -> int:
     fb.cpus_free = 48
     fb_row = AllocationRow("granite", "sadayappan", "me", "", "granite", "")
     attach_row_availability(fb_row, fb_avail)
-    assert fb_row.free_cpus == "48/96", fb_row.free_cpus
+    assert fb_row.free_cpus == "1/1n:48/96c", fb_row.free_cpus
 
     # CPU summary: GPU partitions are filtered out when partition_avail
     # carries gpus, and a CPU-only partition surfaces availability columns.
@@ -3994,7 +4416,7 @@ def run_self_test() -> int:
     cpu_summary_avail = format_cpu_summary(cpu_features, cpu_only_avail)
     assert "granite-gpu" not in cpu_summary_avail, cpu_summary_avail
     assert "notchpeak-shared-short" in cpu_summary_avail, cpu_summary_avail
-    assert "5/10" in cpu_summary_avail and "80/200" in cpu_summary_avail
+    assert "5/10n" in cpu_summary_avail and "80/200c" in cpu_summary_avail
     assert "NODES_F/T" in cpu_summary_avail and "CPUS_F/T" in cpu_summary_avail
 
     # Memory + node-type formatters.
@@ -4363,6 +4785,12 @@ def run_self_test() -> int:
     # OR across vendors.
     shapes_or = parse_shape_list("intel+amd")
     assert [s.filter.cpu_vendor for s in shapes_or] == ["intel", "amd"]
+    try:
+        parse_shape_list("sm80+")
+    except CommandError as exc:
+        assert "sm_min=80" in str(exc), str(exc)
+    else:
+        raise AssertionError("'sm80+' should have raised with an sm_min hint")
 
     # HardwareFilter.cpu_constraint_expr: arch wins, vendor expands to OR over table.
     assert HardwareFilter().cpu_constraint_expr() is None
@@ -4628,15 +5056,51 @@ def run_self_test() -> int:
     sh = parse_shape_spec("cores=8,mem=16G,gpus=h100nvl:1,time=4h")
     assert sh.cpus == 8 and sh.gpu_type == "h100nvl" and sh.gpu_count == 1
     assert sh.label == "h100nvl:1@4h,16G", sh.label
-    # Multi-node prefix.
+    # Multi-node prefix: cores= is per-node, total is nodes * cores.
     sh = parse_shape_spec("nodes=2,cores=4,time=1h")
-    assert sh.nodes == 2 and sh.label == "2n*cpu:4@1h", sh.label
+    assert sh.nodes == 2 and sh.cpus == 8 and sh.cpus_per_node == 4, sh.cpus
+    assert sh.label == "2n*cpu:4@1h", sh.label
+    # 'Nn' positional shorthand mirrors nodes=N.
+    sh = parse_shape_spec("2n,cpu:32")
+    assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_per_node == 32, sh.cpus
+    assert sh.label.startswith("2n*cpu:32@"), sh.label
+    # Bare integer is also per-node.
+    sh = parse_shape_spec("2n,32")
+    assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_per_node == 32, sh.cpus
+    # 'total:' bypasses per-node multiplication.
+    sh = parse_shape_spec("2n,total:64")
+    assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_is_total is True, sh.cpus
+    assert sh.label.startswith("2n*total:64@"), sh.label
+    # 'total=' kv form.
+    sh = parse_shape_spec("nodes=4,total=128")
+    assert sh.nodes == 4 and sh.cpus == 128 and sh.cpus_is_total is True
+    # Single-node default: cpu:N still equals total (nodes=1, multiplier=1).
+    sh = parse_shape_spec("cpu:32")
+    assert sh.nodes == 1 and sh.cpus == 32 and sh.cpus_per_node == 32
+    # 2n alone keeps default cpu count (no per-node multiplier applied).
+    sh = parse_shape_spec("2n,a100:4")
+    assert sh.nodes == 2 and sh.cpus == DEFAULT_PROBE_CPUS
+    assert sh.gpu_type == "a100" and sh.gpu_count == 4
+    # Round-trip: parsed label re-parses to equivalent shape (via the same
+    # SHAPE_LIST path users hit, since labels use '*' to separate the Nn
+    # prefix from the core spec).
+    for spec in ("2n,cpu:32", "2n,total:64", "cpu:32", "4n,cores=8"):
+        first = parse_shape_spec(spec)
+        again_list = parse_shape_list(first.label)
+        assert len(again_list) == 1, (spec, first.label, again_list)
+        again = again_list[0]
+        assert again.nodes == first.nodes and again.cpus == first.cpus, (spec, again.label)
     # Wall short-format edges.
     assert _format_wall_short("00:01:00") == "1m"
     assert _format_wall_short("3-00:00:00") == "3d"
     assert _format_wall_short("01:30:00") == "1h30m"
-    # Bad shape specs raise. cpus= is no longer accepted.
-    for bad in ("", "cores=", "cpus=8", "time=banana", "weird=1", "cores=0"):
+    # Bad shape specs raise. cpus= is no longer accepted; per-node and total
+    # cannot be combined; 'Nn' must be positive.
+    bad_specs = (
+        "", "cores=", "cpus=8", "time=banana", "weird=1", "cores=0",
+        "cpu:32,total=64", "2n,cpu:32,total:64", "0n,cpu:8", "total:0",
+    )
+    for bad in bad_specs:
         try:
             parse_shape_spec(bad)
         except CommandError:
@@ -4691,6 +5155,14 @@ def run_self_test() -> int:
     empty_cap_row.free_nodes = "0/10"
     empty_cap_row.wait_by_shape = {li_shape.label: 0}
     assert _is_low_information_pair(empty_cap_row, li_shape) is True
+    shape_empty_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-se", "q-se",
+        qos_info=QOSInfo("q-se", max_wall="3-00:00:00"),
+    )
+    shape_empty_row.free_nodes = "5/10"
+    shape_empty_row.availability_by_shape[li_shape.label] = ("0/2", "0/64", "")
+    shape_empty_row.wait_by_shape = {li_shape.label: 0}
+    assert _is_low_information_pair(shape_empty_row, li_shape) is True
 
     a100_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-a100", "q-a100",
@@ -4983,6 +5455,16 @@ def run_self_test() -> int:
     assert isinstance(payload["shapes"], list) and len(payload["shapes"]) == 2
     assert "label" in payload["shapes"][0]
     assert "accessible_rows" in payload["shapes"][0]
+    assert "unknown_metadata_rows" in payload["shapes"][0]
+    unknown_row = AllocationRow("granite", "x", "u", "", "q-unk", "q-unk")
+    unknown_row.tags = ("gpu",)
+    unknown_text = render_explain_plan(
+        [unknown_row],
+        [ProbeShape(gpu_type="h100", filter=HardwareFilter(cpu_vendor="amd"))],
+        a,
+        "text",
+    )
+    assert "best-effort unknown metadata" in unknown_text, unknown_text
 
     # pivot_output: rows × shapes with wait cells.
     pivot_row = AllocationRow(
@@ -5365,7 +5847,7 @@ def main(argv: Sequence[str]) -> int:
     elif args.pivot:
         output = pivot_output(pairs)
     else:
-        show_gpus = any(s is not None and s.gpu_type for _, s in pairs)
+        show_gpus = any(s is not None and s.requires_gpu() for _, s in pairs)
         _maybe_emit_gpu_resolution_notice(pairs, args.verbose)
         if fmt == "csv":
             output = csv_output(
