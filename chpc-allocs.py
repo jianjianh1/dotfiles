@@ -920,6 +920,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "e.g. --quick --format json --no-json-help",
     )
     out.add_argument(
+        "--legend", action="store_true",
+        help="After the table, print a short key for the GPUS/INVENTORY "
+        "split, NOTE/FLAGS codes, and the CPUS shape grammar. "
+        "No effect on csv/json output (json carries _help instead). "
+        "e.g. --legend a100:4",
+    )
+    out.add_argument(
         "--full", "--keep-walltimes", dest="full", action="store_true",
         help="Skip the uniform-wait row collapse: keep every walltime row "
         "even when a multi-shape SHAPE_LIST gave the same wait across them. "
@@ -3913,14 +3920,14 @@ _COMPACT_TABLE_LABELS = {
     "tags": "FLAGS",
     "free_nodes": "NODES",
     "free_cpus": "CPUS",
-    "free_gpus": "GPUS",
+    "free_gpus": "INVENTORY",
 }
 
 _COMPACT_TABLE_HIDE = {"cpu_vendor"}
+# Identity columns (account, qos, shape) are intentionally excluded — splitting
+# them mid-token (e.g. `owner-\ngpu-guest`, `a:1@1\nh`) hurts readability more
+# than the extra width costs.
 _COMPACT_TABLE_WRAP = {
-    "account",
-    "qos",
-    "shape",
     "note",
     "tags",
     "free_cpus",
@@ -3961,6 +3968,34 @@ def _display_cell_value(column: str, raw: str, compact: bool) -> str:
     return raw
 
 
+def render_legend() -> str:
+    """Human-readable key for the cryptic codes in the wait-probe table.
+
+    Mirrors the explanations baked into JSON's `_help` block, but in a form a
+    CLI user can eyeball without re-running with `--format json`.
+    """
+    return (
+        "\nLegend\n"
+        "  GPUS column      GPU type for the requested shape (e.g. a40, a100)\n"
+        "  INVENTORY column free/total GPUs in the partition, by type\n"
+        "  FLAGS:  fc=freecycle (preemptable)  guest=preemptable on idle owner nodes\n"
+        "          res=reservation required   def=this is your default QOS\n"
+        "  NOTE:   queue       a fitting node exists; you're waiting on priority/policy\n"
+        "          fragmented  sized nodes exist but none has CPU+GPU+mem free at once\n"
+        "          too-small   no node in this partition is big enough for the shape\n"
+        "          qos-limit / invalid-* / unavailable / probe-{timeout,error}\n"
+        "                      from `sbatch --test-only` rejection\n"
+        "          (blank)     wait is `now` or no per-node data to attribute the wait\n"
+        "  CPUS cell shape: arch{cps}c×fn/tn n:f/t c\n"
+        "          arch    CPU class (mil=Milan, gen=Genoa, rom=Rome, csl=Cascade Lake, …)\n"
+        "          ?       node has no classifiable CPU feature in sinfo metadata\n"
+        "          cps     cores-per-socket\n"
+        "          fn/tn n free/total nodes in that arch+cps bucket\n"
+        "          f/t c   free/total cores in that bucket\n"
+        "  WAIT colors: green <10m, yellow <1h, red ≥1h, dim '?'.\n"
+    )
+
+
 def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
     if not text:
         return [""]
@@ -3973,11 +4008,14 @@ def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
         current_len = 0
         for index, tok in enumerate(tokens):
             suffix = "," if index < len(tokens) - 1 else ""
+            # Don't shred hyphenated identifiers like `gpu-guest` or
+            # `qos-limit`. If a single token overflows the budget, let it
+            # overflow rather than split mid-word.
             pieces = textwrap.wrap(
                 tok + suffix,
                 width=max(1, width),
-                break_long_words=True,
-                break_on_hyphens=True,
+                break_long_words=False,
+                break_on_hyphens=False,
             ) or [tok + suffix]
             for piece in pieces:
                 sep_cost = 1 if current else 0
@@ -3991,11 +4029,13 @@ def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
         if current:
             lines.append(" ".join(current))
         return lines or [""]
+    # Single-token columns (e.g. note='fragmented', 'qos-limit'): let a
+    # too-long token overflow rather than mangle it into 'fragm\nented'.
     return textwrap.wrap(
         text,
         width=max(1, width),
-        break_long_words=True,
-        break_on_hyphens=True,
+        break_long_words=False,
+        break_on_hyphens=False,
     ) or [""]
 
 
@@ -5140,13 +5180,20 @@ def run_self_test() -> int:
         "a100:1/4, h100nvl:0/8, l40s:0/16, rtx6000:3/13, "
         "rtxpr4000bl:1/43, rtxpr6000bl:5/36, h200_1g.18gb:55/56"
     )
+    # 100 is the practical floor for this fixture: the longest GPU token
+    # (`h200_1g.18gb:55/56`, 18 chars) doesn't split, so it sets the
+    # INVENTORY column's minimum width. 100 still exercises the wrap path
+    # (verified by the >=4 line-count assertion below). Strip ANSI codes
+    # before measuring — the WAIT="?" cell carries a dim escape sequence.
+    import re as _re
+    _ansi = _re.compile(r"\x1b\[[0-9;]*m")
     rendered = table_output(
-        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=100
     )
     rendered_lines = rendered.splitlines()
     # Header + rule + first data line + at least one indented continuation.
     assert len(rendered_lines) >= 4, rendered
-    assert max(len(line) for line in rendered_lines) <= 80, rendered
+    assert max(len(_ansi.sub("", line)) for line in rendered_lines) <= 100, rendered
     assert "FLAGS" in rendered_lines[0] and "NODES" in rendered_lines[0]
     assert "CPU_VENDOR" not in rendered_lines[0]
     assert "def" in rendered and "gpu,default" not in rendered
@@ -5172,21 +5219,24 @@ def run_self_test() -> int:
     )
     wide_cpu_row.free_gpus = ""
     rendered_cpu = table_output(
-        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=100
     )
     rendered_cpu_lines = rendered_cpu.splitlines()
     assert len(rendered_cpu_lines) >= 4, rendered_cpu
-    assert max(len(line) for line in rendered_cpu_lines) <= 80, rendered_cpu
+    assert max(len(_ansi.sub("", line)) for line in rendered_cpu_lines) <= 100, rendered_cpu
     # At least one line after the data row should carry a CPU shape token.
     assert any(
         "gen96c" in ln or "skl16c" in ln or "csl20c" in ln
             or "icx32c" in ln or "spr48c" in ln
         for ln in rendered_cpu_lines[3:]
     ), rendered_cpu
+    # QOS name doesn't carry the substring 'freecycle' — that lets us assert
+    # the FLAGS cell compacted to 'fc' without false positives from the QOS
+    # column. The freecycle classification comes via QOSInfo.flags below.
     fc_row = AllocationRow(
-        "granite", "acct", "me", "", "granite-gpu-freecycle", "granite-gpu-freecycle"
+        "granite", "acct", "me", "", "granite-gpu-fc", "granite-gpu-fc"
     )
-    fc_row.qos_info = QOSInfo("granite-gpu-freecycle")
+    fc_row.qos_info = QOSInfo("granite-gpu-fc", flags="freecycle")
     fc_row.tags = classify(fc_row)
     fc_row.free_nodes = "1/2"
     fc_row.free_cpus = "32/128"
@@ -6782,6 +6832,8 @@ def main(argv: Sequence[str]) -> int:
                 include_avail=include_avail, include_wait=include_wait,
                 show_gpus=show_gpus,
             )
+            if getattr(args, "legend", False):
+                output = output + "\n" + render_legend()
 
     print(output)
     return 0
