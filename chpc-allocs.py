@@ -1631,6 +1631,27 @@ class ProbeShape:
         return True
 
 
+def _filtered_cpu_shape_items(
+    bucket: "PartitionAvail", shape: "ProbeShape",
+) -> List[Tuple[Tuple[str, int], Tuple[int, int]]]:
+    """Bucket's per-(arch, cps) CPU entries restricted to those `shape` accepts.
+
+    Shape with no CPU constraint → every entry passes through. Unclassified
+    nodes (arch_short == "") are dropped when a constraint is set, since
+    we can't prove they satisfy it.
+    """
+    if not shape.filter.has_cpu_constraint():
+        return [
+            ((arch, cps), (free, total))
+            for (arch, cps), (free, total) in bucket.cpus_by_shape.items()
+        ]
+    return [
+        ((arch, cps), (free, total))
+        for (arch, cps), (free, total) in bucket.cpus_by_shape.items()
+        if arch and shape.filter.cpu_satisfies({arch})
+    ]
+
+
 def _filtered_gpu_items(
     bucket: "PartitionAvail", shape: "ProbeShape",
 ) -> List[Tuple[str, Tuple[int, int]]]:
@@ -2539,6 +2560,7 @@ def attach_row_availability(
             continue
         seen_partitions.add(cand)
         features = feat_per_cluster.get(cand, set())
+        allowed_cpu_keys: Optional[Set[Tuple[str, int]]]
         if shapes:
             accepting = [s for s in shapes if _bucket_matches_shape(bucket, features, s)]
             if not accepting:
@@ -2548,14 +2570,26 @@ def attach_row_availability(
                 for gtype, ft in _filtered_gpu_items(bucket, s):
                     allowed[gtype] = ft
             allowed_gpus = allowed.items()
+            # Any accepting shape without a CPU constraint widens the union to
+            # "all keys", so skip building the per-shape filter set entirely.
+            if any(not s.filter.has_cpu_constraint() for s in accepting):
+                allowed_cpu_keys = None
+            else:
+                allowed_cpu_keys = set()
+                for s in accepting:
+                    for key, _ft in _filtered_cpu_shape_items(bucket, s):
+                        allowed_cpu_keys.add(key)
         else:
             allowed_gpus = bucket.gpus.items()
+            allowed_cpu_keys = None
         matched = True
         nodes_free += bucket.nodes_free
         nodes_total += bucket.nodes_total
         cpus_free += bucket.cpus_free
         cpus_total += bucket.cpus_total
         for shape_key, (sfree, stotal) in bucket.cpus_by_shape.items():
+            if allowed_cpu_keys is not None and shape_key not in allowed_cpu_keys:
+                continue
             slot = cpu_shapes.setdefault(shape_key, [0, 0])
             slot[0] += sfree
             slot[1] += stotal
@@ -3890,6 +3924,36 @@ def run_self_test() -> int:
     attach_row_availability(multi_row, multi_avail)
     assert multi_row.free_cpus.startswith("gen96c:192/384"), multi_row.free_cpus
     assert "skl16c:32/128" in multi_row.free_cpus, multi_row.free_cpus
+
+    # Shape filter narrows the CPU column to matching arch/vendor.
+    multi_features = {"notchpeak": {"notchpeak-shared-short": {"gen", "skl"}}}
+    arch_shape = ProbeShape(filter=HardwareFilter(cpu_archs=("gen",)))
+    arch_row = AllocationRow(
+        "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
+    )
+    attach_row_availability(arch_row, multi_avail, multi_features, [arch_shape])
+    assert "gen96c:192/384" in arch_row.free_cpus, arch_row.free_cpus
+    assert "skl16c" not in arch_row.free_cpus, arch_row.free_cpus
+    assert "?32c" not in arch_row.free_cpus, arch_row.free_cpus  # unclassified dropped
+
+    vendor_shape = ProbeShape(filter=HardwareFilter(cpu_vendor="amd"))
+    vendor_row = AllocationRow(
+        "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
+    )
+    attach_row_availability(vendor_row, multi_avail, multi_features, [vendor_shape])
+    assert "gen96c:192/384" in vendor_row.free_cpus, vendor_row.free_cpus
+    assert "skl16c" not in vendor_row.free_cpus, vendor_row.free_cpus
+
+    # Shape with no CPU constraint preserves the full CPU list.
+    nofilter_shape = ProbeShape()
+    nofilter_row = AllocationRow(
+        "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
+    )
+    attach_row_availability(
+        nofilter_row, multi_avail, multi_features, [nofilter_shape]
+    )
+    assert "gen96c:192/384" in nofilter_row.free_cpus, nofilter_row.free_cpus
+    assert "skl16c:32/128" in nofilter_row.free_cpus, nofilter_row.free_cpus
 
     # Fallback: when bucket has no per-shape data, the legacy F/T form is used.
     fb_avail = {"granite": {"granite": PartitionAvail()}}
