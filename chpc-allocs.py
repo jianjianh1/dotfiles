@@ -72,6 +72,75 @@ INTEL_CPU_FEATURES = (
 )
 AMD_CPU_FEATURES = ("zen", "nap", "rom", "mil", "gen")
 
+# Long-form microarchitecture aliases → canonical short feature token. Keys are
+# checked after lowercasing; both hyphenated and concatenated forms are listed.
+# zen1..zen5 are intentionally omitted: substring-matching `zen` already covers
+# them in INTEL_CPU_FEATURES/AMD_CPU_FEATURES, and they pass through to
+# row.cpu_features unchanged for accurate constraint expressions.
+CPU_ARCH_ALIASES = {
+    "skylake": "skl",
+    "cascadelake": "csl", "cascade-lake": "csl",
+    "icelake": "icx", "ice-lake": "icx",
+    "sapphirerapids": "spr", "sapphire-rapids": "spr",
+    "emeraldrapids": "emr", "emerald-rapids": "emr",
+    "cooperlake": "cpx", "cooper-lake": "cpx",
+    "broadwell": "bro",
+    "haswell": "hsw",
+    "ivybridge": "ivy", "ivy-bridge": "ivy",
+    "sandybridge": "snb", "sandy-bridge": "snb",
+    "knightslanding": "knl", "knights-landing": "knl",
+    "naples": "nap",
+    "rome": "rom",
+    "milan": "mil",
+    "genoa": "gen",
+}
+
+# `zen<N>` literals (zen1..zen5) recognized as arch atoms. Stored in cpu_archs
+# verbatim so `--constraint=zen4` filters to that exact feature, while bare
+# `zen` falls through CPU_ARCH_ALIASES into the substring-match path.
+_ZEN_ARCH_LITERALS = tuple(f"zen{i}" for i in range(1, 6))
+
+# Vendor-OR `--constraint` expressions, built once. SLURM constraint syntax:
+# `a|b|c` = any-of. Used by ProbeShape.to_sbatch_args when only a vendor is
+# requested (no specific arch).
+VENDOR_CONSTRAINT_EXPR = {
+    "intel": "|".join(INTEL_CPU_FEATURES),
+    "amd": "|".join(AMD_CPU_FEATURES),
+}
+
+
+def _canon_cpu_arch(tok: str) -> Optional[str]:
+    """Resolve a token to a canonical short-form CPU arch tag, or None.
+
+    Accepts short forms (`skl`, `gen`, `rom`, ...), long forms via
+    CPU_ARCH_ALIASES (`skylake`, `genoa`, `rome`, ...), and `zen<N>` literals.
+    Returns the token suitable for a `--constraint=` value and for substring
+    matching against row.cpu_features.
+    """
+    if not tok:
+        return None
+    t = tok.lower()
+    if t in INTEL_CPU_FEATURES or t in AMD_CPU_FEATURES:
+        return t
+    if t in CPU_ARCH_ALIASES:
+        return CPU_ARCH_ALIASES[t]
+    if t in _ZEN_ARCH_LITERALS:
+        return t
+    return None
+
+
+def _features_match_vendor(features, vendor: str) -> bool:
+    """True iff any feature token substring-matches the given vendor's table.
+
+    Mirrors classify_cpu_vendor's substring logic but for a single vendor.
+    """
+    table = INTEL_CPU_FEATURES if vendor == "intel" else AMD_CPU_FEATURES
+    for feat in features or ():
+        f = feat.lower()
+        if any(p in f for p in table):
+            return True
+    return False
+
 
 def classify_cpu_vendor(features) -> str:
     """Map a row's cpu_features to 'intel', 'amd', 'mixed', or '' (unknown).
@@ -277,6 +346,8 @@ Common entry points:
   chpc-allocs cpu:32                a single 32-core CPU probe
   chpc-allocs a100:4+cpu:32         two alternatives ('+' = OR, no quoting)
   chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
+  chpc-allocs 'a100:4*intel'        constrain to Intel hosts (vendor atom)
+  chpc-allocs 'cpu:32*genoa'        constrain to a microarchitecture
   chpc-allocs --quick               list allocations, no probes
   chpc-allocs --explain a100:4      preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
@@ -298,6 +369,15 @@ Common queries:
   chpc-allocs --cluster notchpeak             # rows on notchpeak only
   chpc-allocs a100:1                          # narrows to rows that expose a100
   chpc-allocs h100:1                          # 'h100' resolves to row's actual GRES (e.g. h100nvl)
+  chpc-allocs 'a100:4*intel'                  # a100x4 only on Intel hosts
+  chpc-allocs 'cpu:32*genoa'                  # 32-core CPU on Genoa nodes (alias 'gen')
+  chpc-allocs intel+amd --pivot               # compare Intel vs AMD side-by-side
+  chpc-allocs zen4                            # 1 cpu on any Zen 4 host
+  Vendors: intel, amd. Microarchitectures (short or long form):
+    Intel: skl/skylake, csl/cascadelake, icx/icelake, spr/sapphirerapids,
+           emr/emeraldrapids, cpx/cooperlake, bro/broadwell, hsw/haswell,
+           ivy/ivybridge, snb/sandybridge, knl/knightslanding
+    AMD:   nap/naples, rom/rome, mil/milan, gen/genoa, zen, zen1..zen5
 
 Scripting / output:
   chpc-allocs a100:1 --format json | jq '.rows[]'   # JSON with _help legend
@@ -338,10 +418,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "'*' (combine into one job, AND; binds tighter than '+'). "
         "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32-core CPU), "
         "'gpu:4' (any GPU x 4), '32' (= cpu:32). Append '@DUR' for walltime: "
-        "'a100:1@30m', 'cpu:32@12h'. Comma-separated key=value tokens "
-        "(cores=, mem=, time=, gpus=, nodes=) also accepted, e.g. "
-        "'a100:4,mem=32G,time=24h'. Combined example: "
-        "'a100:4*cpu:32+h100:1@30m'. Quote when your shell would expand '*'.",
+        "'a100:1@30m', 'cpu:32@12h'. CPU vendor/microarch atoms: 'intel', "
+        "'amd', 'skl', 'genoa', 'rome', 'milan', 'zen4', etc. (filter rows + "
+        "pass --constraint to sbatch). Comma-separated key=value tokens "
+        "(cores=, mem=, time=, gpus=, nodes=, vendor=, arch=) also accepted, "
+        "e.g. 'a100:4,mem=32G,time=24h', 'cpu:32,arch=genoa'. Combined "
+        "example: 'a100:4*intel+h100:1@30m'. Quote when your shell would "
+        "expand '*'.",
     )
 
     # ----- Filtering -------------------------------------------------------
@@ -936,6 +1019,8 @@ class ProbeShape:
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
         time: str = DEFAULT_PROBE_TIME,
+        cpu_vendor: Optional[str] = None,
+        cpu_archs: Tuple[str, ...] = (),
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
@@ -943,6 +1028,8 @@ class ProbeShape:
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
         self.time = time
+        self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
+        self.cpu_archs = tuple(a.lower() for a in cpu_archs)
         self.label = self._compute_label()
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
@@ -956,6 +1043,11 @@ class ProbeShape:
         parts = [core]
         if self.mem:
             parts.append(self.mem)
+        # arch is more specific than vendor; show only one to keep labels tight.
+        if self.cpu_archs:
+            parts.extend(self.cpu_archs)
+        elif self.cpu_vendor:
+            parts.append(self.cpu_vendor)
         label = ",".join(parts)
         if self.nodes > 1:
             label = f"{self.nodes}n*{label}"
@@ -988,6 +1080,19 @@ class ProbeShape:
             return f"gpu:{gtype}:{count}"
         return f"gpu:{count}"
 
+    def constraint_expr(self) -> Optional[str]:
+        """Return the SLURM `--constraint` expression, or None if unconstrained.
+
+        arch wins over vendor (a specific arch already implies its vendor).
+        Multiple archs are AND'd with `&`; vendor expands to an OR over the
+        vendor's feature table.
+        """
+        if self.cpu_archs:
+            return "&".join(self.cpu_archs) if len(self.cpu_archs) > 1 else self.cpu_archs[0]
+        if self.cpu_vendor:
+            return VENDOR_CONSTRAINT_EXPR.get(self.cpu_vendor)
+        return None
+
     def to_sbatch_args(self, row: "AllocationRow") -> List[str]:
         args = ["-N", str(self.nodes), "-n", str(self.cpus), "-t", _to_sbatch_wall(self.time)]
         if self.mem:
@@ -995,18 +1100,30 @@ class ProbeShape:
         gres = self.gres_for(row)
         if gres:
             args.append(f"--gres={gres}")
+        constraint = self.constraint_expr()
+        if constraint:
+            args.append(f"--constraint={constraint}")
         return args
 
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
         gpu_requested = self.gpu_type is not None or self.gpu_count is not None
-        if not gpu_requested:
-            return False
-        if "gpu" not in row.tags:
-            return True
-        if self.gpu_type and row.gpu_types:
-            # Empty row.gpu_types just means metadata wasn't loaded.
-            return not any_glob_match(row.gpu_types, [self.gpu_type])
+        if gpu_requested:
+            if "gpu" not in row.tags:
+                return True
+            if self.gpu_type and row.gpu_types:
+                # Empty row.gpu_types just means metadata wasn't loaded.
+                if not any_glob_match(row.gpu_types, [self.gpu_type]):
+                    return True
+        # Empty row.cpu_features means metadata wasn't loaded — don't skip,
+        # consistent with the GPU branch above.
+        if self.cpu_vendor and row.cpu_features:
+            if not _features_match_vendor(row.cpu_features, self.cpu_vendor):
+                return True
+        if self.cpu_archs and row.cpu_features:
+            for arch in self.cpu_archs:
+                if not any(arch in f.lower() for f in row.cpu_features):
+                    return True
         return False
 
 
@@ -1090,17 +1207,30 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     return int(count_text)
 
 
+_VENDORS = ("intel", "amd")
+_VENDOR_HINT = "vendor=intel|amd"
+_ARCH_HINT = (
+    "short forms (skl, csl, icx, spr, emr, cpx, bro, hsw, ivy, snb, knl, "
+    "zen, nap, rom, mil, gen, zen1..zen5) or long forms "
+    "(skylake, cascadelake, icelake, sapphirerapids, broadwell, haswell, "
+    "naples, rome, milan, genoa, ...)"
+)
+
+
 def parse_shape_spec(spec: str) -> ProbeShape:
     """Parse a single shape SPEC into a ProbeShape.
 
     Tokens (comma-separated, any order):
       cores=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
+      vendor=intel|amd | arch=<microarch>
     Positional shorthands (first one wins for that slot):
       cpu:N        -> cores=N (CPU shape, no GPU)
       gpu:N        -> any GPU type, count N
       <type>:N     -> gpus=<type>:N
       <type>       -> gpus=<type> (count 1)
       N (digits)   -> cores=N
+      intel|amd    -> vendor filter
+      <microarch>  -> arch filter (skl, genoa, rome, zen4, ...)
     Walltime suffix on any positional shorthand:
       <shape>@<DUR> -> shape + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
 
@@ -1110,6 +1240,8 @@ def parse_shape_spec(spec: str) -> ProbeShape:
       'a100:4,mem=32G,time=24h'    -> 4 a100, 32G mem, 24-hour wall
       'cpu:32,mem=128G,time=12h'   -> 32 cores (CPU job), 128G, 12h
       'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
+      'a100:4,vendor=intel'        -> 4 a100 on Intel hosts
+      'cpu:32,arch=genoa'          -> 32 cores on Genoa nodes
     """
     s = (spec or "").strip()
     if not s:
@@ -1124,6 +1256,8 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     time = DEFAULT_PROBE_TIME
     gpu_type: Optional[str] = None
     gpu_count: Optional[int] = None
+    cpu_vendor: Optional[str] = None
+    cpu_archs: List[str] = []
 
     for raw in s.split(","):
         tok = raw.strip()
@@ -1173,11 +1307,30 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                 time = val
             elif key == "gpus":
                 gpu_type, gpu_count = parse_gpu_spec(val)
+            elif key == "vendor":
+                v = val.lower()
+                if v not in _VENDORS:
+                    raise _shape_error(
+                        spec,
+                        f"vendor value {val!r} is not recognized",
+                        _VENDOR_HINT,
+                    )
+                cpu_vendor = v
+            elif key == "arch":
+                canon = _canon_cpu_arch(val)
+                if canon is None:
+                    raise _shape_error(
+                        spec,
+                        f"arch value {val!r} is not recognized",
+                        _ARCH_HINT,
+                    )
+                if canon not in cpu_archs:
+                    cpu_archs.append(canon)
             else:
                 raise _shape_error(
                     spec,
                     f"unknown key {key!r}",
-                    "one of cores=, mem=, time=, gpus=, nodes=",
+                    "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=",
                 )
         else:
             low = tok.lower()
@@ -1214,8 +1367,15 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                         "N > 0 (treated as cores=N)",
                     )
                 cpus = int(low)
+            elif low in _VENDORS:
+                cpu_vendor = low
             else:
-                gpu_type, gpu_count = parse_gpu_spec(low)
+                canon = _canon_cpu_arch(low)
+                if canon is not None:
+                    if canon not in cpu_archs:
+                        cpu_archs.append(canon)
+                else:
+                    gpu_type, gpu_count = parse_gpu_spec(low)
 
     return ProbeShape(
         nodes=nodes,
@@ -1224,6 +1384,8 @@ def parse_shape_spec(spec: str) -> ProbeShape:
         gpu_type=gpu_type,
         gpu_count=gpu_count,
         time=time,
+        cpu_vendor=cpu_vendor,
+        cpu_archs=tuple(cpu_archs),
     )
 
 
@@ -3035,6 +3197,103 @@ def run_self_test() -> int:
             pass
         else:
             raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+
+    # _canon_cpu_arch: short forms pass through, long forms map, others -> None.
+    assert _canon_cpu_arch("skl") == "skl"
+    assert _canon_cpu_arch("gen") == "gen"
+    assert _canon_cpu_arch("genoa") == "gen"
+    assert _canon_cpu_arch("rome") == "rom"
+    assert _canon_cpu_arch("milan") == "mil"
+    assert _canon_cpu_arch("Cascade-Lake") == "csl"
+    assert _canon_cpu_arch("zen4") == "zen4"
+    assert _canon_cpu_arch("a100") is None
+    assert _canon_cpu_arch("") is None
+
+    # _features_match_vendor: substring check against vendor's table.
+    assert _features_match_vendor(("zen4",), "amd") is True
+    assert _features_match_vendor(("zen4",), "intel") is False
+    assert _features_match_vendor(("skl",), "intel") is True
+    assert _features_match_vendor((), "intel") is False
+
+    # parse_shape_spec: vendor and arch atoms (positional bare tokens).
+    sh = parse_shape_spec("intel")
+    assert sh.cpu_vendor == "intel" and sh.cpu_archs == () and sh.gpu_type is None
+    sh = parse_shape_spec("amd")
+    assert sh.cpu_vendor == "amd"
+    sh = parse_shape_spec("genoa")
+    assert sh.cpu_archs == ("gen",) and sh.cpu_vendor is None
+    sh = parse_shape_spec("zen4")
+    assert sh.cpu_archs == ("zen4",)
+    # Combined positional: a100:4 with vendor filter.
+    sh = parse_shape_spec("a100:4,intel")
+    assert sh.gpu_type == "a100" and sh.gpu_count == 4 and sh.cpu_vendor == "intel"
+    # key=value forms.
+    sh = parse_shape_spec("a100:4,vendor=amd")
+    assert sh.cpu_vendor == "amd"
+    sh = parse_shape_spec("cpu:32,arch=rome")
+    assert sh.cpus == 32 and sh.cpu_archs == ("rom",)
+    # Label includes arch (preferred) or vendor.
+    assert ",gen" in parse_shape_spec("cpu:32,arch=genoa").label
+    assert ",intel" in parse_shape_spec("a100:4,vendor=intel").label
+    # arch wins over vendor in the label.
+    label = parse_shape_spec("a100:4,vendor=amd,arch=genoa").label
+    assert ",gen" in label and ",amd" not in label
+    # Bad vendor/arch values raise.
+    for bad in ("vendor=nvidia", "arch=potato", "vendor="):
+        try:
+            parse_shape_spec(bad)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+
+    # parse_shape_list: AND-combine GPU shape with vendor atom.
+    shapes_va = parse_shape_list("a100:4*intel")
+    assert len(shapes_va) == 1
+    assert shapes_va[0].gpu_type == "a100" and shapes_va[0].cpu_vendor == "intel"
+    # OR across vendors.
+    shapes_or = parse_shape_list("intel+amd")
+    assert [s.cpu_vendor for s in shapes_or] == ["intel", "amd"]
+
+    # ProbeShape.constraint_expr: arch wins, vendor expands to OR over table.
+    assert ProbeShape().constraint_expr() is None
+    assert ProbeShape(cpu_archs=("gen",)).constraint_expr() == "gen"
+    assert ProbeShape(cpu_archs=("rom", "mil")).constraint_expr() == "rom&mil"
+    intel_expr = ProbeShape(cpu_vendor="intel").constraint_expr()
+    assert intel_expr and "skl" in intel_expr and "csl" in intel_expr and "|" in intel_expr
+    amd_expr = ProbeShape(cpu_vendor="amd").constraint_expr()
+    assert amd_expr and "zen" in amd_expr and "gen" in amd_expr
+    # arch takes precedence over vendor when both set.
+    assert ProbeShape(cpu_vendor="intel", cpu_archs=("gen",)).constraint_expr() == "gen"
+
+    # to_sbatch_args: --constraint emitted only when vendor/arch set.
+    args_intel = ProbeShape(cpu_vendor="intel").to_sbatch_args(cpu_row)
+    assert any(a.startswith("--constraint=") for a in args_intel)
+    args_plain = ProbeShape().to_sbatch_args(cpu_row)
+    assert not any(a.startswith("--constraint=") for a in args_plain)
+    args_arch = ProbeShape(cpu_archs=("gen",)).to_sbatch_args(cpu_row)
+    assert "--constraint=gen" in args_arch
+
+    # should_skip: vendor/arch row predicates.
+    intel_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    intel_row.tags = ("cpu",)
+    intel_row.cpu_features = ("skl",)
+    amd_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    amd_row.tags = ("cpu",)
+    amd_row.cpu_features = ("zen4",)
+    no_feat_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    no_feat_row.tags = ("cpu",)
+    # vendor mismatch skips; match doesn't.
+    assert ProbeShape(cpu_vendor="intel").should_skip(amd_row) is True
+    assert ProbeShape(cpu_vendor="intel").should_skip(intel_row) is False
+    assert ProbeShape(cpu_vendor="amd").should_skip(amd_row) is False
+    # arch mismatch skips; substring match (zen4 contains zen) works.
+    assert ProbeShape(cpu_archs=("gen",)).should_skip(amd_row) is True
+    assert ProbeShape(cpu_archs=("zen",)).should_skip(amd_row) is False
+    assert ProbeShape(cpu_archs=("zen4",)).should_skip(amd_row) is False
+    # Empty cpu_features: don't skip (metadata not loaded).
+    assert ProbeShape(cpu_vendor="intel").should_skip(no_feat_row) is False
+    assert ProbeShape(cpu_archs=("gen",)).should_skip(no_feat_row) is False
 
     prem_rows = [
         AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
