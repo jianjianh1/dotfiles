@@ -142,6 +142,172 @@ def _features_match_vendor(features, vendor: str) -> bool:
     return False
 
 
+# NVIDIA GPU generation aliases → canonical short tag. Long forms collapse
+# to a single canonical name stored in ProbeShape.gpu_gen.
+GPU_GEN_ALIASES = {
+    "kepler": "kepler",
+    "maxwell": "maxwell",
+    "pascal": "pascal",
+    "volta": "volta",
+    "turing": "turing",
+    "ampere": "ampere",
+    "ada": "ada",
+    "lovelace": "ada",
+    "adalovelace": "ada",
+    "ada-lovelace": "ada",
+    "hopper": "hopper",
+    "blackwell": "blackwell",
+}
+
+# Numeric ordering for `gen_min=` comparisons. The integer is the lowest SM
+# compute capability for that generation's family on this cluster — used as
+# the threshold when expanding gen_min to an SM lower bound.
+GPU_GEN_ORDER = {
+    "kepler": 30,
+    "maxwell": 50,
+    "pascal": 60,
+    "volta": 70,
+    "turing": 75,
+    "ampere": 80,
+    "ada": 89,
+    "hopper": 90,
+    "blackwell": 100,
+}
+
+# Recognized SM compute-capability tokens, accepted as positional `sm70` /
+# `sm_70` and as `sm=N` / `sm_min=N` integer values. Constrained to the SMs
+# that classify into known generations on this cluster.
+GPU_SM_TOKENS = (70, 75, 80, 86, 89, 90, 100, 120)
+
+# Ordered substring classifier: GRES token → (generation, sm). First match
+# wins, so longer/more-specific patterns must come before shorter prefixes
+# (e.g. `rtx4000ada` before any bare `rtx4000`). MIG-slice tokens like
+# `h200_1g.18gb` and `a100_80gb_pcie_1g.10gb` inherit via substring match
+# on `h200`/`a100`.
+GPU_TOKEN_CLASSIFIERS = (
+    # Blackwell (sm_120). RTX PRO 4000/6000 Blackwell first, before any
+    # rtx4000/rtx6000 prefix would shadow them.
+    ("rtxpr6000bl",    "blackwell", 120),
+    ("rtxpr4000bl",    "blackwell", 120),
+    ("blackwell",      "blackwell", 120),
+    # Hopper (sm_90).
+    ("h200nvl",        "hopper",     90),
+    ("h200",           "hopper",     90),
+    ("h100nvl",        "hopper",     90),
+    ("h100",           "hopper",     90),
+    ("h800",           "hopper",     90),
+    # Ada Lovelace (sm_89). All `*ada` variants before bare `rtx####`.
+    ("rtx6000ada",     "ada",        89),
+    ("rtx5000ada",     "ada",        89),
+    ("rtx4500ada",     "ada",        89),
+    ("rtx4000ada",     "ada",        89),
+    ("rtx2000ada",     "ada",        89),
+    ("l40s",           "ada",        89),
+    ("l40",            "ada",        89),
+    ("l4",             "ada",        89),
+    # Ampere (sm_80 datacenter, sm_86 workstation/consumer).
+    ("a100",           "ampere",     80),
+    ("a800",           "ampere",     80),
+    ("a30",            "ampere",     80),
+    ("a40",            "ampere",     86),
+    ("a6000",          "ampere",     86),
+    ("a5500",          "ampere",     86),
+    ("a5000",          "ampere",     86),
+    ("a4500",          "ampere",     86),
+    ("rtxa6000",       "ampere",     86),
+    ("3090",           "ampere",     86),
+    ("3080",           "ampere",     86),
+    # Turing (sm_75) — must follow all `*ada`/`*bl` variants above.
+    ("titanrtx",       "turing",     75),
+    ("rtx2000",        "turing",     75),
+    ("rtx5000",        "turing",     75),
+    ("rtx6000",        "turing",     75),
+    ("2080ti",         "turing",     75),
+    ("t4",             "turing",     75),
+    # Volta (sm_70).
+    ("titanv",         "volta",      70),
+    ("v100",           "volta",      70),
+    # Pascal (sm_61). p40 = sm_61, p100 = sm_60; we report the family minimum.
+    ("p100",           "pascal",     60),
+    ("p40",            "pascal",     61),
+    ("p4",             "pascal",     61),
+    # Maxwell (sm_52) and Kepler (sm_35) included for completeness.
+    ("m40",            "maxwell",    52),
+    ("k80",            "kepler",     37),
+    ("k40",            "kepler",     35),
+    ("k20",            "kepler",     35),
+)
+
+
+def _canon_gpu_gen(tok: str) -> Optional[str]:
+    """Resolve a token to a canonical NVIDIA generation tag, or None."""
+    if not tok:
+        return None
+    return GPU_GEN_ALIASES.get(tok.lower())
+
+
+def _parse_sm_token(tok: str) -> Optional[int]:
+    """Parse `sm70` / `sm_70` (case-insensitive) → int 70, or None.
+
+    Returns None for any value not in GPU_SM_TOKENS so unknown SMs (e.g.
+    typos like `sm99`) fall through to the GPU-spec fallback for diagnosis.
+    """
+    if not tok:
+        return None
+    s = tok.lower()
+    if not s.startswith("sm"):
+        return None
+    rest = s[2:]
+    if rest.startswith("_"):
+        rest = rest[1:]
+    if not rest.isdigit():
+        return None
+    n = int(rest)
+    return n if n in GPU_SM_TOKENS else None
+
+
+def _classify_gpu_token(token: str) -> Optional[Tuple[str, int]]:
+    """Return (generation, sm) for a GRES token, or None if unrecognized."""
+    if not token:
+        return None
+    t = token.lower()
+    for pattern, gen, sm in GPU_TOKEN_CLASSIFIERS:
+        if pattern in t:
+            return (gen, sm)
+    return None
+
+
+def _parse_sm_int(val: str) -> Optional[int]:
+    """Validate `val` as a known SM integer, or return None."""
+    if val.isdigit() and int(val) in GPU_SM_TOKENS:
+        return int(val)
+    return None
+
+
+def _gpu_token_satisfies(
+    token: str,
+    *,
+    gen: Optional[str],
+    sm: Optional[int],
+    gen_min: Optional[str],
+    sm_min: Optional[int],
+) -> bool:
+    """True iff this GRES token satisfies all set generation/SM constraints."""
+    cls = _classify_gpu_token(token)
+    if cls is None:
+        return False
+    tok_gen, tok_sm = cls
+    if gen is not None and tok_gen != gen:
+        return False
+    if sm is not None and tok_sm != sm:
+        return False
+    if gen_min is not None and tok_sm < GPU_GEN_ORDER[gen_min]:
+        return False
+    if sm_min is not None and tok_sm < sm_min:
+        return False
+    return True
+
+
 def classify_cpu_vendor(features) -> str:
     """Map a row's cpu_features to 'intel', 'amd', 'mixed', or '' (unknown).
 
@@ -348,6 +514,8 @@ Common entry points:
   chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
   chpc-allocs 'a100:4*intel'        constrain to Intel hosts (vendor atom)
   chpc-allocs 'cpu:32*genoa'        constrain to a microarchitecture
+  chpc-allocs 'gpu:4*ampere'        any 4 Ampere GPUs (gen atom)
+  chpc-allocs 'gpu:1,sm_min=80'     any GPU with compute capability >= 8.0
   chpc-allocs --quick               list allocations, no probes
   chpc-allocs --explain a100:4      preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
@@ -378,6 +546,14 @@ Common queries:
            emr/emeraldrapids, cpx/cooperlake, bro/broadwell, hsw/haswell,
            ivy/ivybridge, snb/sandybridge, knl/knightslanding
     AMD:   nap/naples, rom/rome, mil/milan, gen/genoa, zen, zen1..zen5
+  GPU generation / SM compute capability (NVIDIA):
+    Generations: kepler, maxwell, pascal, volta, turing, ampere,
+                 ada (= lovelace), hopper, blackwell
+    SM atoms:    sm70, sm75, sm80, sm86, sm89, sm90, sm100, sm120
+                 (also sm_70, sm_80, ...)
+    Ranges (key=value only): sm_min=80, gen_min=ampere
+    Note: '+' suffix (e.g. 'sm80+') is NOT supported — '+' is the
+          shape-list OR separator. Use 'sm_min=80' instead.
 
 Scripting / output:
   chpc-allocs a100:1 --format json | jq '.rows[]'   # JSON with _help legend
@@ -420,9 +596,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "'gpu:4' (any GPU x 4), '32' (= cpu:32). Append '@DUR' for walltime: "
         "'a100:1@30m', 'cpu:32@12h'. CPU vendor/microarch atoms: 'intel', "
         "'amd', 'skl', 'genoa', 'rome', 'milan', 'zen4', etc. (filter rows + "
-        "pass --constraint to sbatch). Comma-separated key=value tokens "
-        "(cores=, mem=, time=, gpus=, nodes=, vendor=, arch=) also accepted, "
-        "e.g. 'a100:4,mem=32G,time=24h', 'cpu:32,arch=genoa'. Combined "
+        "pass --constraint to sbatch). GPU generation / SM atoms: 'ampere', "
+        "'hopper', 'ada', 'sm80', 'sm_89', etc. (filter rows + pin --gres "
+        "type). Comma-separated key=value tokens (cores=, mem=, time=, "
+        "gpus=, nodes=, vendor=, arch=, gen=, sm=, gen_min=, sm_min=) also "
+        "accepted, e.g. 'gpu:1,sm_min=80', 'a100:4,gen=hopper'. Combined "
         "example: 'a100:4*intel+h100:1@30m'. Quote when your shell would "
         "expand '*'.",
     )
@@ -1021,6 +1199,10 @@ class ProbeShape:
         time: str = DEFAULT_PROBE_TIME,
         cpu_vendor: Optional[str] = None,
         cpu_archs: Tuple[str, ...] = (),
+        gpu_gen: Optional[str] = None,
+        gpu_sm: Optional[int] = None,
+        gpu_gen_min: Optional[str] = None,
+        gpu_sm_min: Optional[int] = None,
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
@@ -1030,11 +1212,16 @@ class ProbeShape:
         self.time = time
         self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
         self.cpu_archs = tuple(a.lower() for a in cpu_archs)
+        self.gpu_gen = gpu_gen.lower() if gpu_gen else None
+        self.gpu_sm = gpu_sm
+        self.gpu_gen_min = gpu_gen_min.lower() if gpu_gen_min else None
+        self.gpu_sm_min = gpu_sm_min
         self.label = self._compute_label()
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
         wall = time_label if time_label is not None else _format_wall_short(self.time)
-        if self.gpu_type or self.gpu_count is not None:
+        gen_sm_set = self._has_gen_or_sm()
+        if self.gpu_type or self.gpu_count is not None or gen_sm_set:
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
             core = f"{gtype}:{count}@{wall}"
@@ -1048,27 +1235,76 @@ class ProbeShape:
             parts.extend(self.cpu_archs)
         elif self.cpu_vendor:
             parts.append(self.cpu_vendor)
+        # GPU generation/SM markers: exact wins over min when both set.
+        if self.gpu_gen:
+            parts.append(self.gpu_gen)
+        elif self.gpu_gen_min:
+            parts.append(f"{self.gpu_gen_min}+")
+        if self.gpu_sm is not None:
+            parts.append(f"sm{self.gpu_sm}")
+        elif self.gpu_sm_min is not None:
+            parts.append(f"sm{self.gpu_sm_min}+")
         label = ",".join(parts)
         if self.nodes > 1:
             label = f"{self.nodes}n*{label}"
         return label
 
-    def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
-        """Return the row-specific GRES name for this shape's gpu_type, or None.
+    def _has_gen_or_sm(self) -> bool:
+        return (
+            self.gpu_gen is not None
+            or self.gpu_sm is not None
+            or self.gpu_gen_min is not None
+            or self.gpu_sm_min is not None
+        )
 
-        When the user passes a partial name like 'h100' but the row exposes
-        'h100nvl' as its actual GRES type, resolve to the shortest matching
-        gpu_type so `sbatch --test-only` accepts the probe. Falls back to the
-        literal `self.gpu_type` when the row has no gpu_types metadata or no
-        substring match — same behavior as before for nonsense input.
+    def _candidate_tokens(self, row: "AllocationRow") -> Tuple[str, ...]:
+        """Row gpu_types tokens that satisfy gpu_type AND gen/SM constraints.
+
+        Empty when (a) the row has no gpu_types metadata, or (b) no token
+        satisfies the combined predicate. `should_skip` and `resolved_gpu_type`
+        share this so `a100:4*hopper` correctly yields zero candidates on a
+        heterogeneous row that contains both `a100` and `h100`.
         """
-        if not self.gpu_type:
+        if not row.gpu_types:
+            return ()
+        cands = tuple(row.gpu_types)
+        if self.gpu_type:
+            cands = tuple(t for t in cands if self.gpu_type in t.lower())
+        if self._has_gen_or_sm():
+            cands = tuple(
+                t for t in cands
+                if _gpu_token_satisfies(
+                    t,
+                    gen=self.gpu_gen, sm=self.gpu_sm,
+                    gen_min=self.gpu_gen_min, sm_min=self.gpu_sm_min,
+                )
+            )
+        return cands
+
+    def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
+        """Return the row-specific GRES name for this shape, or None.
+
+        Priority:
+          1. self.gpu_type set, no gen/SM: shortest substring match (legacy).
+          2. gpu_type and/or gen/SM: shortest token from `_candidate_tokens`.
+          3. Neither: None (caller emits bare gpu:N).
+
+        When `row.gpu_types` is empty (metadata not loaded) and only gpu_type
+        is set, fall back to the literal — preserves legacy probe behavior.
+        """
+        gen_sm = self._has_gen_or_sm()
+        if not (self.gpu_type or gen_sm):
             return None
         if not row.gpu_types:
-            return self.gpu_type
-        if self.gpu_type in row.gpu_types:
-            return self.gpu_type
-        return _shortest_matching_gpu(set(row.gpu_types), self.gpu_type) or self.gpu_type
+            return self.gpu_type  # gen_sm w/o metadata: caller will use bare gpu:N
+        cands = self._candidate_tokens(row)
+        if cands:
+            return min(cands, key=lambda s: (len(s), s))
+        # Legacy: gpu_type-only with no substring match falls back to literal
+        # so `--gres=gpu:<literal>:N` reproduces pre-classifier probe behavior.
+        if self.gpu_type and not gen_sm:
+            return _shortest_matching_gpu(set(row.gpu_types), self.gpu_type) or self.gpu_type
+        return None
 
     def gres_for(self, row: "AllocationRow") -> Optional[str]:
         """Return the --gres value for this row, or None to omit the flag."""
@@ -1107,14 +1343,18 @@ class ProbeShape:
 
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
-        gpu_requested = self.gpu_type is not None or self.gpu_count is not None
-        if gpu_requested:
-            if "gpu" not in row.tags:
+        gen_sm_requested = self._has_gen_or_sm()
+        gpu_requested = (
+            self.gpu_type is not None
+            or self.gpu_count is not None
+            or gen_sm_requested
+        )
+        if gpu_requested and "gpu" not in row.tags:
+            return True
+        # Empty row.gpu_types means metadata wasn't loaded — don't skip.
+        if row.gpu_types and (self.gpu_type or gen_sm_requested):
+            if not self._candidate_tokens(row):
                 return True
-            if self.gpu_type and row.gpu_types:
-                # Empty row.gpu_types just means metadata wasn't loaded.
-                if not any_glob_match(row.gpu_types, [self.gpu_type]):
-                    return True
         # Empty row.cpu_features means metadata wasn't loaded — don't skip,
         # consistent with the GPU branch above.
         if self.cpu_vendor and row.cpu_features:
@@ -1215,6 +1455,14 @@ _ARCH_HINT = (
     "(skylake, cascadelake, icelake, sapphirerapids, broadwell, haswell, "
     "naples, rome, milan, genoa, ...)"
 )
+_GEN_HINT = (
+    "one of kepler, maxwell, pascal, volta, turing, ampere, ada (alias "
+    "lovelace), hopper, blackwell"
+)
+_SM_HINT = (
+    "integer compute capability from " + ", ".join(str(n) for n in GPU_SM_TOKENS)
+    + " (e.g. sm80, sm_80, sm=80, sm_min=80)"
+)
 
 
 def parse_shape_spec(spec: str) -> ProbeShape:
@@ -1223,6 +1471,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     Tokens (comma-separated, any order):
       cores=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
       vendor=intel|amd | arch=<microarch>
+      gen=<NV-gen> | sm=N | gen_min=<NV-gen> | sm_min=N
     Positional shorthands (first one wins for that slot):
       cpu:N        -> cores=N (CPU shape, no GPU)
       gpu:N        -> any GPU type, count N
@@ -1231,6 +1480,8 @@ def parse_shape_spec(spec: str) -> ProbeShape:
       N (digits)   -> cores=N
       intel|amd    -> vendor filter
       <microarch>  -> arch filter (skl, genoa, rome, zen4, ...)
+      <NV-gen>     -> GPU gen filter (ampere, hopper, ada, ...)
+      sm<NN>       -> exact SM compute capability (sm80, sm_80, ...)
     Walltime suffix on any positional shorthand:
       <shape>@<DUR> -> shape + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
 
@@ -1242,6 +1493,9 @@ def parse_shape_spec(spec: str) -> ProbeShape:
       'cores=8,mem=16G,gpus=h100nvl:1,time=4h'
       'a100:4,vendor=intel'        -> 4 a100 on Intel hosts
       'cpu:32,arch=genoa'          -> 32 cores on Genoa nodes
+      'gpu:4,gen=ampere'           -> 4 Ampere-gen GPUs (any model)
+      'gpu:1,sm_min=80'            -> 1 GPU with compute capability >= 8.0
+      'gpu:1,gen_min=ampere'       -> 1 GPU, Ampere-or-newer
     """
     s = (spec or "").strip()
     if not s:
@@ -1258,6 +1512,17 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     gpu_count: Optional[int] = None
     cpu_vendor: Optional[str] = None
     cpu_archs: List[str] = []
+    gen_sm_state: Dict[str, object] = {
+        "gpu_gen": None, "gpu_sm": None,
+        "gpu_gen_min": None, "gpu_sm_min": None,
+    }
+    # (state-key, parser, hint) for each `gen=` / `gen_min=` / `sm=` / `sm_min=`.
+    gen_sm_keys = {
+        "gen":     ("gpu_gen",     _canon_gpu_gen, _GEN_HINT, "generation"),
+        "gen_min": ("gpu_gen_min", _canon_gpu_gen, _GEN_HINT, "generation"),
+        "sm":      ("gpu_sm",      _parse_sm_int,  _SM_HINT,  "SM"),
+        "sm_min":  ("gpu_sm_min",  _parse_sm_int,  _SM_HINT,  "SM"),
+    }
 
     for raw in s.split(","):
         tok = raw.strip()
@@ -1326,11 +1591,20 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     )
                 if canon not in cpu_archs:
                     cpu_archs.append(canon)
+            elif key in gen_sm_keys:
+                state_key, parser, hint, label = gen_sm_keys[key]
+                parsed = parser(val)
+                if parsed is None:
+                    raise _shape_error(
+                        spec, f"{key} value {val!r} is not a recognized {label}", hint,
+                    )
+                gen_sm_state[state_key] = parsed
             else:
                 raise _shape_error(
                     spec,
                     f"unknown key {key!r}",
-                    "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=",
+                    "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
+                    "gen=, sm=, gen_min=, sm_min=",
                 )
         else:
             low = tok.lower()
@@ -1375,7 +1649,15 @@ def parse_shape_spec(spec: str) -> ProbeShape:
                     if canon not in cpu_archs:
                         cpu_archs.append(canon)
                 else:
-                    gpu_type, gpu_count = parse_gpu_spec(low)
+                    gen_canon = _canon_gpu_gen(low)
+                    if gen_canon is not None:
+                        gen_sm_state["gpu_gen"] = gen_canon
+                    else:
+                        sm_val = _parse_sm_token(low)
+                        if sm_val is not None:
+                            gen_sm_state["gpu_sm"] = sm_val
+                        else:
+                            gpu_type, gpu_count = parse_gpu_spec(low)
 
     return ProbeShape(
         nodes=nodes,
@@ -1386,6 +1668,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
         time=time,
         cpu_vendor=cpu_vendor,
         cpu_archs=tuple(cpu_archs),
+        **gen_sm_state,
     )
 
 
@@ -3294,6 +3577,151 @@ def run_self_test() -> int:
     # Empty cpu_features: don't skip (metadata not loaded).
     assert ProbeShape(cpu_vendor="intel").should_skip(no_feat_row) is False
     assert ProbeShape(cpu_archs=("gen",)).should_skip(no_feat_row) is False
+
+    # _canon_gpu_gen: aliases collapse, unknown -> None.
+    assert _canon_gpu_gen("ampere") == "ampere"
+    assert _canon_gpu_gen("Ampere") == "ampere"
+    assert _canon_gpu_gen("lovelace") == "ada"
+    assert _canon_gpu_gen("ada-lovelace") == "ada"
+    assert _canon_gpu_gen("blackwell") == "blackwell"
+    assert _canon_gpu_gen("foo") is None
+    assert _canon_gpu_gen("") is None
+
+    # _parse_sm_token: sm70 / sm_70 / SM89; reject unknown.
+    assert _parse_sm_token("sm70") == 70
+    assert _parse_sm_token("sm_70") == 70
+    assert _parse_sm_token("SM89") == 89
+    assert _parse_sm_token("sm120") == 120
+    assert _parse_sm_token("sm99") is None  # not in GPU_SM_TOKENS
+    assert _parse_sm_token("smfoo") is None
+    assert _parse_sm_token("a100") is None
+    assert _parse_sm_token("") is None
+
+    # _classify_gpu_token: longest-prefix wins; MIG slices inherit.
+    assert _classify_gpu_token("a100") == ("ampere", 80)
+    assert _classify_gpu_token("a100_80gb_pcie") == ("ampere", 80)
+    assert _classify_gpu_token("a100_80gb_pcie_1g.10gb") == ("ampere", 80)
+    assert _classify_gpu_token("a6000") == ("ampere", 86)
+    assert _classify_gpu_token("h200") == ("hopper", 90)
+    assert _classify_gpu_token("h200_1g.18gb") == ("hopper", 90)
+    assert _classify_gpu_token("h100nvl") == ("hopper", 90)
+    assert _classify_gpu_token("rtx4000ada") == ("ada", 89)
+    assert _classify_gpu_token("rtx6000ada") == ("ada", 89)
+    assert _classify_gpu_token("rtx6000") == ("turing", 75)  # bare = Turing
+    assert _classify_gpu_token("rtxpr6000bl") == ("blackwell", 120)
+    assert _classify_gpu_token("l40s") == ("ada", 89)
+    assert _classify_gpu_token("v100") == ("volta", 70)
+    assert _classify_gpu_token("titanv") == ("volta", 70)
+    assert _classify_gpu_token("p40") == ("pascal", 61)
+    assert _classify_gpu_token("2080ti") == ("turing", 75)
+    assert _classify_gpu_token("madeupgpu") is None
+
+    # _gpu_token_satisfies: each constraint independently.
+    assert _gpu_token_satisfies("a100", gen="ampere", sm=None, gen_min=None, sm_min=None) is True
+    assert _gpu_token_satisfies("a100", gen="hopper", sm=None, gen_min=None, sm_min=None) is False
+    assert _gpu_token_satisfies("a100", gen=None, sm=80, gen_min=None, sm_min=None) is True
+    assert _gpu_token_satisfies("a100", gen=None, sm=89, gen_min=None, sm_min=None) is False
+    assert _gpu_token_satisfies("h100", gen=None, sm=None, gen_min="ampere", sm_min=None) is True
+    assert _gpu_token_satisfies("v100", gen=None, sm=None, gen_min="ampere", sm_min=None) is False
+    assert _gpu_token_satisfies("a6000", gen=None, sm=None, gen_min=None, sm_min=80) is True
+    assert _gpu_token_satisfies("v100", gen=None, sm=None, gen_min=None, sm_min=80) is False
+    assert _gpu_token_satisfies("madeupgpu", gen="ampere", sm=None, gen_min=None, sm_min=None) is False
+
+    # parse_shape_spec: gen/SM atoms (positional).
+    sh = parse_shape_spec("ampere")
+    assert sh.gpu_gen == "ampere" and sh.gpu_sm is None
+    sh = parse_shape_spec("hopper")
+    assert sh.gpu_gen == "hopper"
+    sh = parse_shape_spec("lovelace")
+    assert sh.gpu_gen == "ada"
+    sh = parse_shape_spec("sm80")
+    assert sh.gpu_sm == 80 and sh.gpu_gen is None
+    sh = parse_shape_spec("sm_89")
+    assert sh.gpu_sm == 89
+    # parse_shape_spec: gen/SM atoms (key=value).
+    sh = parse_shape_spec("gpu:4,gen=hopper")
+    assert sh.gpu_count == 4 and sh.gpu_gen == "hopper"
+    sh = parse_shape_spec("gpu:1,sm_min=80")
+    assert sh.gpu_sm_min == 80 and sh.gpu_count == 1
+    sh = parse_shape_spec("gpu:1,gen_min=ampere")
+    assert sh.gpu_gen_min == "ampere"
+    sh = parse_shape_spec("gpu:4,sm=89")
+    assert sh.gpu_sm == 89
+    # AND-combine: explicit GPU type plus generation.
+    shapes_ag = parse_shape_list("a100:4*ampere")
+    assert len(shapes_ag) == 1
+    assert shapes_ag[0].gpu_type == "a100" and shapes_ag[0].gpu_gen == "ampere"
+    # Bad gen/SM values raise.
+    for bad in ("gen=potato", "sm=99", "sm_min=99", "gen_min=foo", "gen=", "sm="):
+        try:
+            parse_shape_spec(bad)
+        except CommandError:
+            pass
+        else:
+            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+
+    # Label: gen/SM markers; min uses '+' suffix.
+    assert ",ampere" in parse_shape_spec("ampere").label
+    assert ",sm80" in parse_shape_spec("sm80").label
+    assert ",sm80+" in parse_shape_spec("gpu:1,sm_min=80").label
+    assert ",ampere+" in parse_shape_spec("gpu:1,gen_min=ampere").label
+    # Bare gen/SM atoms produce a GPU label, not CPU.
+    assert parse_shape_spec("ampere").label.startswith("gpu:1@")
+    assert parse_shape_spec("sm80").label.startswith("gpu:1@")
+
+    # to_sbatch_args: gen/SM does NOT emit --constraint.
+    args_amp = ProbeShape(gpu_gen="ampere").to_sbatch_args(gpu_row)
+    assert not any(a.startswith("--constraint=") for a in args_amp)
+
+    # should_skip: gen/SM row predicates.
+    a100_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    a100_row.tags = ("gpu",)
+    a100_row.gpu_types = ("a100", "a100_80gb_pcie")
+    h100_only = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    h100_only.tags = ("gpu",)
+    h100_only.gpu_types = ("h100nvl",)
+    v100_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    v100_row.tags = ("gpu",)
+    v100_row.gpu_types = ("v100",)
+    no_gpu_meta = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    no_gpu_meta.tags = ("gpu",)
+    # Exact gen / sm: skip on mismatch, don't skip on match.
+    assert ProbeShape(gpu_gen="hopper").should_skip(a100_row) is True
+    assert ProbeShape(gpu_gen="ampere").should_skip(a100_row) is False
+    assert ProbeShape(gpu_sm=80).should_skip(a100_row) is False
+    assert ProbeShape(gpu_sm=89).should_skip(a100_row) is True
+    # gen_min / sm_min: ge semantics.
+    assert ProbeShape(gpu_gen_min="ampere").should_skip(v100_row) is True
+    assert ProbeShape(gpu_gen_min="ampere").should_skip(a100_row) is False
+    assert ProbeShape(gpu_gen_min="ampere").should_skip(h100_only) is False
+    assert ProbeShape(gpu_sm_min=80).should_skip(v100_row) is True
+    assert ProbeShape(gpu_sm_min=80).should_skip(a100_row) is False
+    # Empty gpu_types: don't skip (metadata not loaded).
+    assert ProbeShape(gpu_gen="hopper").should_skip(no_gpu_meta) is False
+    assert ProbeShape(gpu_sm_min=80).should_skip(no_gpu_meta) is False
+    # gen/SM on a CPU row: skip (GPU implied).
+    assert ProbeShape(gpu_gen="ampere").should_skip(cpu_row) is True
+    # Combined gpu_type + gen: row must satisfy both on the SAME token.
+    assert ProbeShape(gpu_type="a100", gpu_gen="hopper").should_skip(a100_row) is True
+    assert ProbeShape(gpu_type="a100", gpu_gen="ampere").should_skip(a100_row) is False
+    # Heterogeneous row with both a100 (Ampere) and h100 (Hopper):
+    # `a100*hopper` must yield zero candidates because no single token
+    # satisfies both predicates.
+    mixed_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    mixed_row.tags = ("gpu",)
+    mixed_row.gpu_types = ("a100", "h100nvl")
+    assert ProbeShape(gpu_type="a100", gpu_gen="hopper").should_skip(mixed_row) is True
+    assert ProbeShape(gpu_type="h100", gpu_gen="hopper").should_skip(mixed_row) is False
+    assert ProbeShape(gpu_type="a100", gpu_gen="ampere").should_skip(mixed_row) is False
+
+    # resolved_gpu_type with gen/SM: pick shortest satisfying token.
+    h200_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
+    h200_row.tags = ("gpu",)
+    h200_row.gpu_types = ("h200_1g.18gb", "h200_2g.35gb", "h200")
+    assert ProbeShape(gpu_gen="hopper").resolved_gpu_type(h200_row) == "h200"
+    # gres_for uses the resolved token.
+    assert ProbeShape(gpu_gen="hopper").gres_for(h200_row) == "gpu:h200:1"
+    assert ProbeShape(gpu_gen="hopper", gpu_count=4).gres_for(h200_row) == "gpu:h200:4"
 
     prem_rows = [
         AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
