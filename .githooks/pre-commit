@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Pre-commit: syntax-check all *.sh and run shellcheck if available.
+# Pre-commit: syntax-check all *.sh, run shellcheck if available, and
+# scan staged content for secrets.
 # Enable once per clone: git config core.hooksPath .githooks
 # (setup.sh does this automatically.)
 
@@ -33,20 +34,61 @@ if [ ${#staged_sh[@]} -gt 0 ]; then
     fi
 fi
 
-# Secret scanning: check ALL staged files (not just shell scripts)
+# Secret scanning: check ALL staged files (not just shell scripts).
 staged_all=()
 while IFS= read -r f; do
     [ -n "$f" ] && staged_all+=("$f")
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
+# Filenames that are always considered key material, regardless of content.
+# Catches binary-encoded private keys that the regex below cannot inspect.
+key_filename_pattern='(^|/)(id_rsa|id_ed25519|id_ecdsa|id_dsa)([._-].*)?$|\.(pem|key|p12|pfx|keystore|jks|asc)$'
+
+# Tightened patterns. Anchors cut down on false positives:
+# - OpenAI: sk- prefix + optional proj-/None- subprefix + 32+ alnum chars
+# - Anthropic: sk-ant-... at least 40 chars
+# - GitHub: ghp_/gho_ are exactly 36 alnum; github_pat_ is alnum + underscore
+# - AWS: AKIA + 16 uppercase alnum
+# - Private-key armor headers
+secret_pattern='AKIA[0-9A-Z]{16}|sk-(proj-|None-)?[A-Za-z0-9]{32,}|sk-ant-[A-Za-z0-9_-]{40,}|ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+
+is_text_blob() {
+    # Use git's own attribute machinery first; fall back to `file --mime`.
+    local f="$1" mime
+    if git check-attr binary -- "$f" 2>/dev/null | grep -q ': binary: set$'; then
+        return 1
+    fi
+    if command -v file >/dev/null 2>&1; then
+        mime="$(git show :"$f" 2>/dev/null | file --mime --brief - 2>/dev/null || true)"
+        case "$mime" in
+            text/*|application/json*|application/xml*|application/javascript*|inode/x-empty*) return 0 ;;
+            '') return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
 if [ ${#staged_all[@]} -gt 0 ]; then
-    # Patterns: AWS keys, OpenAI/Anthropic keys, GitHub PATs, private keys
-    secret_pattern='AKIA[0-9A-Z]{16}|sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|sk-ant-[a-zA-Z0-9_-]{20,}'
     for f in "${staged_all[@]}"; do
-        [ -f "$f" ] || continue
-        if git diff --cached -- "$f" | grep -Eq "$secret_pattern"; then
-            echo "pre-commit: possible secret detected in $f" >&2
+        # Filename-based check fires regardless of file existence (covers
+        # blobs introduced via `git add` that may not be on disk yet).
+        if [[ "$f" =~ $key_filename_pattern ]]; then
+            echo "pre-commit: refusing to commit key-shaped filename: $f" >&2
             fail=1
+            continue
+        fi
+
+        [ -f "$f" ] || continue
+
+        # Scan the staged blob (`:` ref), not the working-tree diff. This
+        # catches additions in files where prior content already had
+        # secret-looking text.
+        if is_text_blob "$f"; then
+            if git show :"$f" 2>/dev/null | grep -Eq "$secret_pattern"; then
+                echo "pre-commit: possible secret detected in $f" >&2
+                fail=1
+            fi
         fi
     done
 fi
