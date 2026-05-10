@@ -893,9 +893,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     out.add_argument(
         "--sbatch", action="store_true",
-        help="Emit '#SBATCH --account=... --qos=...' blocks instead of a "
-        "table. With --format=json, emits a JSON array of "
-        "{cluster, account, qos, partition}. e.g. --sbatch a100:4 --quick",
+        help="Emit a paste-ready #SBATCH block per allocation "
+        "(clusters/account/partition/qos plus shape directives like "
+        "--time/--nodes/--ntasks/--gres/--constraint when SHAPE_LIST is "
+        "given). Each block has a '# <cluster> · <account>/<qos>' header "
+        "annotated with predicted wait when available. The multi-allocation "
+        "form of --best. With --format=json, emits a JSON array of records "
+        "with sbatch_directives, shape_label, predicted_wait_seconds. "
+        "e.g. --sbatch a100:4 --quick",
     )
     out.add_argument(
         "--best", action="store_true",
@@ -4267,72 +4272,92 @@ def best_output(
             return json.dumps(None)
         return "# no runnable allocations matched"
     row, shape = pairs[0]
-    wait_secs = row.wait_by_shape.get(shape.label) if shape else None
     alternatives = len(pairs) - 1
-    directives = sbatch_directive_lines(row, shape)
+    record = _allocation_json_record(row, shape)
     if fmt == "json":
-        return json.dumps(
-            {
-                "cluster": row.cluster,
-                "account": row.account,
-                "partition": row.partition,
-                "effective_partition": _effective_partition(row),
-                "qos": row.qos,
-                "time": shape.time if shape else "",
-                "shape_label": shape.label if shape else "",
-                "sbatch_directives": directives,
-                "predicted_wait_seconds": wait_secs,
-                "alternatives": alternatives,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    lines = list(directives)
+        record["alternatives"] = alternatives
+        return json.dumps(record, indent=2, sort_keys=True)
+    lines = list(record["sbatch_directives"])
     suffix = (
         f"  ({alternatives} alternative{'s' if alternatives != 1 else ''} — "
         "drop --best to see them)"
         if alternatives else ""
     )
-    lines.append(f"# predicted wait: {_format_wait(wait_secs)}{suffix}")
+    lines.append(
+        f"# predicted wait: {_format_wait(record['predicted_wait_seconds'])}{suffix}"
+    )
     return "\n".join(lines)
 
 
-def sbatch_output(rows: List[AllocationRow]) -> str:
-    lines = []
-    seen = set()
-    for row in rows:
-        key = (row.account, row.qos)
+def _allocation_json_record(
+    row: AllocationRow, shape: Optional[ProbeShape]
+) -> Dict[str, object]:
+    wait_secs = row.wait_by_shape.get(shape.label) if shape else None
+    return {
+        "cluster": row.cluster,
+        "account": row.account,
+        "qos": row.qos,
+        "partition": row.partition,
+        "effective_partition": _effective_partition(row),
+        "shape_label": shape.label if shape else "",
+        "time": shape.time if shape else "",
+        "predicted_wait_seconds": wait_secs,
+        "sbatch_directives": sbatch_directive_lines(row, shape),
+    }
+
+
+def _dedup_pairs(
+    pairs: Iterable[Tuple[AllocationRow, Optional[ProbeShape]]],
+) -> Iterator[Tuple[AllocationRow, Optional[ProbeShape]]]:
+    seen: Set[Tuple[str, str, str, str, str]] = set()
+    for row, shape in pairs:
+        key = (row.cluster, row.account, row.qos, row.partition,
+               shape.label if shape else "")
         if key in seen:
             continue
         seen.add(key)
-        lines.append(f"#SBATCH --account={row.account}")
-        if row.qos:
-            lines.append(f"#SBATCH --qos={row.qos}")
-        lines.append("")
-    return "\n".join(lines).rstrip() if lines else "# no matching allocations"
+        yield row, shape
 
 
-def sbatch_json_output(rows: List[AllocationRow]) -> str:
+def sbatch_output(
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+) -> str:
+    """Multi-allocation analog of `--best`.
+
+    Emits one paste-ready #SBATCH block per unique (cluster, account, qos,
+    partition, shape) tuple, separated by blank lines. Each block carries a
+    `# <cluster> · <account>/<qos>` header (with `(wait: <fmt>)` appended
+    when the wait probe gave a result).
+    """
+    blocks: List[List[str]] = []
+    for row, shape in _dedup_pairs(pairs):
+        header_id = f"{row.cluster} · {row.account}/{row.qos}".strip(" ·/")
+        # Distinguish "probed but unknown" (key present, value None → show
+        # `(wait: ?)`) from "not probed" (--no-wait/--quick → no annotation).
+        if shape and shape.label in row.wait_by_shape:
+            wait_secs = row.wait_by_shape[shape.label]
+            header = f"# {header_id}  (wait: {_format_wait(wait_secs)})"
+        else:
+            header = f"# {header_id}"
+        block = [header]
+        block.extend(sbatch_directive_lines(row, shape))
+        blocks.append(block)
+    if not blocks:
+        return "# no matching allocations"
+    return "\n\n".join("\n".join(block) for block in blocks)
+
+
+def sbatch_json_output(
+    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+) -> str:
     """Machine-readable variant of `sbatch_output`.
 
-    Emits a JSON array of {cluster, account, qos, partition} records, one
-    per unique (account, qos) tuple. Useful for templating job scripts.
+    Emits a JSON array of records, one per unique (cluster, account, qos,
+    partition, shape) tuple. Each record keeps the legacy top-level keys
+    (cluster, account, qos, partition) plus the same directive list, shape
+    label, and predicted wait that `--best` exposes.
     """
-    seen: Set[Tuple[str, str]] = set()
-    items: List[Dict[str, str]] = []
-    for row in rows:
-        key = (row.account, row.qos)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append(
-            {
-                "cluster": row.cluster,
-                "account": row.account,
-                "qos": row.qos,
-                "partition": row.partition,
-            }
-        )
+    items = [_allocation_json_record(row, shape) for row, shape in _dedup_pairs(pairs)]
     return json.dumps(items, indent=2, sort_keys=True)
 
 
@@ -5920,16 +5945,59 @@ def run_self_test() -> int:
     assert best_output([], "text") == "# no runnable allocations matched"
     assert json.loads(best_output([], "json")) is None
 
-    # sbatch_json_output: deduplicated array of {cluster, account, qos, partition}.
+    # sbatch_json_output: dedup keys on (cluster, account, qos, partition,
+    # shape) — partition='alt' keeps this row distinct from sbatch_row_a
+    # despite the matching (account, qos), so all three survive.
     sbatch_row_a = AllocationRow("notchpeak", "research", "u", "notchpeak-gpu", "qa", "qa")
     sbatch_row_b = AllocationRow("granite", "mlres", "u", "granite-gpu", "qb", "qb")
-    sbatch_row_dup = AllocationRow("notchpeak", "research", "u", "alt", "qa", "qa")  # dedup
+    sbatch_row_dup = AllocationRow("notchpeak", "research", "u", "alt", "qa", "qa")
     sbatch_payload = json.loads(
-        sbatch_json_output([sbatch_row_a, sbatch_row_b, sbatch_row_dup])
+        sbatch_json_output([(sbatch_row_a, None), (sbatch_row_b, None), (sbatch_row_dup, None)])
     )
-    assert isinstance(sbatch_payload, list) and len(sbatch_payload) == 2
-    keys = {(item["account"], item["qos"]) for item in sbatch_payload}
-    assert keys == {("research", "qa"), ("mlres", "qb")}
+    assert isinstance(sbatch_payload, list) and len(sbatch_payload) == 3
+    keys = {(item["account"], item["qos"], item["partition"]) for item in sbatch_payload}
+    assert keys == {
+        ("research", "qa", "notchpeak-gpu"),
+        ("mlres", "qb", "granite-gpu"),
+        ("research", "qa", "alt"),
+    }
+    for item in sbatch_payload:
+        assert "sbatch_directives" in item and item["sbatch_directives"]
+        assert item["shape_label"] == ""
+        assert item["predicted_wait_seconds"] is None
+        assert any(line.startswith("#SBATCH --clusters=") for line in item["sbatch_directives"])
+
+    gpu_row = AllocationRow(
+        "granite", "sadayappan", "u", "granite-gpu", "granite-gpu-freecycle", "granite-gpu-freecycle"
+    )
+    gpu_row.tags = ("gpu",)
+    gpu_row.gpu_types = ("h100nvl",)
+    gpu_shape = ProbeShape(gpu_type="h100", gpu_count=4, time="01:00:00")
+    gpu_row.wait_by_shape = {gpu_shape.label: 840}
+    plain_row = AllocationRow("notchpeak", "acct", "u", "soc-np", "soc-np", "soc-np")
+    sbatch_text = sbatch_output([(gpu_row, gpu_shape), (plain_row, None)])
+    assert "# granite · sadayappan/granite-gpu-freecycle  (wait: 14m)" in sbatch_text
+    assert "# notchpeak · acct/soc-np" in sbatch_text
+    # No-wait pair must not get a `(wait: ...)` annotation.
+    assert "(wait:" not in sbatch_text.split("# notchpeak", 1)[1]
+    assert "#SBATCH --clusters=granite" in sbatch_text
+    assert "#SBATCH --partition=granite-gpu" in sbatch_text
+    assert "#SBATCH --gres=gpu:h100nvl:4" in sbatch_text
+    assert "#SBATCH --time=01:00:00" in sbatch_text
+    assert "#SBATCH --partition=soc-np" in sbatch_text
+    s_a1 = ProbeShape(gpu_type="a100", gpu_count=1, time="01:00:00")
+    s_a4 = ProbeShape(gpu_type="a100", gpu_count=4, time="01:00:00")
+    multi_row = AllocationRow("notchpeak", "research", "u", "notchpeak-gpu", "q-piv", "q-piv")
+    multi_row.tags = ("gpu",)
+    multi_row.gpu_types = ("a100",)
+    multi_row.wait_by_shape = {s_a1.label: 0, s_a4.label: 3600}
+    multi_text = sbatch_output([(multi_row, s_a1), (multi_row, s_a4)])
+    assert multi_text.count("#SBATCH --clusters=notchpeak") == 2
+    assert "#SBATCH --gres=gpu:a100:1" in multi_text
+    assert "#SBATCH --gres=gpu:a100:4" in multi_text
+    assert "(wait: now)" in multi_text and "(wait: 1h)" in multi_text
+    assert sbatch_output([]) == "# no matching allocations"
+    assert json.loads(sbatch_json_output([])) == []
 
     # JSON output stability: include_help=False yields a bare array (consumed
     # via --no-json-help); include_help=True still wraps with _help + rows.
@@ -6304,9 +6372,9 @@ def main(argv: Sequence[str]) -> int:
         output = best_output(pairs, fmt)
     elif args.sbatch:
         if fmt == "json":
-            output = sbatch_json_output([row for row, _ in pairs])
+            output = sbatch_json_output(pairs)
         else:
-            output = sbatch_output([row for row, _ in pairs])
+            output = sbatch_output(pairs)
     elif args.pivot:
         output = pivot_output(pairs)
     else:
