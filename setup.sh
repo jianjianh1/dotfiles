@@ -27,6 +27,7 @@ NODE_MODULE_CANDIDATES=("nodejs")
 UV_MODULE_CANDIDATES=("uv")
 BTOP_MODULE_CANDIDATES=("btop")
 NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")
+TREE_SITTER_MODULE_CANDIDATES=("tree-sitter")
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
@@ -980,6 +981,89 @@ install_nvim() {
     return 1
 }
 
+install_tree_sitter_cargo() {
+    if ! command -v cargo &>/dev/null; then
+        return 1
+    fi
+    echo "  Building tree-sitter from source via cargo (this may take a few minutes)..."
+    local TMP
+    TMP="$(mktemp -d)"
+    if ! cargo install --quiet --locked --root "$TMP" tree-sitter-cli 2>&1 | tail -3; then
+        echo "  Warning: cargo install tree-sitter-cli failed"
+        rm -rf "$TMP"
+        return 1
+    fi
+    if [ ! -x "$TMP/bin/tree-sitter" ]; then
+        echo "  Warning: cargo install did not produce tree-sitter binary"
+        rm -rf "$TMP"
+        return 1
+    fi
+    if ! install_to "$TMP/bin/tree-sitter" "$BIN_DIR/tree-sitter"; then
+        echo "  Warning: failed to install tree-sitter to $BIN_DIR/tree-sitter"
+        rm -rf "$TMP"
+        return 1
+    fi
+    rm -rf "$TMP"
+    manifest_add_path "$BIN_DIR/tree-sitter"
+    echo "  tree-sitter (built from source) installed to $BIN_DIR/tree-sitter"
+}
+
+install_tree_sitter() {
+    if is_macos; then
+        brew_install tree-sitter tree-sitter
+        return $?
+    fi
+    if is_chpc && $CHPC_USE_MODULES; then
+        try_chpc_module_load tree-sitter "tree-sitter CLI" \
+            TREE_SITTER_MODULE "${TREE_SITTER_MODULE_CANDIDATES[@]}"
+        return
+    fi
+    if command -v tree-sitter &>/dev/null && ! $FORCE; then
+        record_command_if_managed tree-sitter || true
+        echo "tree-sitter already installed: $(tree-sitter --version | head -1)"
+        return 0
+    fi
+    echo "Installing tree-sitter CLI..."
+    local TS_VERSION
+    TS_VERSION="$(gh_latest tree-sitter/tree-sitter)" || return 1
+    local ARCH TS_ARCH
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  TS_ARCH="x64"   ;;
+        aarch64) TS_ARCH="arm64" ;;
+        *)       echo "  Skipping tree-sitter (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/tree-sitter.gz" \
+        "https://github.com/tree-sitter/tree-sitter/releases/download/v${TS_VERSION}/tree-sitter-linux-${TS_ARCH}.gz"; then
+        echo "  Warning: failed to download tree-sitter"
+        install_tree_sitter_cargo
+        return $?
+    fi
+    if ! gunzip "$TMP/tree-sitter.gz"; then
+        echo "  Warning: failed to gunzip tree-sitter"
+        install_tree_sitter_cargo
+        return $?
+    fi
+    chmod +x "$TMP/tree-sitter"
+    # The prebuilt binary is dynamically linked against modern glibc; on hosts
+    # with older glibc (e.g. CHPC RHEL 8 = glibc 2.28), it fails to run. Probe
+    # before installing, and fall back to building from source via cargo.
+    if ! "$TMP/tree-sitter" --version &>/dev/null; then
+        echo "  Prebuilt tree-sitter incompatible with this host's glibc; falling back to cargo build."
+        install_tree_sitter_cargo
+        return $?
+    fi
+    if ! install_to "$TMP/tree-sitter" "$BIN_DIR/tree-sitter"; then
+        echo "  Warning: failed to install tree-sitter to $BIN_DIR/tree-sitter"
+        return 1
+    fi
+    manifest_add_path "$BIN_DIR/tree-sitter"
+    echo "  tree-sitter $TS_VERSION installed to $BIN_DIR/tree-sitter"
+}
+
 install_gh_tools() {
     if [ "${DRY_RUN:-false}" = true ]; then
         for tool in fzf ripgrep fd bat delta zoxide lazygit btop jq starship atuin; do
@@ -1281,6 +1365,7 @@ setup_main() {
     run_step "node"         install_node
     run_step "uv"           install_uv
     install_gh_tools
+    run_step "tree-sitter"  install_tree_sitter
     run_step "nvim"         install_nvim
     run_step "tpm"          install_tpm
     run_step "claude"       install_claude

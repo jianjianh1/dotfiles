@@ -1,5 +1,6 @@
 return {
     "nvim-treesitter/nvim-treesitter",
+    branch = "main",
     build = ":TSUpdate",
     lazy = false,
     config = function()
@@ -9,10 +10,8 @@ return {
             return
         end
 
-        -- Parser management (install_dir, :TSInstall, etc.)
         ts_config.setup()
 
-        -- Install parsers if missing
         local wanted = {
             "bash", "c", "cpp", "json", "lua", "luadoc",
             "markdown", "markdown_inline", "python", "regex",
@@ -30,10 +29,17 @@ return {
             end
         end
         if #missing > 0 then
-            require("nvim-treesitter.install").install(missing, { summary = true })
+            if vim.fn.executable("tree-sitter") ~= 1 then
+                vim.notify(
+                    "nvim-treesitter: 'tree-sitter' CLI not on PATH; parsers not installed. "
+                        .. "Run setup.sh or install tree-sitter manually.",
+                    vim.log.levels.WARN
+                )
+            else
+                require("nvim-treesitter.install").install(missing, { summary = true })
+            end
         end
 
-        -- Built-in treesitter highlight and indent (Neovim 0.10+)
         vim.api.nvim_create_autocmd("FileType", {
             callback = function(args)
                 if pcall(vim.treesitter.start, args.buf) then
