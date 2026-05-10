@@ -58,6 +58,14 @@ SHARE_FIELDS = [
 
 DEFAULT_SORT = ("cluster", "account", "qos")
 
+
+# ════════════════════════════════════════════════════════════════════
+# Shape grammar — classification tables (CPU vendor/microarch, GPU
+# generation/SM compute capability). These data tables and their
+# alias/classification helpers form the vocabulary used by the
+# HardwareFilter and shape parsers below.
+# ════════════════════════════════════════════════════════════════════
+
 # GPU types treated as "premium" for default sort ranking. Substring-matched
 # case-insensitively against row.gpu_types so e.g. "a100" matches both "a100"
 # and "a100_80gb_pcie", and "h100" matches "h100nvl".
@@ -332,6 +340,39 @@ def classify_cpu_vendor(features) -> str:
     if has_amd:
         return "amd"
     return ""
+
+
+# ════════════════════════════════════════════════════════════════════
+# Shape grammar — parser hints, regex, and recognized atoms
+# Consolidated here so adding/changing a shape atom touches one place.
+# ════════════════════════════════════════════════════════════════════
+
+_VENDORS = ("intel", "amd")
+
+_VENDOR_HINT = "vendor=intel|amd"
+_ARCH_HINT = (
+    "short forms (skl, csl, icx, spr, emr, cpx, bro, hsw, ivy, snb, knl, "
+    "zen, nap, rom, mil, gen, zen1..zen5) or long forms "
+    "(skylake, cascadelake, icelake, sapphirerapids, broadwell, haswell, "
+    "naples, rome, milan, genoa, ...)"
+)
+_GEN_HINT = (
+    "one of kepler, maxwell, pascal, volta, turing, ampere, ada (alias "
+    "lovelace), hopper, blackwell"
+)
+_SM_HINT = (
+    "integer compute capability from " + ", ".join(str(n) for n in GPU_SM_TOKENS)
+    + " (e.g. sm80, sm_80, sm=80, sm_min=80)"
+)
+_GPUS_EXPECTED = (
+    "'TYPE:COUNT' (e.g. a100:4), 'COUNT' (any GPU type, e.g. 4), or "
+    "'TYPE' (1 of that type, e.g. a100)"
+)
+_GPUS_HINT = "chpc-allocs --list-gpus for available types"
+_SHAPE_HINT = "chpc-allocs --help (Probe shape group), or examples in --help"
+
+_MEM_RE = re.compile(r"^\d+[kmgtKMGT][bB]?$")
+
 
 # Probe-shape defaults — used by ProbeShape() and parse_shape_spec().
 DEFAULT_PROBE_CPUS = 1
@@ -1180,6 +1221,133 @@ def _format_wall_short(value: str) -> str:
     return f"{minutes}m"
 
 
+# ════════════════════════════════════════════════════════════════════
+# Shape grammar — HardwareFilter
+# ════════════════════════════════════════════════════════════════════
+
+
+class HardwareFilter:
+    """Bundle of CPU/GPU constraint atoms applied to an AllocationRow.
+
+    Stored once on `ProbeShape.filter`. Empty by default — the no-op filter
+    accepts every row. The data fields and the predicate methods that consume
+    them live together so adding a new constraint atom touches one place.
+
+    Plain class (not @dataclass) for Python 3.6 compatibility on CHPC.
+    """
+
+    __slots__ = (
+        "cpu_vendor", "cpu_archs",
+        "gpu_gen", "gpu_sm", "gpu_gen_min", "gpu_sm_min",
+    )
+
+    def __init__(
+        self,
+        cpu_vendor: Optional[str] = None,
+        cpu_archs: Tuple[str, ...] = (),
+        gpu_gen: Optional[str] = None,
+        gpu_sm: Optional[int] = None,
+        gpu_gen_min: Optional[str] = None,
+        gpu_sm_min: Optional[int] = None,
+    ) -> None:
+        self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
+        self.cpu_archs = tuple(a.lower() for a in cpu_archs)
+        self.gpu_gen = gpu_gen.lower() if gpu_gen else None
+        self.gpu_sm = gpu_sm
+        self.gpu_gen_min = gpu_gen_min.lower() if gpu_gen_min else None
+        self.gpu_sm_min = gpu_sm_min
+
+    def __repr__(self) -> str:
+        # Hide fields at their constructor defaults: None for the scalar fields
+        # and () for cpu_archs. Add new sentinels here if a field's default
+        # changes (e.g., a future int field defaulting to 0).
+        fields = ", ".join(
+            f"{name}={getattr(self, name)!r}" for name in self.__slots__
+            if getattr(self, name) not in (None, ())
+        )
+        return f"HardwareFilter({fields})" if fields else "HardwareFilter()"
+
+    def has_cpu_constraint(self) -> bool:
+        return self.cpu_vendor is not None or bool(self.cpu_archs)
+
+    def has_gpu_constraint(self) -> bool:
+        return (
+            self.gpu_gen is not None
+            or self.gpu_sm is not None
+            or self.gpu_gen_min is not None
+            or self.gpu_sm_min is not None
+        )
+
+    def has_any(self) -> bool:
+        return self.has_cpu_constraint() or self.has_gpu_constraint()
+
+    def cpu_constraint_expr(self) -> Optional[str]:
+        """SLURM `--constraint` expression for CPU atoms, or None.
+
+        arch wins over vendor (a specific arch already implies its vendor).
+        Multiple archs AND with `&`; vendor expands to an OR over the
+        vendor's feature table.
+        """
+        if self.cpu_archs:
+            return "&".join(self.cpu_archs) if len(self.cpu_archs) > 1 else self.cpu_archs[0]
+        if self.cpu_vendor:
+            return VENDOR_CONSTRAINT_EXPR.get(self.cpu_vendor)
+        return None
+
+    def cpu_satisfies(self, features) -> bool:
+        """True iff `features` satisfy every set CPU constraint.
+
+        Empty `features` (metadata not loaded) returns True so probes still
+        run on rows whose features sinfo didn't expose — same convention
+        used elsewhere for missing metadata.
+        """
+        if not features:
+            return True
+        if self.cpu_vendor and not _features_match_vendor(features, self.cpu_vendor):
+            return False
+        for arch in self.cpu_archs:
+            if not any(arch in f.lower() for f in features):
+                return False
+        return True
+
+    def gpu_satisfies(self, token: str) -> bool:
+        """True iff `token` satisfies every set GPU constraint."""
+        return _gpu_token_satisfies(
+            token,
+            gen=self.gpu_gen, sm=self.gpu_sm,
+            gen_min=self.gpu_gen_min, sm_min=self.gpu_sm_min,
+        )
+
+    def label_markers(self) -> List[str]:
+        """Ordered marker strings appended to ProbeShape labels.
+
+        Order: arch tokens, then vendor (only when no arch — arch implies
+        vendor), then gen / gen_min (with `+` suffix), then sm / sm_min.
+        """
+        markers: List[str] = []
+        if self.cpu_archs:
+            markers.extend(self.cpu_archs)
+        elif self.cpu_vendor:
+            markers.append(self.cpu_vendor)
+        if self.gpu_gen:
+            markers.append(self.gpu_gen)
+        elif self.gpu_gen_min:
+            markers.append(f"{self.gpu_gen_min}+")
+        if self.gpu_sm is not None:
+            markers.append(f"sm{self.gpu_sm}")
+        elif self.gpu_sm_min is not None:
+            markers.append(f"sm{self.gpu_sm_min}+")
+        return markers
+
+
+EMPTY_FILTER = HardwareFilter()
+
+
+# ════════════════════════════════════════════════════════════════════
+# Shape grammar — ProbeShape
+# ════════════════════════════════════════════════════════════════════
+
+
 class ProbeShape:
     """Shape of the hypothetical job used for `sbatch --test-only` wait probing.
 
@@ -1197,12 +1365,7 @@ class ProbeShape:
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
         time: str = DEFAULT_PROBE_TIME,
-        cpu_vendor: Optional[str] = None,
-        cpu_archs: Tuple[str, ...] = (),
-        gpu_gen: Optional[str] = None,
-        gpu_sm: Optional[int] = None,
-        gpu_gen_min: Optional[str] = None,
-        gpu_sm_min: Optional[int] = None,
+        filter: HardwareFilter = EMPTY_FILTER,
     ) -> None:
         self.nodes = nodes
         self.cpus = cpus
@@ -1210,18 +1373,12 @@ class ProbeShape:
         self.gpu_type = gpu_type.lower() if gpu_type else None
         self.gpu_count = gpu_count
         self.time = time
-        self.cpu_vendor = cpu_vendor.lower() if cpu_vendor else None
-        self.cpu_archs = tuple(a.lower() for a in cpu_archs)
-        self.gpu_gen = gpu_gen.lower() if gpu_gen else None
-        self.gpu_sm = gpu_sm
-        self.gpu_gen_min = gpu_gen_min.lower() if gpu_gen_min else None
-        self.gpu_sm_min = gpu_sm_min
+        self.filter = filter
         self.label = self._compute_label()
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
         wall = time_label if time_label is not None else _format_wall_short(self.time)
-        gen_sm_set = self._has_gen_or_sm()
-        if self.gpu_type or self.gpu_count is not None or gen_sm_set:
+        if self.gpu_type or self.gpu_count is not None or self.filter.has_gpu_constraint():
             gtype = self.gpu_type or "gpu"
             count = self.gpu_count if self.gpu_count is not None else 1
             core = f"{gtype}:{count}@{wall}"
@@ -1230,32 +1387,11 @@ class ProbeShape:
         parts = [core]
         if self.mem:
             parts.append(self.mem)
-        # arch is more specific than vendor; show only one to keep labels tight.
-        if self.cpu_archs:
-            parts.extend(self.cpu_archs)
-        elif self.cpu_vendor:
-            parts.append(self.cpu_vendor)
-        # GPU generation/SM markers: exact wins over min when both set.
-        if self.gpu_gen:
-            parts.append(self.gpu_gen)
-        elif self.gpu_gen_min:
-            parts.append(f"{self.gpu_gen_min}+")
-        if self.gpu_sm is not None:
-            parts.append(f"sm{self.gpu_sm}")
-        elif self.gpu_sm_min is not None:
-            parts.append(f"sm{self.gpu_sm_min}+")
+        parts.extend(self.filter.label_markers())
         label = ",".join(parts)
         if self.nodes > 1:
             label = f"{self.nodes}n*{label}"
         return label
-
-    def _has_gen_or_sm(self) -> bool:
-        return (
-            self.gpu_gen is not None
-            or self.gpu_sm is not None
-            or self.gpu_gen_min is not None
-            or self.gpu_sm_min is not None
-        )
 
     def _candidate_tokens(self, row: "AllocationRow") -> Tuple[str, ...]:
         """Row gpu_types tokens that satisfy gpu_type AND gen/SM constraints.
@@ -1270,15 +1406,8 @@ class ProbeShape:
         cands = tuple(row.gpu_types)
         if self.gpu_type:
             cands = tuple(t for t in cands if self.gpu_type in t.lower())
-        if self._has_gen_or_sm():
-            cands = tuple(
-                t for t in cands
-                if _gpu_token_satisfies(
-                    t,
-                    gen=self.gpu_gen, sm=self.gpu_sm,
-                    gen_min=self.gpu_gen_min, sm_min=self.gpu_sm_min,
-                )
-            )
+        if self.filter.has_gpu_constraint():
+            cands = tuple(t for t in cands if self.filter.gpu_satisfies(t))
         return cands
 
     def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
@@ -1292,11 +1421,11 @@ class ProbeShape:
         When `row.gpu_types` is empty (metadata not loaded) and only gpu_type
         is set, fall back to the literal — preserves legacy probe behavior.
         """
-        gen_sm = self._has_gen_or_sm()
+        gen_sm = self.filter.has_gpu_constraint()
         if not (self.gpu_type or gen_sm):
             return None
         if not row.gpu_types:
-            return self.gpu_type  # gen_sm w/o metadata: caller will use bare gpu:N
+            return self.gpu_type
         cands = self._candidate_tokens(row)
         if cands:
             return min(cands, key=lambda s: (len(s), s))
@@ -1316,19 +1445,6 @@ class ProbeShape:
             return f"gpu:{gtype}:{count}"
         return f"gpu:{count}"
 
-    def constraint_expr(self) -> Optional[str]:
-        """Return the SLURM `--constraint` expression, or None if unconstrained.
-
-        arch wins over vendor (a specific arch already implies its vendor).
-        Multiple archs are AND'd with `&`; vendor expands to an OR over the
-        vendor's feature table.
-        """
-        if self.cpu_archs:
-            return "&".join(self.cpu_archs) if len(self.cpu_archs) > 1 else self.cpu_archs[0]
-        if self.cpu_vendor:
-            return VENDOR_CONSTRAINT_EXPR.get(self.cpu_vendor)
-        return None
-
     def to_sbatch_args(self, row: "AllocationRow") -> List[str]:
         args = ["-N", str(self.nodes), "-n", str(self.cpus), "-t", _to_sbatch_wall(self.time)]
         if self.mem:
@@ -1336,49 +1452,39 @@ class ProbeShape:
         gres = self.gres_for(row)
         if gres:
             args.append(f"--gres={gres}")
-        constraint = self.constraint_expr()
+        constraint = self.filter.cpu_constraint_expr()
         if constraint:
             args.append(f"--constraint={constraint}")
         return args
 
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
-        gen_sm_requested = self._has_gen_or_sm()
+        gpu_constraint = self.filter.has_gpu_constraint()
         gpu_requested = (
             self.gpu_type is not None
             or self.gpu_count is not None
-            or gen_sm_requested
+            or gpu_constraint
         )
         if gpu_requested and "gpu" not in row.tags:
             return True
         # Empty row.gpu_types means metadata wasn't loaded — don't skip.
-        if row.gpu_types and (self.gpu_type or gen_sm_requested):
+        if row.gpu_types and (self.gpu_type or gpu_constraint):
             if not self._candidate_tokens(row):
                 return True
-        # Empty row.cpu_features means metadata wasn't loaded — don't skip,
-        # consistent with the GPU branch above.
-        if self.cpu_vendor and row.cpu_features:
-            if not _features_match_vendor(row.cpu_features, self.cpu_vendor):
-                return True
-        if self.cpu_archs and row.cpu_features:
-            for arch in self.cpu_archs:
-                if not any(arch in f.lower() for f in row.cpu_features):
-                    return True
+        if not self.filter.cpu_satisfies(row.cpu_features):
+            return True
         return False
+
+
+# ════════════════════════════════════════════════════════════════════
+# Shape grammar — parsers
+# ════════════════════════════════════════════════════════════════════
 
 
 def _parse_positive_int(text: str, error: str) -> int:
     if not text or not text.isdigit() or int(text) <= 0:
         raise CommandError(error)
     return int(text)
-
-
-_GPUS_EXPECTED = (
-    "'TYPE:COUNT' (e.g. a100:4), 'COUNT' (any GPU type, e.g. 4), or "
-    "'TYPE' (1 of that type, e.g. a100)"
-)
-_GPUS_HINT = "chpc-allocs --list-gpus for available types"
-_SHAPE_HINT = "chpc-allocs --help (Probe shape group), or examples in --help"
 
 
 def _spec_error(
@@ -1432,9 +1538,6 @@ def parse_gpu_spec(spec: str) -> Tuple[Optional[str], int]:
     return (s, 1)
 
 
-_MEM_RE = re.compile(r"^\d+[kmgtKMGT][bB]?$")
-
-
 def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     """Validate a `prefix:N` shorthand (e.g. 'cpu:32', 'gpu:4') and return N."""
     count_text = tok[len(prefix):].strip()
@@ -1447,21 +1550,152 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     return int(count_text)
 
 
-_VENDORS = ("intel", "amd")
-_VENDOR_HINT = "vendor=intel|amd"
-_ARCH_HINT = (
-    "short forms (skl, csl, icx, spr, emr, cpx, bro, hsw, ivy, snb, knl, "
-    "zen, nap, rom, mil, gen, zen1..zen5) or long forms "
-    "(skylake, cascadelake, icelake, sapphirerapids, broadwell, haswell, "
-    "naples, rome, milan, genoa, ...)"
-)
-_GEN_HINT = (
-    "one of kepler, maxwell, pascal, volta, turing, ampere, ada (alias "
-    "lovelace), hopper, blackwell"
-)
-_SM_HINT = (
-    "integer compute capability from " + ", ".join(str(n) for n in GPU_SM_TOKENS)
-    + " (e.g. sm80, sm_80, sm=80, sm_min=80)"
+# `gen=`/`gen_min=`/`sm=`/`sm_min=` share a common parse-and-store shape;
+# this table parametrizes the four otherwise-near-duplicate handlers.
+_GEN_SM_KV_KEYS = {
+    "gen":     ("gpu_gen",     _canon_gpu_gen, _GEN_HINT, "generation"),
+    "gen_min": ("gpu_gen_min", _canon_gpu_gen, _GEN_HINT, "generation"),
+    "sm":      ("gpu_sm",      _parse_sm_int,  _SM_HINT,  "SM"),
+    "sm_min":  ("gpu_sm_min",  _parse_sm_int,  _SM_HINT,  "SM"),
+}
+
+_AT_HINT = "<shape>@<duration>, e.g. 'a100:1@30m', 'cpu:32@12h'"
+
+
+def _parse_at_suffix(low: str, tok: str, spec: str) -> Tuple[str, Optional[str]]:
+    """Strip a trailing `@<DUR>` from a positional token; return (head, dur_or_None)."""
+    if "@" not in low:
+        return low, None
+    head, _, dur = low.partition("@")
+    head = head.strip()
+    dur = dur.strip()
+    if not head:
+        raise _shape_error(spec, f"empty shape before '@' in {tok!r}", _AT_HINT)
+    if not dur:
+        raise _shape_error(spec, f"empty duration after '@' in {tok!r}", _AT_HINT)
+    if parse_wall_seconds(dur) is None:
+        raise _shape_error(
+            spec,
+            f"duration {dur!r} after '@' is not a recognized walltime",
+            "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 30m)",
+        )
+    return head, dur
+
+
+def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
+    """Validate & store one comma-separated `key=value` token into state."""
+    if not val:
+        raise _shape_error(
+            spec,
+            f"empty value for {key!r}",
+            f"{key}=VALUE (e.g. {key}=8 for an integer, {key}=24h for a duration)",
+        )
+    if key == "cores":
+        if not val.isdigit() or int(val) <= 0:
+            raise _shape_error(
+                spec,
+                f"cores value {val!r} is not a positive integer",
+                "cores=N where N > 0 (e.g. cores=8, cores=32)",
+            )
+        state["cpus"] = int(val)
+    elif key == "mem":
+        if not _MEM_RE.match(val):
+            raise _shape_error(
+                spec, f"mem value {val!r} has no unit",
+                "integer + unit, e.g. 16G, 32G, 128M",
+            )
+        state["mem"] = val
+    elif key == "nodes":
+        if not val.isdigit() or int(val) <= 0:
+            raise _shape_error(
+                spec, f"nodes value {val!r} is not a positive integer",
+                "nodes=N where N > 0 (e.g. nodes=2)",
+            )
+        state["nodes"] = int(val)
+    elif key == "time":
+        if parse_wall_seconds(val) is None:
+            raise _shape_error(
+                spec, f"time value {val!r} is not a recognized duration",
+                "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 4:00:00)",
+            )
+        state["time"] = val
+    elif key == "gpus":
+        state["gpu_type"], state["gpu_count"] = parse_gpu_spec(val)
+    elif key == "vendor":
+        v = val.lower()
+        if v not in _VENDORS:
+            raise _shape_error(
+                spec, f"vendor value {val!r} is not recognized", _VENDOR_HINT,
+            )
+        state["cpu_vendor"] = v
+    elif key == "arch":
+        canon = _canon_cpu_arch(val)
+        if canon is None:
+            raise _shape_error(
+                spec, f"arch value {val!r} is not recognized", _ARCH_HINT,
+            )
+        if canon not in state["cpu_archs"]:
+            state["cpu_archs"].append(canon)
+    elif key in _GEN_SM_KV_KEYS:
+        state_key, parser, hint, label = _GEN_SM_KV_KEYS[key]
+        parsed = parser(val)
+        if parsed is None:
+            raise _shape_error(
+                spec, f"{key} value {val!r} is not a recognized {label}", hint,
+            )
+        state[state_key] = parsed
+    else:
+        raise _shape_error(
+            spec,
+            f"unknown key {key!r}",
+            "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
+            "gen=, sm=, gen_min=, sm_min=",
+        )
+
+
+def _apply_positional_token(low: str, state: dict, spec: str) -> None:
+    """Apply one positional shape token (cpu:/gpu:/digits/vendor/arch/gen/sm/type)."""
+    if low.startswith("cpu:"):
+        state["cpus"] = _parse_prefix_count(low, "cpu:", spec, "cpu:N where N > 0 (e.g. cpu:32)")
+        return
+    if low.startswith("gpu:"):
+        state["gpu_type"] = None
+        state["gpu_count"] = _parse_prefix_count(
+            low, "gpu:", spec,
+            "gpu:N where N > 0 (e.g. gpu:4); use <type>:N to pin a GPU type",
+        )
+        return
+    if low.isdigit():
+        if int(low) <= 0:
+            raise _shape_error(
+                spec, f"bare integer {low!r} must be > 0", "N > 0 (treated as cores=N)",
+            )
+        state["cpus"] = int(low)
+        return
+    if low in _VENDORS:
+        state["cpu_vendor"] = low
+        return
+    canon = _canon_cpu_arch(low)
+    if canon is not None:
+        if canon not in state["cpu_archs"]:
+            state["cpu_archs"].append(canon)
+        return
+    gen_canon = _canon_gpu_gen(low)
+    if gen_canon is not None:
+        state["gpu_gen"] = gen_canon
+        return
+    sm_val = _parse_sm_token(low)
+    if sm_val is not None:
+        state["gpu_sm"] = sm_val
+        return
+    state["gpu_type"], state["gpu_count"] = parse_gpu_spec(low)
+
+
+# Keys partitioned for ProbeShape / HardwareFilter at construction time.
+_PROBESHAPE_STATE_KEYS = ("nodes", "cpus", "mem", "gpu_type", "gpu_count", "time")
+_FILTER_STATE_KEYS = (
+    "cpu_vendor", "cpu_archs",
+    "gpu_gen", "gpu_sm", "gpu_gen_min", "gpu_sm_min",
 )
 
 
@@ -1500,176 +1734,44 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     s = (spec or "").strip()
     if not s:
         raise _shape_error(
-            spec,
-            "empty SPEC",
+            spec, "empty SPEC",
             "comma-separated tokens, e.g. 'a100:4,mem=32G,time=24h' or 'cpu:32,time=12h'",
         )
-    cpus = DEFAULT_PROBE_CPUS
-    mem: Optional[str] = None
-    nodes = DEFAULT_PROBE_NODES
-    time = DEFAULT_PROBE_TIME
-    gpu_type: Optional[str] = None
-    gpu_count: Optional[int] = None
-    cpu_vendor: Optional[str] = None
-    cpu_archs: List[str] = []
-    gen_sm_state: Dict[str, object] = {
-        "gpu_gen": None, "gpu_sm": None,
-        "gpu_gen_min": None, "gpu_sm_min": None,
+    # Keys must be the union of _PROBESHAPE_STATE_KEYS and _FILTER_STATE_KEYS;
+    # `_apply_kv_token` and `_apply_positional_token` write here, then the
+    # construction below partitions the dict for ProbeShape vs HardwareFilter.
+    state: Dict[str, object] = {
+        "nodes": DEFAULT_PROBE_NODES,
+        "cpus": DEFAULT_PROBE_CPUS,
+        "mem": None,
+        "time": DEFAULT_PROBE_TIME,
+        "gpu_type": None,
+        "gpu_count": None,
+        "cpu_vendor": None,
+        "cpu_archs": [],
+        "gpu_gen": None,
+        "gpu_sm": None,
+        "gpu_gen_min": None,
+        "gpu_sm_min": None,
     }
-    # (state-key, parser, hint) for each `gen=` / `gen_min=` / `sm=` / `sm_min=`.
-    gen_sm_keys = {
-        "gen":     ("gpu_gen",     _canon_gpu_gen, _GEN_HINT, "generation"),
-        "gen_min": ("gpu_gen_min", _canon_gpu_gen, _GEN_HINT, "generation"),
-        "sm":      ("gpu_sm",      _parse_sm_int,  _SM_HINT,  "SM"),
-        "sm_min":  ("gpu_sm_min",  _parse_sm_int,  _SM_HINT,  "SM"),
-    }
-
     for raw in s.split(","):
         tok = raw.strip()
         if not tok:
             continue
         if "=" in tok:
             key, _, val = tok.partition("=")
-            key = key.strip().lower()
-            val = val.strip()
-            if not val:
-                raise _shape_error(
-                    spec,
-                    f"empty value for {key!r}",
-                    f"{key}=VALUE (e.g. {key}=8 for an integer, {key}=24h for a duration)",
-                )
-            if key == "cores":
-                if not val.isdigit() or int(val) <= 0:
-                    raise _shape_error(
-                        spec,
-                        f"cores value {val!r} is not a positive integer",
-                        "cores=N where N > 0 (e.g. cores=8, cores=32)",
-                    )
-                cpus = int(val)
-            elif key == "mem":
-                if not _MEM_RE.match(val):
-                    raise _shape_error(
-                        spec,
-                        f"mem value {val!r} has no unit",
-                        "integer + unit, e.g. 16G, 32G, 128M",
-                    )
-                mem = val
-            elif key == "nodes":
-                if not val.isdigit() or int(val) <= 0:
-                    raise _shape_error(
-                        spec,
-                        f"nodes value {val!r} is not a positive integer",
-                        "nodes=N where N > 0 (e.g. nodes=2)",
-                    )
-                nodes = int(val)
-            elif key == "time":
-                if parse_wall_seconds(val) is None:
-                    raise _shape_error(
-                        spec,
-                        f"time value {val!r} is not a recognized duration",
-                        "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 4:00:00)",
-                    )
-                time = val
-            elif key == "gpus":
-                gpu_type, gpu_count = parse_gpu_spec(val)
-            elif key == "vendor":
-                v = val.lower()
-                if v not in _VENDORS:
-                    raise _shape_error(
-                        spec,
-                        f"vendor value {val!r} is not recognized",
-                        _VENDOR_HINT,
-                    )
-                cpu_vendor = v
-            elif key == "arch":
-                canon = _canon_cpu_arch(val)
-                if canon is None:
-                    raise _shape_error(
-                        spec,
-                        f"arch value {val!r} is not recognized",
-                        _ARCH_HINT,
-                    )
-                if canon not in cpu_archs:
-                    cpu_archs.append(canon)
-            elif key in gen_sm_keys:
-                state_key, parser, hint, label = gen_sm_keys[key]
-                parsed = parser(val)
-                if parsed is None:
-                    raise _shape_error(
-                        spec, f"{key} value {val!r} is not a recognized {label}", hint,
-                    )
-                gen_sm_state[state_key] = parsed
-            else:
-                raise _shape_error(
-                    spec,
-                    f"unknown key {key!r}",
-                    "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
-                    "gen=, sm=, gen_min=, sm_min=",
-                )
-        else:
-            low = tok.lower()
-            if "@" in low:
-                head, _, dur = low.partition("@")
-                head = head.strip()
-                dur = dur.strip()
-                _AT_HINT = "<shape>@<duration>, e.g. 'a100:1@30m', 'cpu:32@12h'"
-                if not head:
-                    raise _shape_error(spec, f"empty shape before '@' in {tok!r}", _AT_HINT)
-                if not dur:
-                    raise _shape_error(spec, f"empty duration after '@' in {tok!r}", _AT_HINT)
-                if parse_wall_seconds(dur) is None:
-                    raise _shape_error(
-                        spec,
-                        f"duration {dur!r} after '@' is not a recognized walltime",
-                        "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 30m)",
-                    )
-                time = dur
-                low = head
-            if low.startswith("cpu:"):
-                cpus = _parse_prefix_count(low, "cpu:", spec, "cpu:N where N > 0 (e.g. cpu:32)")
-            elif low.startswith("gpu:"):
-                gpu_type = None
-                gpu_count = _parse_prefix_count(
-                    low, "gpu:", spec,
-                    "gpu:N where N > 0 (e.g. gpu:4); use <type>:N to pin a GPU type",
-                )
-            elif low.isdigit():
-                if int(low) <= 0:
-                    raise _shape_error(
-                        spec,
-                        f"bare integer {low!r} must be > 0",
-                        "N > 0 (treated as cores=N)",
-                    )
-                cpus = int(low)
-            elif low in _VENDORS:
-                cpu_vendor = low
-            else:
-                canon = _canon_cpu_arch(low)
-                if canon is not None:
-                    if canon not in cpu_archs:
-                        cpu_archs.append(canon)
-                else:
-                    gen_canon = _canon_gpu_gen(low)
-                    if gen_canon is not None:
-                        gen_sm_state["gpu_gen"] = gen_canon
-                    else:
-                        sm_val = _parse_sm_token(low)
-                        if sm_val is not None:
-                            gen_sm_state["gpu_sm"] = sm_val
-                        else:
-                            gpu_type, gpu_count = parse_gpu_spec(low)
+            _apply_kv_token(key.strip().lower(), val.strip(), state, spec)
+            continue
+        low = tok.lower()
+        head, dur = _parse_at_suffix(low, tok, spec)
+        if dur is not None:
+            state["time"] = dur
+        _apply_positional_token(head, state, spec)
 
-    return ProbeShape(
-        nodes=nodes,
-        cpus=cpus,
-        mem=mem,
-        gpu_type=gpu_type,
-        gpu_count=gpu_count,
-        time=time,
-        cpu_vendor=cpu_vendor,
-        cpu_archs=tuple(cpu_archs),
-        **gen_sm_state,
-    )
+    shape_args = {k: state[k] for k in _PROBESHAPE_STATE_KEYS}
+    filter_args = {k: state[k] for k in _FILTER_STATE_KEYS}
+    filter_args["cpu_archs"] = tuple(filter_args["cpu_archs"])
+    return ProbeShape(filter=HardwareFilter(**filter_args), **shape_args)
 
 
 def parse_shape_list(spec: str) -> List[ProbeShape]:
@@ -3500,21 +3602,21 @@ def run_self_test() -> int:
 
     # parse_shape_spec: vendor and arch atoms (positional bare tokens).
     sh = parse_shape_spec("intel")
-    assert sh.cpu_vendor == "intel" and sh.cpu_archs == () and sh.gpu_type is None
+    assert sh.filter.cpu_vendor == "intel" and sh.filter.cpu_archs == () and sh.gpu_type is None
     sh = parse_shape_spec("amd")
-    assert sh.cpu_vendor == "amd"
+    assert sh.filter.cpu_vendor == "amd"
     sh = parse_shape_spec("genoa")
-    assert sh.cpu_archs == ("gen",) and sh.cpu_vendor is None
+    assert sh.filter.cpu_archs == ("gen",) and sh.filter.cpu_vendor is None
     sh = parse_shape_spec("zen4")
-    assert sh.cpu_archs == ("zen4",)
+    assert sh.filter.cpu_archs == ("zen4",)
     # Combined positional: a100:4 with vendor filter.
     sh = parse_shape_spec("a100:4,intel")
-    assert sh.gpu_type == "a100" and sh.gpu_count == 4 and sh.cpu_vendor == "intel"
+    assert sh.gpu_type == "a100" and sh.gpu_count == 4 and sh.filter.cpu_vendor == "intel"
     # key=value forms.
     sh = parse_shape_spec("a100:4,vendor=amd")
-    assert sh.cpu_vendor == "amd"
+    assert sh.filter.cpu_vendor == "amd"
     sh = parse_shape_spec("cpu:32,arch=rome")
-    assert sh.cpus == 32 and sh.cpu_archs == ("rom",)
+    assert sh.cpus == 32 and sh.filter.cpu_archs == ("rom",)
     # Label includes arch (preferred) or vendor.
     assert ",gen" in parse_shape_spec("cpu:32,arch=genoa").label
     assert ",intel" in parse_shape_spec("a100:4,vendor=intel").label
@@ -3533,28 +3635,44 @@ def run_self_test() -> int:
     # parse_shape_list: AND-combine GPU shape with vendor atom.
     shapes_va = parse_shape_list("a100:4*intel")
     assert len(shapes_va) == 1
-    assert shapes_va[0].gpu_type == "a100" and shapes_va[0].cpu_vendor == "intel"
+    assert shapes_va[0].gpu_type == "a100" and shapes_va[0].filter.cpu_vendor == "intel"
     # OR across vendors.
     shapes_or = parse_shape_list("intel+amd")
-    assert [s.cpu_vendor for s in shapes_or] == ["intel", "amd"]
+    assert [s.filter.cpu_vendor for s in shapes_or] == ["intel", "amd"]
 
-    # ProbeShape.constraint_expr: arch wins, vendor expands to OR over table.
-    assert ProbeShape().constraint_expr() is None
-    assert ProbeShape(cpu_archs=("gen",)).constraint_expr() == "gen"
-    assert ProbeShape(cpu_archs=("rom", "mil")).constraint_expr() == "rom&mil"
-    intel_expr = ProbeShape(cpu_vendor="intel").constraint_expr()
+    # HardwareFilter.cpu_constraint_expr: arch wins, vendor expands to OR over table.
+    assert HardwareFilter().cpu_constraint_expr() is None
+    assert HardwareFilter(cpu_archs=("gen",)).cpu_constraint_expr() == "gen"
+    assert HardwareFilter(cpu_archs=("rom", "mil")).cpu_constraint_expr() == "rom&mil"
+    intel_expr = HardwareFilter(cpu_vendor="intel").cpu_constraint_expr()
     assert intel_expr and "skl" in intel_expr and "csl" in intel_expr and "|" in intel_expr
-    amd_expr = ProbeShape(cpu_vendor="amd").constraint_expr()
+    amd_expr = HardwareFilter(cpu_vendor="amd").cpu_constraint_expr()
     assert amd_expr and "zen" in amd_expr and "gen" in amd_expr
     # arch takes precedence over vendor when both set.
-    assert ProbeShape(cpu_vendor="intel", cpu_archs=("gen",)).constraint_expr() == "gen"
+    assert HardwareFilter(cpu_vendor="intel", cpu_archs=("gen",)).cpu_constraint_expr() == "gen"
+
+    # HardwareFilter helpers: has_*, label_markers, satisfies.
+    assert HardwareFilter().has_any() is False
+    assert HardwareFilter(cpu_vendor="intel").has_cpu_constraint() is True
+    assert HardwareFilter(cpu_vendor="intel").has_gpu_constraint() is False
+    assert HardwareFilter(gpu_gen="ampere").has_gpu_constraint() is True
+    assert HardwareFilter(gpu_sm_min=80).has_gpu_constraint() is True
+    assert HardwareFilter(cpu_vendor="intel").label_markers() == ["intel"]
+    assert HardwareFilter(cpu_archs=("gen",)).label_markers() == ["gen"]
+    assert HardwareFilter(gpu_gen="ampere", gpu_sm_min=80).label_markers() == ["ampere", "sm80+"]
+    assert HardwareFilter(gpu_gen_min="ampere").label_markers() == ["ampere+"]
+    # cpu_satisfies: True for empty features (metadata not loaded), else predicate.
+    assert HardwareFilter().cpu_satisfies(()) is True
+    assert HardwareFilter(cpu_vendor="intel").cpu_satisfies(()) is True
+    assert HardwareFilter(cpu_vendor="intel").cpu_satisfies(("zen4",)) is False
+    assert HardwareFilter(cpu_vendor="intel").cpu_satisfies(("skl",)) is True
 
     # to_sbatch_args: --constraint emitted only when vendor/arch set.
-    args_intel = ProbeShape(cpu_vendor="intel").to_sbatch_args(cpu_row)
+    args_intel = ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).to_sbatch_args(cpu_row)
     assert any(a.startswith("--constraint=") for a in args_intel)
     args_plain = ProbeShape().to_sbatch_args(cpu_row)
     assert not any(a.startswith("--constraint=") for a in args_plain)
-    args_arch = ProbeShape(cpu_archs=("gen",)).to_sbatch_args(cpu_row)
+    args_arch = ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).to_sbatch_args(cpu_row)
     assert "--constraint=gen" in args_arch
 
     # should_skip: vendor/arch row predicates.
@@ -3567,16 +3685,16 @@ def run_self_test() -> int:
     no_feat_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     no_feat_row.tags = ("cpu",)
     # vendor mismatch skips; match doesn't.
-    assert ProbeShape(cpu_vendor="intel").should_skip(amd_row) is True
-    assert ProbeShape(cpu_vendor="intel").should_skip(intel_row) is False
-    assert ProbeShape(cpu_vendor="amd").should_skip(amd_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(amd_row) is True
+    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(intel_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_vendor="amd")).should_skip(amd_row) is False
     # arch mismatch skips; substring match (zen4 contains zen) works.
-    assert ProbeShape(cpu_archs=("gen",)).should_skip(amd_row) is True
-    assert ProbeShape(cpu_archs=("zen",)).should_skip(amd_row) is False
-    assert ProbeShape(cpu_archs=("zen4",)).should_skip(amd_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(amd_row) is True
+    assert ProbeShape(filter=HardwareFilter(cpu_archs=("zen",))).should_skip(amd_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_archs=("zen4",))).should_skip(amd_row) is False
     # Empty cpu_features: don't skip (metadata not loaded).
-    assert ProbeShape(cpu_vendor="intel").should_skip(no_feat_row) is False
-    assert ProbeShape(cpu_archs=("gen",)).should_skip(no_feat_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(no_feat_row) is False
+    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(no_feat_row) is False
 
     # _canon_gpu_gen: aliases collapse, unknown -> None.
     assert _canon_gpu_gen("ampere") == "ampere"
@@ -3629,28 +3747,28 @@ def run_self_test() -> int:
 
     # parse_shape_spec: gen/SM atoms (positional).
     sh = parse_shape_spec("ampere")
-    assert sh.gpu_gen == "ampere" and sh.gpu_sm is None
+    assert sh.filter.gpu_gen == "ampere" and sh.filter.gpu_sm is None
     sh = parse_shape_spec("hopper")
-    assert sh.gpu_gen == "hopper"
+    assert sh.filter.gpu_gen == "hopper"
     sh = parse_shape_spec("lovelace")
-    assert sh.gpu_gen == "ada"
+    assert sh.filter.gpu_gen == "ada"
     sh = parse_shape_spec("sm80")
-    assert sh.gpu_sm == 80 and sh.gpu_gen is None
+    assert sh.filter.gpu_sm == 80 and sh.filter.gpu_gen is None
     sh = parse_shape_spec("sm_89")
-    assert sh.gpu_sm == 89
+    assert sh.filter.gpu_sm == 89
     # parse_shape_spec: gen/SM atoms (key=value).
     sh = parse_shape_spec("gpu:4,gen=hopper")
-    assert sh.gpu_count == 4 and sh.gpu_gen == "hopper"
+    assert sh.gpu_count == 4 and sh.filter.gpu_gen == "hopper"
     sh = parse_shape_spec("gpu:1,sm_min=80")
-    assert sh.gpu_sm_min == 80 and sh.gpu_count == 1
+    assert sh.filter.gpu_sm_min == 80 and sh.gpu_count == 1
     sh = parse_shape_spec("gpu:1,gen_min=ampere")
-    assert sh.gpu_gen_min == "ampere"
+    assert sh.filter.gpu_gen_min == "ampere"
     sh = parse_shape_spec("gpu:4,sm=89")
-    assert sh.gpu_sm == 89
+    assert sh.filter.gpu_sm == 89
     # AND-combine: explicit GPU type plus generation.
     shapes_ag = parse_shape_list("a100:4*ampere")
     assert len(shapes_ag) == 1
-    assert shapes_ag[0].gpu_type == "a100" and shapes_ag[0].gpu_gen == "ampere"
+    assert shapes_ag[0].gpu_type == "a100" and shapes_ag[0].filter.gpu_gen == "ampere"
     # Bad gen/SM values raise.
     for bad in ("gen=potato", "sm=99", "sm_min=99", "gen_min=foo", "gen=", "sm="):
         try:
@@ -3670,7 +3788,8 @@ def run_self_test() -> int:
     assert parse_shape_spec("sm80").label.startswith("gpu:1@")
 
     # to_sbatch_args: gen/SM does NOT emit --constraint.
-    args_amp = ProbeShape(gpu_gen="ampere").to_sbatch_args(gpu_row)
+    amp_filter = HardwareFilter(gpu_gen="ampere")
+    args_amp = ProbeShape(filter=amp_filter).to_sbatch_args(gpu_row)
     assert not any(a.startswith("--constraint=") for a in args_amp)
 
     # should_skip: gen/SM row predicates.
@@ -3686,42 +3805,48 @@ def run_self_test() -> int:
     no_gpu_meta = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     no_gpu_meta.tags = ("gpu",)
     # Exact gen / sm: skip on mismatch, don't skip on match.
-    assert ProbeShape(gpu_gen="hopper").should_skip(a100_row) is True
-    assert ProbeShape(gpu_gen="ampere").should_skip(a100_row) is False
-    assert ProbeShape(gpu_sm=80).should_skip(a100_row) is False
-    assert ProbeShape(gpu_sm=89).should_skip(a100_row) is True
+    assert ProbeShape(filter=HardwareFilter(gpu_gen="hopper")).should_skip(a100_row) is True
+    assert ProbeShape(filter=amp_filter).should_skip(a100_row) is False
+    assert ProbeShape(filter=HardwareFilter(gpu_sm=80)).should_skip(a100_row) is False
+    assert ProbeShape(filter=HardwareFilter(gpu_sm=89)).should_skip(a100_row) is True
     # gen_min / sm_min: ge semantics.
-    assert ProbeShape(gpu_gen_min="ampere").should_skip(v100_row) is True
-    assert ProbeShape(gpu_gen_min="ampere").should_skip(a100_row) is False
-    assert ProbeShape(gpu_gen_min="ampere").should_skip(h100_only) is False
-    assert ProbeShape(gpu_sm_min=80).should_skip(v100_row) is True
-    assert ProbeShape(gpu_sm_min=80).should_skip(a100_row) is False
+    amp_min = HardwareFilter(gpu_gen_min="ampere")
+    sm80_min = HardwareFilter(gpu_sm_min=80)
+    assert ProbeShape(filter=amp_min).should_skip(v100_row) is True
+    assert ProbeShape(filter=amp_min).should_skip(a100_row) is False
+    assert ProbeShape(filter=amp_min).should_skip(h100_only) is False
+    assert ProbeShape(filter=sm80_min).should_skip(v100_row) is True
+    assert ProbeShape(filter=sm80_min).should_skip(a100_row) is False
     # Empty gpu_types: don't skip (metadata not loaded).
-    assert ProbeShape(gpu_gen="hopper").should_skip(no_gpu_meta) is False
-    assert ProbeShape(gpu_sm_min=80).should_skip(no_gpu_meta) is False
+    assert ProbeShape(filter=HardwareFilter(gpu_gen="hopper")).should_skip(no_gpu_meta) is False
+    assert ProbeShape(filter=sm80_min).should_skip(no_gpu_meta) is False
     # gen/SM on a CPU row: skip (GPU implied).
-    assert ProbeShape(gpu_gen="ampere").should_skip(cpu_row) is True
+    assert ProbeShape(filter=amp_filter).should_skip(cpu_row) is True
     # Combined gpu_type + gen: row must satisfy both on the SAME token.
-    assert ProbeShape(gpu_type="a100", gpu_gen="hopper").should_skip(a100_row) is True
-    assert ProbeShape(gpu_type="a100", gpu_gen="ampere").should_skip(a100_row) is False
+    a100_hopper = ProbeShape(gpu_type="a100", filter=HardwareFilter(gpu_gen="hopper"))
+    a100_ampere = ProbeShape(gpu_type="a100", filter=amp_filter)
+    h100_hopper = ProbeShape(gpu_type="h100", filter=HardwareFilter(gpu_gen="hopper"))
+    assert a100_hopper.should_skip(a100_row) is True
+    assert a100_ampere.should_skip(a100_row) is False
     # Heterogeneous row with both a100 (Ampere) and h100 (Hopper):
     # `a100*hopper` must yield zero candidates because no single token
     # satisfies both predicates.
     mixed_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     mixed_row.tags = ("gpu",)
     mixed_row.gpu_types = ("a100", "h100nvl")
-    assert ProbeShape(gpu_type="a100", gpu_gen="hopper").should_skip(mixed_row) is True
-    assert ProbeShape(gpu_type="h100", gpu_gen="hopper").should_skip(mixed_row) is False
-    assert ProbeShape(gpu_type="a100", gpu_gen="ampere").should_skip(mixed_row) is False
+    assert a100_hopper.should_skip(mixed_row) is True
+    assert h100_hopper.should_skip(mixed_row) is False
+    assert a100_ampere.should_skip(mixed_row) is False
 
     # resolved_gpu_type with gen/SM: pick shortest satisfying token.
     h200_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     h200_row.tags = ("gpu",)
     h200_row.gpu_types = ("h200_1g.18gb", "h200_2g.35gb", "h200")
-    assert ProbeShape(gpu_gen="hopper").resolved_gpu_type(h200_row) == "h200"
+    hopper_shape = ProbeShape(filter=HardwareFilter(gpu_gen="hopper"))
+    assert hopper_shape.resolved_gpu_type(h200_row) == "h200"
     # gres_for uses the resolved token.
-    assert ProbeShape(gpu_gen="hopper").gres_for(h200_row) == "gpu:h200:1"
-    assert ProbeShape(gpu_gen="hopper", gpu_count=4).gres_for(h200_row) == "gpu:h200:4"
+    assert hopper_shape.gres_for(h200_row) == "gpu:h200:1"
+    assert ProbeShape(gpu_count=4, filter=HardwareFilter(gpu_gen="hopper")).gres_for(h200_row) == "gpu:h200:4"
 
     prem_rows = [
         AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
