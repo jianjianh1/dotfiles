@@ -20,7 +20,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import StringIO
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 
 ASSOC_FIELDS = [
@@ -402,6 +402,11 @@ DEFAULT_PROBE_CPUS = 1
 DEFAULT_PROBE_NODES = 1
 DEFAULT_PROBE_TIME = "01:00:00"
 
+# Wait-vs-free explanation tokens for the `note` column.
+NOTE_QUEUE = "queue"
+NOTE_FRAGMENTED = "fragmented"
+NOTE_TOO_SMALL = "too-small"
+
 
 class QOSInfo:
     def __init__(
@@ -482,6 +487,9 @@ class AllocationRow:
         self.free_cpus = ""
         self.free_gpus = ""
         self.availability_by_shape: Dict[str, Tuple[str, str, str]] = {}
+        # (nodes_fitting, nodes_sized) per shape — feeds the `note` column.
+        # Empty when the bucket lacked per-node records.
+        self.fit_by_shape: Dict[str, Tuple[int, int]] = {}
         self.wait_by_shape: Dict[str, Optional[int]] = {}
 
     @property
@@ -504,6 +512,28 @@ class AllocationRow:
         if shape is not None and shape.label in self.availability_by_shape:
             return self.availability_by_shape[shape.label]
         return self.free_nodes, self.free_cpus, self.free_gpus
+
+    def _note_for_shape(self, shape: Optional["ProbeShape"]) -> str:
+        """Explain a non-trivial wait when raw availability looks plentiful.
+
+        Empty when wait is `now` (no friction to explain) or `?` (we don't
+        know enough to point a finger). Only meaningful when fit_by_shape
+        is populated (per-node sinfo records exist); otherwise empty.
+        """
+        if shape is None:
+            return ""
+        wait_secs = self.wait_by_shape.get(shape.label)
+        if wait_secs is None or wait_secs <= 60:
+            return ""
+        fit = self.fit_by_shape.get(shape.label)
+        if fit is None:
+            return ""
+        fitting, sized = fit
+        if sized == 0:
+            return NOTE_TOO_SMALL
+        if fitting == 0:
+            return NOTE_FRAGMENTED
+        return NOTE_QUEUE
 
     def to_dict(
         self,
@@ -530,6 +560,7 @@ class AllocationRow:
                 data["shape"] = ""
                 wait_secs = None
             data["wait"] = _format_wait(wait_secs)
+            data["note"] = self._note_for_shape(shape)
         data["wall"] = self.qos_info.max_wall
         data["tags"] = ",".join(self.tags)
         if show_gpus:
@@ -1213,6 +1244,23 @@ def is_free_node_state(state: str) -> bool:
     return base in {"idle", "mix"}
 
 
+class NodeRecord(NamedTuple):
+    """One sinfo row, normalized for shape-aware availability rollups.
+
+    mem_total / mem_alloc are 0 when sinfo didn't expose them; the fit
+    predicates downgrade to a CPU+GPU-only check on that signal.
+    """
+    arch: str
+    cps: int
+    is_free: bool
+    cpus_idle: int
+    cpus_total: int
+    gpu_total: Dict[str, int]
+    gpu_used: Dict[str, int]
+    mem_total: int
+    mem_alloc: int
+
+
 class PartitionAvail:
     """Live capacity for one (cluster, partition): nodes/cpus/gpus as (free, total)."""
 
@@ -1228,12 +1276,7 @@ class PartitionAvail:
         # (arch_short, cores_per_socket) -> [cpus_free, cpus_total,
         # nodes_free, nodes_total]
         self.cpus_by_shape: Dict[Tuple[str, int], List[int]] = {}
-        # Per-node records used to make constrained availability shape-aware:
-        # (arch_short, cores_per_socket, is_free, cpus_idle, cpus_total,
-        #  gpu_total_by_type, gpu_used_by_type).
-        self.node_records: List[
-            Tuple[str, int, bool, int, int, Dict[str, int], Dict[str, int]]
-        ] = []
+        self.node_records: List[NodeRecord] = []
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
@@ -1262,11 +1305,14 @@ class PartitionAvail:
         cpus_total: int,
         gpu_total: Dict[str, int],
         gpu_used: Dict[str, int],
+        mem_total: int = 0,
+        mem_alloc: int = 0,
     ) -> None:
         self.node_records.append(
-            (
+            NodeRecord(
                 arch, cps, is_free, cpus_idle, cpus_total,
                 dict(gpu_total), dict(gpu_used),
+                mem_total, mem_alloc,
             )
         )
 
@@ -1311,7 +1357,7 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         "-O",
         ("Cluster:|,NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,"
          "Gres:1024|,GresUsed:1024|,Cores:|,Sockets:|,Memory:|,"
-         "Features:1024"),
+         "AllocMem:|,Features:1024"),
     ]
     result: Dict[str, Dict[str, PartitionAvail]] = {}
     try:
@@ -1322,9 +1368,9 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         if not line.strip():
             continue
         # Gres/GresUsed/Features are 1024-wide so the line is fixed-width;
-        # split into 11 pipe-delimited fields.
+        # split into 12 pipe-delimited fields.
         fields = line.split("|")
-        if len(fields) < 11:
+        if len(fields) < 12:
             continue
         cluster = fields[0].strip()
         node = fields[1].strip()
@@ -1336,7 +1382,8 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         cores_per_socket_s = fields[7].strip()
         sockets_s = fields[8].strip()
         memory_s = fields[9].strip()
-        features_blob = fields[10].strip()
+        alloc_mem_s = fields[10].strip()
+        features_blob = fields[11].strip()
         if not cluster or not partition or not node:
             continue
         free_node = is_free_node_state(state)
@@ -1361,6 +1408,12 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             mem_mb = int(memory_s)
         except ValueError:
             continue
+        # AllocMem is sometimes reported as 'N/A' or missing; treat any non-int
+        # as 0 so the fits-now memory check downgrades to CPU+GPU only.
+        try:
+            alloc_mem_mb = int(alloc_mem_s)
+        except ValueError:
+            alloc_mem_mb = 0
         arch_short = _node_arch_short(features_blob)
         bucket.add_node_type((arch_short, cps, sockets, mem_mb // 1024))
         bucket.add_cpu_shape(
@@ -1378,6 +1431,8 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             cpus_total,
             gpu_total,
             gpu_used,
+            mem_mb,
+            alloc_mem_mb,
         )
     return result
 
@@ -1399,6 +1454,34 @@ def _to_sbatch_wall(value: str) -> str:
     if days:
         return f"{days}-{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+_MEM_SUFFIX_MB = {"k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024, "p": 1024 * 1024 * 1024}
+
+
+def parse_mem(value: str) -> Optional[int]:
+    """Convert a SLURM-style memory spec ('200G', '4T', '512M', '1024') to MB.
+
+    Returns None when the value is empty or unparseable. Bare numbers follow
+    sbatch convention (megabytes). Used for the per-node fit check; we never
+    forward the parsed value to SLURM, so trailing junk just yields None.
+    """
+    if not value:
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    suffix = text[-1]
+    if suffix in _MEM_SUFFIX_MB:
+        try:
+            num = float(text[:-1])
+        except ValueError:
+            return None
+        return max(0, int(num * _MEM_SUFFIX_MB[suffix]))
+    try:
+        return max(0, int(float(text)))
+    except ValueError:
+        return None
 
 
 def _format_wall_short(value: str) -> str:
@@ -1596,6 +1679,16 @@ class ProbeShape:
         self.time = time
         self.filter = filter
         self.label = self._compute_label()
+        # Per-node requirements derived once; the fit predicates run inside
+        # per-node loops over hundreds of records, so re-deriving these on
+        # each call shows up in interactive latency.
+        nodes_eff = max(1, self.nodes)
+        self.min_cpus_per_node: int = max(1, (self.cpus + nodes_eff - 1) // nodes_eff)
+        self.min_gpus_per_node: int = (
+            (self.gpu_count if self.gpu_count is not None else 1)
+            if self.requires_gpu() else 0
+        )
+        self.min_mem_per_node: Optional[int] = parse_mem(self.mem) if self.mem else None
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
         wall = time_label if time_label is not None else _format_wall_short(self.time)
@@ -2706,6 +2799,17 @@ class AvailabilityAccum:
         self.cpu_shapes: Dict[Tuple[str, int], List[int]] = {}
         self.gpus: Dict[str, List[int]] = {}
         self.matched = False
+        # Set when the accumulator was driven by a per-shape walk over
+        # per-node records — `nodes_fitting` and `nodes_sized` are only
+        # meaningful in that case. The aggregate-fallback path (no
+        # node_records) leaves shape_aware=False and renders the legacy
+        # nodes_free/nodes_total cell.
+        self.shape_aware = False
+        # Counters populated in shape mode:
+        #   nodes_sized:   nodes large enough to ever host one shape instance.
+        #   nodes_fitting: nodes that could host one shape instance right now.
+        self.nodes_sized = 0
+        self.nodes_fitting = 0
 
     def extend_cpu_shape(
         self, arch: str, cps: int, free: int, total: int,
@@ -2732,7 +2836,14 @@ class AvailabilityAccum:
     def render(self) -> Tuple[str, str, str]:
         if not self.matched:
             return "", "", ""
-        free_nodes = f"{self.nodes_free}/{self.nodes_total}"
+        if self.shape_aware:
+            # 'fitting / could-host' — answers "could one instance of the
+            # shape run on a real node right now". The aggregate idle count
+            # is what `wait` would also see, but it doesn't co-locate the
+            # resources; nodes_fitting does.
+            free_nodes = f"{self.nodes_fitting}/{self.nodes_sized}"
+        else:
+            free_nodes = f"{self.nodes_free}/{self.nodes_total}"
         if self.cpu_shapes:
             ordered = sorted(
                 self.cpu_shapes.items(),
@@ -2791,6 +2902,82 @@ def _shape_matches_node(
     return True
 
 
+def _node_accepted_gpu_total(
+    gpu_total: Dict[str, int], shape: "ProbeShape",
+) -> int:
+    """Sum of node's GPU counts whose type the shape accepts."""
+    return sum(total for _, total in _node_gpu_items_for_shape(gpu_total, shape))
+
+
+def _node_accepted_gpu_free(
+    gpu_total: Dict[str, int],
+    gpu_used: Dict[str, int],
+    shape: "ProbeShape",
+) -> int:
+    """Free GPUs on this node whose type the shape accepts."""
+    return sum(
+        max(0, total - gpu_used.get(gtype, 0))
+        for gtype, total in _node_gpu_items_for_shape(gpu_total, shape)
+    )
+
+
+def _shape_node_sized(
+    shape: "ProbeShape",
+    record: NodeRecord,
+    partition_features: Set[str],
+) -> bool:
+    """True when this node is *large enough* to ever host one shape instance —
+    irrespective of current load. Uses configured totals for CPUs / GPUs /
+    memory; the memory check is skipped when sinfo didn't expose a value
+    (mem_total == 0) so partial metadata doesn't drop otherwise-valid nodes.
+    """
+    if not _shape_matches_node(
+        shape, record.arch, record.gpu_total, partition_features
+    ):
+        return False
+    if record.cpus_total < shape.min_cpus_per_node:
+        return False
+    if shape.min_gpus_per_node and (
+        _node_accepted_gpu_total(record.gpu_total, shape) < shape.min_gpus_per_node
+    ):
+        return False
+    if (shape.min_mem_per_node is not None and record.mem_total > 0
+            and record.mem_total < shape.min_mem_per_node):
+        return False
+    return True
+
+
+def _shape_node_fits_now(
+    shape: "ProbeShape",
+    record: NodeRecord,
+    partition_features: Set[str],
+    *,
+    assume_sized: bool = False,
+) -> bool:
+    """True when this node currently has the headroom for one shape instance.
+
+    Pass `assume_sized=True` when the caller already verified the sized
+    predicate — saves the redundant compatibility/total checks in the hot
+    multi-shape loop.
+    """
+    if not assume_sized and not _shape_node_sized(shape, record, partition_features):
+        return False
+    if not record.is_free:
+        return False
+    if record.cpus_idle < shape.min_cpus_per_node:
+        return False
+    if shape.min_gpus_per_node and (
+        _node_accepted_gpu_free(record.gpu_total, record.gpu_used, shape)
+        < shape.min_gpus_per_node
+    ):
+        return False
+    if shape.min_mem_per_node is not None and record.mem_total > 0:
+        mem_free = max(0, record.mem_total - record.mem_alloc)
+        if mem_free < shape.min_mem_per_node:
+            return False
+    return True
+
+
 def _accumulate_bucket_for_shape(
     acc: AvailabilityAccum,
     bucket: "PartitionAvail",
@@ -2800,24 +2987,35 @@ def _accumulate_bucket_for_shape(
     if shape is not None and not _bucket_matches_shape(bucket, features, shape):
         return
     if bucket.node_records:
+        if shape is not None:
+            acc.shape_aware = True
         for record in bucket.node_records:
-            arch, cps, is_free, cpus_idle, cpus_total, gpu_total, gpu_used = record
-            if shape is not None and not _shape_matches_node(
-                shape, arch, gpu_total, features
-            ):
-                continue
+            if shape is not None:
+                # Drop nodes that aren't big enough to host one shape
+                # instance — they were misleading clutter under the old
+                # compatibility-only filter (a 4-GPU shape against a
+                # 2-GPU node would still credit the node's idle CPUs).
+                if not _shape_node_sized(shape, record, features):
+                    continue
+                if _shape_node_fits_now(
+                    shape, record, features, assume_sized=True
+                ):
+                    acc.nodes_fitting += 1
+                acc.nodes_sized += 1
             acc.matched = True
             acc.nodes_total += 1
-            acc.cpus_total += cpus_total
-            if is_free:
+            acc.cpus_total += record.cpus_total
+            if record.is_free:
                 acc.nodes_free += 1
-                acc.cpus_free += cpus_idle
+                acc.cpus_free += record.cpus_idle
             acc.add_cpu_shape(
-                arch, cps, cpus_idle if is_free else 0, cpus_total, is_free,
+                record.arch, record.cps,
+                record.cpus_idle if record.is_free else 0,
+                record.cpus_total, record.is_free,
             )
-            for gtype, total in _node_gpu_items_for_shape(gpu_total, shape):
-                used = gpu_used.get(gtype, 0)
-                free = max(0, total - used) if is_free else 0
+            for gtype, total in _node_gpu_items_for_shape(record.gpu_total, shape):
+                used = record.gpu_used.get(gtype, 0)
+                free = max(0, total - used) if record.is_free else 0
                 acc.add_gpu(gtype, free, total)
         return
 
@@ -2862,30 +3060,35 @@ def _accumulate_bucket_for_shapes(
     if not accepting:
         return
     if bucket.node_records:
+        acc.shape_aware = True
         for record in bucket.node_records:
-            arch, cps, is_free, cpus_idle, cpus_total, gpu_total, gpu_used = record
-            matching = [
-                s for s in accepting
-                if _shape_matches_node(s, arch, gpu_total, features)
-            ]
-            if not matching:
+            sized = [s for s in accepting if _shape_node_sized(s, record, features)]
+            if not sized:
                 continue
+            if any(
+                _shape_node_fits_now(s, record, features, assume_sized=True)
+                for s in sized
+            ):
+                acc.nodes_fitting += 1
+            acc.nodes_sized += 1
             acc.matched = True
             acc.nodes_total += 1
-            acc.cpus_total += cpus_total
-            if is_free:
+            acc.cpus_total += record.cpus_total
+            if record.is_free:
                 acc.nodes_free += 1
-                acc.cpus_free += cpus_idle
+                acc.cpus_free += record.cpus_idle
             acc.add_cpu_shape(
-                arch, cps, cpus_idle if is_free else 0, cpus_total, is_free,
+                record.arch, record.cps,
+                record.cpus_idle if record.is_free else 0,
+                record.cpus_total, record.is_free,
             )
             allowed_gpus: Dict[str, int] = {}
-            for s in matching:
-                for gtype, total in _node_gpu_items_for_shape(gpu_total, s):
+            for s in sized:
+                for gtype, total in _node_gpu_items_for_shape(record.gpu_total, s):
                     allowed_gpus[gtype] = total
             for gtype, total in sorted(allowed_gpus.items()):
-                used = gpu_used.get(gtype, 0)
-                free = max(0, total - used) if is_free else 0
+                used = record.gpu_used.get(gtype, 0)
+                free = max(0, total - used) if record.is_free else 0
                 acc.add_gpu(gtype, free, total)
         return
 
@@ -2957,6 +3160,11 @@ def attach_row_availability(
     row.free_nodes, row.free_cpus, row.free_gpus = row_acc.render()
     row.availability_by_shape = {
         label: acc.render() for label, acc in shape_accs.items() if acc.matched
+    }
+    row.fit_by_shape = {
+        label: (acc.nodes_fitting, acc.nodes_sized)
+        for label, acc in shape_accs.items()
+        if acc.matched and acc.shape_aware
     }
 
 
@@ -3566,11 +3774,24 @@ def _tag_color(raw: str) -> str:
     return ""
 
 
+def _note_color(raw: str) -> str:
+    """Color the wait-vs-free `note`: queue=dim (policy lag), fragmented=yellow
+    (likely transient), too-small=red (fundamental mismatch)."""
+    if raw == NOTE_QUEUE:
+        return _ANSI_DIM
+    if raw == NOTE_FRAGMENTED:
+        return _ANSI_YELLOW
+    if raw == NOTE_TOO_SMALL:
+        return _ANSI_RED
+    return ""
+
+
 # Per-column colorer dispatch: map column name to a function that picks an
 # ANSI code from the raw cell value. Columns absent from the map render plain.
 _COLUMN_COLORERS = {
     "wait": _wait_color,
     "tags": _tag_color,
+    "note": _note_color,
 }
 
 
@@ -3776,15 +3997,27 @@ def json_output(
                 "wait": "predicted seconds until job start from `sbatch --test-only` "
                         "for the shape on this row; 'now' means startable immediately, "
                         "'?' / null means probe skipped or unknown",
-                "free_nodes": "live free/total node count from sinfo; when a "
-                        "shape is active, counts only nodes matching that shape",
-                "free_cpus": "live free/total CPU count from sinfo. Per-shape "
-                        "tokens read 'arch{cps}c×fn/tn n:fc/tc c' — fn/tn "
+                "note": "explanation when wait > now: 'queue' (a node fits "
+                        "right now, so the wait is policy/priority), "
+                        "'fragmented' (sized nodes exist but no single node "
+                        "has the shape's CPUs+GPUs+memory free at once), "
+                        "'too-small' (no node in the partition is large "
+                        "enough). Empty when wait is 'now' or '?'. Only "
+                        "populated when sinfo gave per-node records.",
+                "free_nodes": "with no shape: idle/total nodes from sinfo. "
+                        "With an active shape: 'fitting / could-host' — "
+                        "nodes that can host one shape instance right now, "
+                        "out of nodes large enough to ever host it.",
+                "free_cpus": "free/total CPUs from sinfo. Per-shape tokens "
+                        "read 'arch{cps}c×fn/tn n:fc/tc c' — fn/tn "
                         "free/total nodes of that shape, fc/tc free/total cores "
                         "across those nodes (suffix 'n' = nodes, 'c' = cores). "
-                        "When a shape is active, counts only CPUs on matching nodes.",
+                        "When a shape is active, only nodes large enough to "
+                        "host the shape are counted.",
                 "free_gpus": "comma-separated 'gtype:free/total' from sinfo; "
-                        "when a shape is active, includes only matching GPU types",
+                        "when a shape is active, only nodes large enough to "
+                        "host the shape contribute, and only matching GPU "
+                        "types are listed",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
                 "gpus": "the row's GPU type resolved from the probe shape's "
                         "gpu_type (e.g. shape 'h100' resolves to row 'h100nvl'). "
@@ -3815,7 +4048,12 @@ def json_output(
                 "can't run on the row are dropped from output.",
                 "Availability columns are shape-aware when a shape is active: "
                 "CPU and GPU constraints narrow free_nodes/free_cpus/free_gpus "
-                "to matching resources.",
+                "to matching resources, and free_nodes counts whole-node "
+                "co-location (a 4-GPU shape against a 2-GPU node doesn't "
+                "credit the node's idle CPUs).",
+                "When wait > now and the cells still look free, the `note` "
+                "column distinguishes co-location ('fragmented'), policy "
+                "('queue'), and partition-too-small ('too-small').",
                 "Rows with missing hardware metadata are kept on a best-effort "
                 "basis; use --explain or -v to inspect uncertainty.",
                 "By default, rows are hidden when the probe returned `?`, "
@@ -5601,6 +5839,86 @@ def run_self_test() -> int:
     assert "  --show-all" in output_section, "--show-all not in Output group"
     assert "  --quick" in diag_section, "--quick not in Diagnostics group"
     assert "  --list-gpus" in inv_section, "--list-gpus not in Inventory group"
+
+    # parse_mem accepts SLURM-style suffixes; bare integers are MB.
+    assert parse_mem("200G") == 200 * 1024
+    assert parse_mem("4T") == 4 * 1024 * 1024
+    assert parse_mem("512m") == 512
+    assert parse_mem("1024") == 1024
+    assert parse_mem("") is None
+    assert parse_mem("garbage") is None
+
+    # Capacity-aware shape fit. A 4-GPU shape against a 2-GPU node fails the
+    # 'sized' check (the partition can never host the shape on that node).
+    fit_avail = {"notchpeak": {"notchpeak-gpu": PartitionAvail()}}
+    fit_bucket = fit_avail["notchpeak"]["notchpeak-gpu"]
+    fit_bucket.add_gpu("a100", 6, 12)
+    # Big-and-busy node: can host 4xa100 but only 1 free right now.
+    fit_bucket.add_node_record(
+        "gen", 96, True, 96, 96, {"a100": 4}, {"a100": 3}, 768 * 1024, 0,
+    )
+    # Big-and-idle node: full headroom for 4xa100.
+    fit_bucket.add_node_record(
+        "gen", 96, True, 96, 96, {"a100": 4}, {"a100": 0}, 768 * 1024, 0,
+    )
+    # Too-small node: 2 a100s, can never host a 4-GPU job alone.
+    fit_bucket.add_node_record(
+        "skl", 32, True, 32, 32, {"a100": 2}, {"a100": 0}, 256 * 1024, 0,
+    )
+    fit_features = {"notchpeak": {"notchpeak-gpu": {"gen", "skl", "a100"}}}
+    a100x4 = ProbeShape(gpu_type="a100", gpu_count=4)
+    fit_row = AllocationRow(
+        "notchpeak", "soc-gpu-np", "me", "", "notchpeak-gpu", ""
+    )
+    attach_row_availability(fit_row, fit_avail, fit_features, [a100x4])
+    # Per-shape cell: 1 node fits-now (the idle big one), 2 nodes are sized.
+    record = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert record["free_nodes"] == "1/2", record
+    # The too-small node is excluded from free_gpus (sized filter).
+    assert "a100:" in record["free_gpus"], record
+    assert fit_row.fit_by_shape[a100x4.label] == (1, 2), fit_row.fit_by_shape
+
+    # The `note` column annotates wait-vs-free disagreement.
+    fit_row.wait_by_shape[a100x4.label] = 0  # 'now' -> empty note
+    rec_now = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_now["note"] == "", rec_now
+    fit_row.wait_by_shape[a100x4.label] = 1800  # 30m, fits-now > 0 -> 'queue'
+    rec_queue = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_queue["note"] == NOTE_QUEUE, rec_queue
+    # Force a fragmented scenario: zero out fits, sized still positive.
+    fit_row.fit_by_shape[a100x4.label] = (0, 2)
+    rec_frag = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_frag["note"] == NOTE_FRAGMENTED, rec_frag
+    # too-small: no node ever fits.
+    fit_row.fit_by_shape[a100x4.label] = (0, 0)
+    rec_small = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_small["note"] == NOTE_TOO_SMALL, rec_small
+    # Unknown wait -> empty (compact).
+    fit_row.wait_by_shape[a100x4.label] = None
+    rec_unk = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    assert rec_unk["note"] == "", rec_unk
+
+    # Memory check. Shape requests 256G; one node has 200G total (too-small),
+    # one has 512G but only 100G free (fragmented), one has 512G fully free.
+    mem_avail = {"notchpeak": {"notchpeak-cpu": PartitionAvail()}}
+    mb = mem_avail["notchpeak"]["notchpeak-cpu"]
+    mb.add_node_record(
+        "gen", 64, True, 64, 64, {}, {}, 200 * 1024, 0,  # 200G total — too small
+    )
+    mb.add_node_record(
+        "gen", 64, True, 64, 64, {}, {}, 512 * 1024, 412 * 1024,  # 100G free
+    )
+    mb.add_node_record(
+        "gen", 64, True, 64, 64, {}, {}, 512 * 1024, 0,  # idle
+    )
+    mem_features = {"notchpeak": {"notchpeak-cpu": {"gen"}}}
+    big_mem = ProbeShape(cpus=8, mem="256G")
+    mem_row = AllocationRow("notchpeak", "acct", "me", "", "notchpeak-cpu", "")
+    attach_row_availability(mem_row, mem_avail, mem_features, [big_mem])
+    fitting, sized = mem_row.fit_by_shape[big_mem.label]
+    assert (fitting, sized) == (1, 2), (fitting, sized)
+    rec_mem = mem_row.to_dict(include_avail=True, include_wait=True, shape=big_mem)
+    assert rec_mem["free_nodes"] == "1/2", rec_mem
 
     print("self-test passed")
     return 0
