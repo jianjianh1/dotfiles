@@ -77,7 +77,7 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
   - Which-key groups: `<leader>f` = find, `<leader>g` = git, `<leader>b` = buffer.
   - **Oil replaces netrw** (`vim.g.loaded_netrw = 1`). `<leader>e` and `-` open Oil.
   - **`<leader>m` differs between vim and nvim**: vim runs `!glow %` (terminal); nvim triggers `MarkdownPreviewToggle` (browser) on markdown files.
-  - After editing plugin specs, regenerate the lock: `nvim --headless '+Lazy! sync' +qa`.
+  - **`nvim/lazy-lock.json` is gitignored** — each host manages its own lock so `:Lazy update` doesn't dirty the repo working tree. Plugin versions are not pinned across hosts (personal dotfiles, not reproducible builds). Run `:Lazy sync` after editing plugin specs.
   - Setup installs nvim via AppImage (skipped on glibc < 2.28). Pass `--use-modules` on CHPC to prefer `module load` instead.
 - **tmux prefix** is `Ctrl-a` (not the default `Ctrl-b`).
 - **Indentation**: vimrc defaults to 4-space tabs; web filetypes (html/css/js/ts/json/yaml) use 2-space via autocmd. Neovim adds `lua` to the 2-space list.
@@ -93,20 +93,22 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 - Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC
 - Skips MCP server installation by default (`install_claude_plugins.sh` — needs CHPC approval first)
 
-**Module name placeholders** (used with `--use-modules`) — update in `setup.sh` after confirming on CHPC:
+**Module name candidates** (used with `--use-modules`) — verified on Notchpeak (2026-05). Re-verify after CHPC adds/removes/renames modules with `./setup.sh --probe-modules`:
 
 ```bash
-CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")   # check with: module spider claude
-CODEX_MODULE_CANDIDATES=("codex" "openai-codex")    # check with: module spider codex
-GH_MODULE_CANDIDATES=("gh")                          # check with: module spider gh
-NODE_MODULE_CANDIDATES=("nodejs")                     # check with: module spider nodejs
-UV_MODULE_CANDIDATES=("uv")                           # check with: module spider uv
-BTOP_MODULE_CANDIDATES=("btop")                       # check with: module spider btop
-NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")          # check with: module spider nvim
-TREE_SITTER_MODULE_CANDIDATES=("tree-sitter")          # check with: module spider tree-sitter
+CLAUDE_MODULE_CANDIDATES=("claude")             # claude/2.1.83
+CODEX_MODULE_CANDIDATES=("codex")               # codex/0.114.0
+GH_MODULE_CANDIDATES=("gh")                      # gh/2.0.0
+NODE_MODULE_CANDIDATES=("nodejs")                 # nodejs/22.4.0 (also: node-js/22.4.0)
+UV_MODULE_CANDIDATES=("uv")                       # uv/0.10.9
+BTOP_MODULE_CANDIDATES=("btop")                   # btop/1.3.2
+NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")     # nvim/0.7.2, nvim/0.11.2 (D)
+TREE_SITTER_MODULE_CANDIDATES=()                  # no module — falls back to binary/cargo
 ```
 
 CHPC uses the same repo `claude_settings.json` / `codex_config.toml` as other hosts; only version-adaptive compat files (tmux/vim/gitconfig/bashrc) land in `~/.server-configs-generated/`. After MCP approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
+
+**`chpc-allocs.py`** requires Python 3.7+ (it raises `SystemExit` on older interpreters). Some CHPC nodes ship `/usr/bin/python3` as 3.6 — `module load python/3.10.3` before running, or rely on the wrapper installed in `~/.local/bin` to find a usable interpreter.
 
 ## Do Not
 

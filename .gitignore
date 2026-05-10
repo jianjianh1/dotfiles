@@ -20,3 +20,17 @@ hosts.yml
 *.swp
 *.swo
 .vim/undodir/
+
+# Python build/cache artifacts
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Per-host lazy.nvim plugin lockfile. We don't pin plugin versions across
+# hosts (this is a personal dotfiles repo, not a reproducible-build one);
+# `:Lazy sync` rewriting the lock on each machine would otherwise leave
+# the working tree dirty.
+nvim/lazy-lock.json

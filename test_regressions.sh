@@ -67,6 +67,40 @@ test_backup_helpers_fail_loudly() (
     fi
 )
 
+test_backup_rotation_preserves_edited_bak() (
+    local tmp src dst rotated
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    src="$tmp/src"
+    dst="$tmp/dst"
+    printf 'src v1\n' > "$src"
+    printf 'original user file\n' > "$dst"
+
+    # Run 1: dst gets backed up to dst.bak (contents: "original user file"),
+    # then dst is overwritten by src.
+    backup_and_copy "$src" "$dst" >/dev/null 2>&1 || fail "first backup_and_copy failed"
+    grep -q '^original user file$' "${dst}.bak" ||
+        fail ".bak should contain pre-existing dst content after first run"
+
+    # User edits the .bak (cribbing a snippet from the previous config).
+    printf 'user-edited backup\n' > "${dst}.bak"
+
+    # Run 2: src is bumped, so dst is rewritten. The user-edited .bak must
+    # be rotated to .bak.<timestamp>, never silently destroyed.
+    printf 'src v2\n' > "$src"
+    backup_and_copy "$src" "$dst" >/dev/null 2>&1 || fail "second backup_and_copy failed"
+
+    rotated="$(find "$tmp" -maxdepth 1 -name 'dst.bak.*' | head -1)"
+    [ -n "$rotated" ] || fail "edited .bak was not rotated to a timestamped name"
+    grep -q '^user-edited backup$' "$rotated" ||
+        fail "rotated backup did not preserve user-edited content"
+
+    # And the new .bak should hold the previous (run-1) dst content (src v1).
+    grep -q '^src v1$' "${dst}.bak" ||
+        fail ".bak after run 2 should contain run-1 dst content"
+)
+
 test_manifest_controls_uninstall() (
     local tmp
     tmp="$(mktemp -d)"
@@ -309,8 +343,8 @@ test_chpc_module_loads_initialize_module_command() (
 
     bash_compat="$GENERATED_DIR/bashrc_compat"
     init_line="$(grep -n 'for init in /etc/profile.d/modules.sh' "$bash_compat" | cut -d: -f1)"
-    claude_line="$(grep -n 'module load claude-code' "$bash_compat" | cut -d: -f1)"
-    codex_line="$(grep -n 'module load codex' "$bash_compat" | cut -d: -f1)"
+    claude_line="$(grep -n '_server_configs_module_load claude-code' "$bash_compat" | cut -d: -f1)"
+    codex_line="$(grep -n '_server_configs_module_load codex' "$bash_compat" | cut -d: -f1)"
 
     [ -n "$init_line" ] || fail "module initialization block missing"
     [ -n "$claude_line" ] || fail "Claude module load missing"
@@ -319,6 +353,11 @@ test_chpc_module_loads_initialize_module_command() (
         fail "Claude module load should come after module initialization"
     [ "$init_line" -lt "$codex_line" ] ||
         fail "Codex module load should come after module initialization"
+
+    # Module loads must be gated on interactive shells so SLURM job-step
+    # shells don't unintentionally swap modules at startup.
+    grep -q 'case $- in' "$bash_compat" ||
+        fail "module section missing interactive-shell guard"
 )
 
 test_module_var_reset_clears_stale_values() (
@@ -342,7 +381,7 @@ test_module_var_reset_clears_stale_values() (
 
     render_bash_compat
     bash_compat="$GENERATED_DIR/bashrc_compat"
-    if grep -q 'module load stale-' "$bash_compat"; then
+    if grep -Eq '(_server_configs_module_load|module load) stale-' "$bash_compat"; then
         fail "stale module values leaked into bash compat config"
     fi
 )
@@ -478,9 +517,61 @@ test_pre_commit_no_staged_files() (
     "$DIR/.githooks/pre-commit" || fail "pre-commit failed with no staged files"
 )
 
+test_pre_commit_blocks_secrets() (
+    local tmp clone hook
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    clone="$tmp/clone"
+    hook="$DIR/.githooks/pre-commit"
+    git init -q "$clone"
+    cd "$clone" || fail "cd to $clone failed"
+
+    # 1) text blob containing an OpenAI-shaped key must be blocked
+    printf 'OPENAI_API_KEY=sk-proj-%s\n' "$(printf 'a%.0s' {1..40})" > leaky.env
+    git add leaky.env
+    if "$hook" >/dev/null 2>&1; then
+        fail "pre-commit should block file containing sk-proj-... token"
+    fi
+    git reset -q HEAD -- leaky.env
+    rm -f leaky.env
+
+    # 2) key-shaped filename must be blocked even when content looks innocuous
+    printf 'not actually a key\n' > server.pem
+    git add server.pem
+    if "$hook" >/dev/null 2>&1; then
+        fail "pre-commit should block file with .pem extension"
+    fi
+    git reset -q HEAD -- server.pem
+    rm -f server.pem
+
+    # 3) benign content with sk- prefix but only 8 chars must NOT be blocked
+    printf 'see anchor sk-foo123\n' > notes.md
+    git add notes.md
+    if ! "$hook" >/dev/null 2>&1; then
+        fail "pre-commit should NOT block short sk- string in markdown"
+    fi
+)
+
 test_chpc_allocs_self_test() (
+    # The script's runtime guard requires Python 3.7+. On CHPC nodes where
+    # /usr/bin/python3 is still 3.6, skip cleanly rather than tripping the
+    # guard (which is the intended behavior, not a regression).
+    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then
+        printf 'SKIP: test_chpc_allocs_self_test (python3 < 3.7)\n'
+        return 0
+    fi
     python3 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
         fail "chpc-allocs.py --self-test failed"
+)
+
+test_chpc_allocs_python_guard_present() (
+    # Smoke-check that the Python version guard at the top of
+    # chpc-allocs.py is intact. Regression catch for accidental removal
+    # during refactors — the guard is the only thing that turns
+    # 3.7+-only features into a readable error on older interpreters.
+    grep -q 'sys.version_info < (3, 7)' "$DIR/chpc-allocs.py" ||
+        fail "Python version guard removed from chpc-allocs.py"
 )
 
 run_test() {
@@ -495,6 +586,7 @@ main() {
     run_test test_remote_bash_lc_quote
     run_test test_portable_helpers
     run_test test_backup_helpers_fail_loudly
+    run_test test_backup_rotation_preserves_edited_bak
     run_test test_manifest_controls_uninstall
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
@@ -507,7 +599,9 @@ main() {
     run_test test_nvim_manifest_records_only_owned_layout
     run_test test_nvim_install_selects_legacy_and_arm_assets
     run_test test_pre_commit_no_staged_files
+    run_test test_pre_commit_blocks_secrets
     run_test test_chpc_allocs_self_test
+    run_test test_chpc_allocs_python_guard_present
     echo "All regression tests passed."
 }
 
