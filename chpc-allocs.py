@@ -1470,12 +1470,7 @@ class ProbeShape:
         """
         if not row.gpu_types:
             return ()
-        cands = tuple(row.gpu_types)
-        if self.gpu_type:
-            cands = tuple(t for t in cands if self.gpu_type in t.lower())
-        if self.filter.has_gpu_constraint():
-            cands = tuple(t for t in cands if self.filter.gpu_satisfies(t))
-        return cands
+        return tuple(t for t in row.gpu_types if self.accepts_gpu_token(t))
 
     def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
         """Return the row-specific GRES name for this shape, or None.
@@ -1527,12 +1522,7 @@ class ProbeShape:
     def should_skip(self, row: "AllocationRow") -> bool:
         """True when this shape can't possibly run on this row (skip the probe)."""
         gpu_constraint = self.filter.has_gpu_constraint()
-        gpu_requested = (
-            self.gpu_type is not None
-            or self.gpu_count is not None
-            or gpu_constraint
-        )
-        if gpu_requested and "gpu" not in row.tags:
+        if self.requires_gpu() and "gpu" not in row.tags:
             return True
         # Empty row.gpu_types means metadata wasn't loaded — don't skip.
         if row.gpu_types and (self.gpu_type or gpu_constraint):
@@ -1541,6 +1531,59 @@ class ProbeShape:
         if not self.filter.cpu_satisfies(row.cpu_features):
             return True
         return False
+
+    def requires_gpu(self) -> bool:
+        """True when this shape's hardware constraints can only be served by a GPU."""
+        return (
+            self.gpu_type is not None
+            or self.gpu_count is not None
+            or self.filter.has_gpu_constraint()
+        )
+
+    def accepts_gpu_token(self, token: str) -> bool:
+        """True iff `token` satisfies the shape's gpu_type substring (if set)
+        and the HardwareFilter's gen/sm constraint (if set)."""
+        if self.gpu_type and self.gpu_type not in token.lower():
+            return False
+        if self.filter.has_gpu_constraint() and not self.filter.gpu_satisfies(token):
+            return False
+        return True
+
+
+def _filtered_gpu_items(
+    bucket: "PartitionAvail", shape: "ProbeShape",
+) -> List[Tuple[str, Tuple[int, int]]]:
+    """Bucket's GPU entries restricted to types `shape` accepts.
+
+    Shape with no GPU constraint at all → every entry passes through.
+    """
+    if not shape.gpu_type and not shape.filter.has_gpu_constraint():
+        return [(g, (free, total)) for g, (free, total) in bucket.gpus.items()]
+    return [
+        (g, (free, total))
+        for g, (free, total) in bucket.gpus.items()
+        if shape.accepts_gpu_token(g)
+    ]
+
+
+def _bucket_matches_shape(
+    bucket: "PartitionAvail", features: Set[str], shape: "ProbeShape",
+) -> bool:
+    """True iff `bucket` and `features` jointly satisfy `shape`.
+
+    - Shape's CPU filter must accept `features` (empty features pass,
+      matching cpu_satisfies' missing-metadata convention).
+    - Shape requires GPU → at least one GPU type in the bucket must be
+      accepted; a CPU-only bucket fails for any GPU-requiring shape.
+    """
+    if not shape.filter.cpu_satisfies(features):
+        return False
+    if shape.requires_gpu():
+        if not bucket.gpus:
+            return False
+        if not any(shape.accepts_gpu_token(g) for g in bucket.gpus):
+            return False
+    return True
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2116,22 +2159,43 @@ def _render_simple_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) 
 
 def format_gpu_summary(
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
+    partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
+    shapes: Optional[Sequence["ProbeShape"]] = None,
 ) -> str:
     """Render GPU inventory as a table with one row per (cluster, partition, gtype).
 
     Annotates each GRES token with vendor, NVIDIA generation, and SM compute
     capability via _classify_gpu_token. Unrecognized tokens still render —
     GENERATION/SM cells are blank rather than absent.
+
+    When `shapes` is given, only (cluster, partition, gtype) rows accepted
+    by some shape's HardwareFilter are emitted: the partition's CPU
+    features must satisfy the shape's CPU constraint, and the gtype must
+    satisfy the shape's GPU constraint. `partition_features` supplies the
+    CPU side; without it, CPU constraints are treated as missing-metadata
+    (pass) — same convention as `cpu_satisfies`.
     """
+    feat_map = partition_features or {}
     rows: List[List[str]] = []
     for cluster in sorted(partition_avail):
         for partition in sorted(partition_avail[cluster]):
             bucket = partition_avail[cluster][partition]
             if not bucket.gpus:
                 continue
+            features = feat_map.get(cluster, {}).get(partition, set())
+            cpu_ok_shapes = (
+                [s for s in shapes if s.filter.cpu_satisfies(features)]
+                if shapes else None
+            )
+            if cpu_ok_shapes is not None and not cpu_ok_shapes:
+                continue
             nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}"
             cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}"
             for gtype, (free, total) in sorted(bucket.gpus.items()):
+                if cpu_ok_shapes is not None and not any(
+                    s.accepts_gpu_token(gtype) for s in cpu_ok_shapes
+                ):
+                    continue
                 cls = _classify_gpu_token(gtype)
                 if cls is None:
                     vendor, gen, sm_cell = "", "", ""
@@ -2144,6 +2208,8 @@ def format_gpu_summary(
                     f"{free}/{total}", nodes_ft, cpus_ft,
                 ])
     if not rows:
+        if shapes:
+            return "(no GPU resources match shape)"
         return "(no GPU partitions found)"
     return _render_simple_table(
         ["CLUSTER", "PARTITION", "GTYPE", "VENDOR", "GENERATION", "SM",
@@ -2238,6 +2304,7 @@ def _arch_display_list(feats: Iterable[str]) -> str:
 def format_cpu_summary(
     partition_features: Dict[str, Dict[str, Set[str]]],
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
+    shapes: Optional[Sequence["ProbeShape"]] = None,
 ) -> str:
     """Render CPU-only partitions as a table.
 
@@ -2265,6 +2332,11 @@ def format_cpu_summary(
             )
             if avail_bucket is not None and avail_bucket.gpus:
                 continue
+            if shapes and not any(
+                not s.requires_gpu() and s.filter.cpu_satisfies(feats)
+                for s in shapes
+            ):
+                continue
             vendor_short = classify_cpu_vendor(feats)
             vendor = _VENDOR_DISPLAY.get(vendor_short, "")
             row = [cluster, partition, vendor]
@@ -2290,6 +2362,8 @@ def format_cpu_summary(
                 row.append(_arch_display_list(feats))
             rows.append(row)
     if not rows:
+        if shapes:
+            return "(no CPU partitions match shape)"
         return "(no CPU-only partitions found)"
     headers = ["CLUSTER", "PARTITION", "VENDOR"]
     if show_avail:
@@ -2306,6 +2380,7 @@ def attach_metadata(
     partition_gpus: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None,
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
+    shapes: Optional[Sequence["ProbeShape"]] = None,
 ) -> None:
     qos_info = show_qos(row.qos for row in rows)
     share_info = {} if include_usage is False else show_usage(user)
@@ -2319,15 +2394,26 @@ def attach_metadata(
         row.cpu_vendor = classify_cpu_vendor(row.cpu_features)
         row.tags = classify(row)
         if partition_avail is not None:
-            attach_row_availability(row, partition_avail)
+            attach_row_availability(
+                row, partition_avail, partition_features, shapes,
+            )
 
 
 def attach_row_availability(
     row: AllocationRow,
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
+    partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
+    shapes: Optional[Sequence["ProbeShape"]] = None,
 ) -> None:
-    """Roll up live availability across this row's candidate partitions."""
+    """Roll up live availability across this row's candidate partitions.
+
+    When `shapes` is given, only buckets accepted by some shape's
+    HardwareFilter contribute. GPU entries within a bucket are further
+    restricted to types satisfying that shape's GPU constraint, unioned
+    across all accepting shapes.
+    """
     per_cluster = partition_avail.get(row.cluster, {})
+    feat_per_cluster = (partition_features or {}).get(row.cluster, {})
     nodes_free = nodes_total = 0
     cpus_free = cpus_total = 0
     gpus: Dict[str, List[int]] = {}
@@ -2338,12 +2424,24 @@ def attach_row_availability(
         if bucket is None or cand in seen_partitions:
             continue
         seen_partitions.add(cand)
+        features = feat_per_cluster.get(cand, set())
+        if shapes:
+            accepting = [s for s in shapes if _bucket_matches_shape(bucket, features, s)]
+            if not accepting:
+                continue
+            allowed: Dict[str, Tuple[int, int]] = {}
+            for s in accepting:
+                for gtype, ft in _filtered_gpu_items(bucket, s):
+                    allowed[gtype] = ft
+            allowed_gpus = allowed.items()
+        else:
+            allowed_gpus = bucket.gpus.items()
         matched = True
         nodes_free += bucket.nodes_free
         nodes_total += bucket.nodes_total
         cpus_free += bucket.cpus_free
         cpus_total += bucket.cpus_total
-        for gtype, (free, total) in bucket.gpus.items():
+        for gtype, (free, total) in allowed_gpus:
             slot = gpus.setdefault(gtype, [0, 0])
             slot[0] += free
             slot[1] += total
@@ -4669,10 +4767,25 @@ def main(argv: Sequence[str]) -> int:
             )
 
     if args.list_gpus:
-        print(format_gpu_summary(show_partition_availability()))
+        # Fetch features only when shapes carry CPU atoms — the second sinfo
+        # call is the same cost as the existing --list-cpus path.
+        feats = (
+            show_partition_features()
+            if user_shapes and any(s.filter.has_cpu_constraint() for s in user_shapes)
+            else None
+        )
+        print(format_gpu_summary(
+            show_partition_availability(),
+            partition_features=feats,
+            shapes=user_shapes,
+        ))
         return 0
     if args.list_cpus:
-        print(format_cpu_summary(show_partition_features(), show_partition_availability()))
+        print(format_cpu_summary(
+            show_partition_features(),
+            show_partition_availability(),
+            shapes=user_shapes,
+        ))
         return 0
 
     include_avail = not args.no_availability
@@ -4713,6 +4826,7 @@ def main(argv: Sequence[str]) -> int:
         partition_gpus=partition_gpus,
         partition_features=partition_features,
         partition_avail=partition_avail,
+        shapes=user_shapes,
     )
     rows = filter_rows(rows, args)
     shapes: List[ProbeShape] = list(user_shapes) if include_wait and user_shapes else []
