@@ -549,7 +549,7 @@ class AllocationRow:
         cpu_archs or rows whose features don't satisfy any of them.
 
         Mirror of `_gpus_cell` so users running `cpu:32*genoa` see which
-        rows resolve to which arch without having to pass `--wide`.
+        rows resolve to which arch in compact table output.
         """
         if not self.cpu_features or request is None or not request.filter.cpu_archs:
             return ""
@@ -594,7 +594,7 @@ class AllocationRow:
 
     def to_dict(
         self,
-        wide: bool = False,
+        include_details: bool = False,
         include_avail: bool = False,
         include_wait: bool = True,
         request: Optional["ResourceSpec"] = None,
@@ -602,7 +602,7 @@ class AllocationRow:
         show_cpu: bool = False,
     ) -> Dict[str, str]:
         # Column order is intentional: identity → wait check → "will it fit" →
-        # QOS metadata → wide diagnostics → live availability. Python dict
+        # QOS metadata → detail diagnostics → live availability. Python dict
         # insertion order propagates to the table/CSV/JSON renderers, so this
         # is the single point of truth for column layout.
         data: Dict[str, str] = {
@@ -631,7 +631,7 @@ class AllocationRow:
         data["priority"] = self.qos_info.priority
         data["fairshare"] = self.share_info.fairshare if self.share_info else ""
         data["usage"] = self.share_info.raw_usage if self.share_info else ""
-        if wide:
+        if include_details:
             data.update(
                 {
                     "partition": self.partition,
@@ -785,7 +785,7 @@ Speed (skip wait checks/queries):
 
 Scripting / output:
   chpc-allocs a100:1 --format json | jq '.rows[]'       # JSON with _help legend
-  chpc-allocs --quick --wide --format csv > allocs.csv  # wide CSV dump
+  chpc-allocs --quick --format csv > allocs.csv         # full CSV dump
 
 Diagnostics:
   chpc-allocs -v a100:1                       # narrate dropped rows + progress
@@ -928,18 +928,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--format", type=_lower_choice, choices=("table", "csv", "json"),
         default=None, metavar="{table,csv,json}",
         help="Output format (case-insensitive). Default: table on a TTY; "
-        "json (wide, with _help legend) when stdout is piped or redirected. "
+        "json (full detail, with _help legend) when stdout is piped or redirected. "
         "Use --format=table to keep table output in a pipeline, or "
         "--no-json-help to drop the legend. e.g. --format json | jq '.rows[]'",
-    )
-    out.add_argument(
-        "--wide", action="store_true",
-        help="Show extra columns: partition, gpu_types, cpu_archs, "
-        "default_qos, TRES limits, QOS flags, full sshare detail. Also "
-        "restores priority/fairshare/usage/default when availability "
-        "columns are present (otherwise hidden so the free_* columns fit; "
-        "pair with --no-availability to keep them without free_*). "
-        "e.g. --wide --quick --format csv",
     )
     out.add_argument(
         "--sort", default=None, metavar="KEYS",
@@ -1031,7 +1022,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-availability", dest="no_availability", action="store_true",
         help="Skip the live sinfo capacity query (no free_* columns). Faster. "
         "In table mode the free_* columns replace priority/fairshare/usage/"
-        "default by default; --wide keeps both sets visible together. "
+        "default by default; CSV/JSON keep the full field set. "
         "e.g. --no-availability cpu:32",
     )
     diag.add_argument(
@@ -2773,8 +2764,40 @@ def resolve_row_gpu_types(
     return tuple(sorted(seen))
 
 
-def _render_simple_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+def _render_simple_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    term_width: Optional[int] = None,
+    wrap_columns: Sequence[str] = (),
+    empty_message: str = "(no matching rows)",
+) -> str:
     """Render a left-justified text table: HEADERS, dashed rule, then rows."""
+    if term_width is not None:
+        columns = [f"c{i}" for i in range(len(headers))]
+        labels = {column: headers[i] for i, column in enumerate(columns)}
+        records = [
+            {
+                column: row[i] if i < len(row) else ""
+                for i, column in enumerate(columns)
+            }
+            for row in rows
+        ]
+        wrap_set = set(wrap_columns)
+        wrap_ids = [
+            column for i, column in enumerate(columns)
+            if headers[i] in wrap_set
+        ]
+        return _render_width_capped_table(
+            columns,
+            labels,
+            records,
+            color=False,
+            term_width=term_width,
+            wrap_columns=wrap_ids,
+            empty_message=empty_message,
+        )
+
     cols = len(headers)
     widths = [len(h) for h in headers]
     for row in rows:
@@ -2799,6 +2822,8 @@ def format_gpu_summary(
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
     requests: Optional[Sequence["ResourceSpec"]] = None,
+    *,
+    term_width: Optional[int] = None,
 ) -> str:
     """Render GPU inventory as a table with one row per (cluster, partition, gtype).
 
@@ -2850,10 +2875,15 @@ def format_gpu_summary(
         if requests:
             return "(no GPU resources match request)"
         return "(no GPU partitions found)"
+    if term_width is None:
+        term_width = shutil.get_terminal_size((120, 24)).columns
     return _render_simple_table(
         ["CLUSTER", "PARTITION", "VENDOR", "GTYPE", "GEN", "SM",
          "FREE", "HOSTS", "NODES", "CORES"],
         rows,
+        term_width=max(1, int(term_width)),
+        wrap_columns=("PARTITION", "GTYPE", "FREE", "HOSTS", "CORES"),
+        empty_message="(no GPU partitions found)",
     )
 
 
@@ -2960,6 +2990,8 @@ def format_cpu_summary(
     partition_features: Dict[str, Dict[str, Set[str]]],
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
     requests: Optional[Sequence["ResourceSpec"]] = None,
+    *,
+    term_width: Optional[int] = None,
 ) -> str:
     """Render CPU-only partitions as a table.
 
@@ -3016,7 +3048,15 @@ def format_cpu_summary(
         headers += ["HOSTS", "NODES", "CORES"]
     else:
         headers.append("ARCH")
-    return _render_simple_table(headers, rows)
+    if term_width is None:
+        term_width = shutil.get_terminal_size((120, 24)).columns
+    return _render_simple_table(
+        headers,
+        rows,
+        term_width=max(1, int(term_width)),
+        wrap_columns=("PARTITION", "HOSTS", "CORES", "ARCH"),
+        empty_message="(no CPU-only partitions found)",
+    )
 
 
 def attach_metadata(
@@ -3943,12 +3983,16 @@ def sort_pairs(
 _AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage")
 
 
-def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -> List[str]:
+def _empty_columns(
+    include_details: bool,
+    include_avail: bool,
+    include_wait: bool = True,
+) -> List[str]:
     sentinel_request = ResourceSpec() if include_wait else None
     return list(
         AllocationRow("", "", "", "", "", "")
         .to_dict(
-            wide=wide,
+            include_details=include_details,
             include_avail=include_avail,
             include_wait=include_wait,
             request=sentinel_request,
@@ -3957,16 +4001,15 @@ def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -
     )
 
 
-def _select_table_columns(all_columns: List[str], wide: bool, include_avail: bool) -> List[str]:
+def _select_table_columns(all_columns: List[str], include_avail: bool) -> List[str]:
     """Pick which columns the table renderer should display.
 
-    `to_dict()` produces every key for CSV/JSON consumers; the table view drops
-    columns that crowd the layout. In availability mode (without `--wide`),
-    priority/fairshare/usage/default are hidden so free_nodes/free_cpus/
-    free_gpus have room to breathe; tags remain visible because
-    freecycle/guest rows change job-risk decisions.
+    CSV/JSON get the full `to_dict()` schema. Table mode drops score/debug
+    columns when live availability is present so free_nodes/free_cpus/free_gpus
+    have room to breathe; tags remain visible because freecycle/guest rows
+    change job-risk decisions.
     """
-    if include_avail and not wide:
+    if include_avail:
         return [c for c in all_columns if c not in _AVAIL_COMPACT_HIDE]
     return list(all_columns)
 
@@ -4016,6 +4059,42 @@ def _wrap_gpu_list(text: str, width: int) -> List[str]:
     return lines
 
 
+def _split_table_cell_items(text: str) -> List[str]:
+    """Split top-level comma/semicolon list cells into display tokens.
+
+    The separator stays attached to each non-final token so wrapped output
+    remains readable (`a,` / `b;`) without the caller needing column-specific
+    knowledge. Separators inside parentheses are ignored.
+    """
+    if not text:
+        return []
+    items: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch in {",", ";"} and depth == 0:
+            item = "".join(buf).strip()
+            if item:
+                items.append(item + ch)
+            buf = []
+        else:
+            buf.append(ch)
+    item = "".join(buf).strip()
+    if item:
+        items.append(item)
+    return items
+
+
+def _table_cell_item_count(text: str) -> int:
+    return len(_split_table_cell_items(text))
+
+
 _COMPACT_TABLE_LABELS = {
     "request": "REQ",
     "tags": "FLAGS",
@@ -4043,8 +4122,8 @@ _COMPACT_TAG_LABELS = {
 _COMPACT_TAG_OMIT = {"gpu", "cpu"}
 
 
-def _compact_table_enabled(wide: bool, include_avail: bool, tty: bool) -> bool:
-    return bool(tty and include_avail and not wide)
+def _compact_table_enabled(include_avail: bool) -> bool:
+    return bool(include_avail)
 
 
 def _display_column_label(column: str, compact: bool) -> str:
@@ -4180,24 +4259,21 @@ def _wrap_table_cell(
 ) -> List[str]:
     if not text:
         return [""]
-    if column in {"free_cpus", "free_gpus", "tags"}:
-        tokens = [t.strip() for t in text.split(",") if t.strip()]
-        if not tokens:
-            return [""]
+    tokens = _split_table_cell_items(text)
+    if len(tokens) > 1:
         lines: List[str] = []
         current: List[str] = []
         current_len = 0
-        for index, tok in enumerate(tokens):
-            suffix = "," if index < len(tokens) - 1 else ""
+        for tok in tokens:
             # Don't shred hyphenated identifiers like `gpu-guest` or
             # `qos-limit`. If a single token overflows the budget, let it
             # overflow rather than split mid-word.
             pieces = textwrap.wrap(
-                tok + suffix,
+                tok,
                 width=max(1, width),
                 break_long_words=force_break,
                 break_on_hyphens=False,
-            ) or [tok + suffix]
+            ) or [tok]
             for piece in pieces:
                 sep_cost = 1 if current else 0
                 if current and current_len + sep_cost + len(piece) > width:
@@ -4227,10 +4303,11 @@ def _render_stacked_table(
     *,
     color: bool,
     term_width: int,
+    empty_message: str = "(no matching allocations)",
 ) -> str:
     """Fallback renderer for terminals too narrow for a useful table header."""
     if not display_records:
-        return "(no matching allocations)"
+        return empty_message
     width = max(1, term_width)
     lines: List[str] = []
     for index, record in enumerate(display_records):
@@ -4355,79 +4432,40 @@ def _styled_cell(column: str, padded: str, raw: str, enable: bool) -> str:
     """
     if not enable:
         return padded
-    colorer = _COLUMN_COLORERS.get(column)
+    colorer = _COLUMN_COLORERS.get("wait" if column.startswith("wait_") else column)
     if colorer is None:
         return padded
     return _paint(padded, colorer(raw), enable=enable)
 
 
-def table_output(
-    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
-    wide: bool,
-    include_avail: bool = False,
-    include_wait: bool = True,
+def _render_width_capped_table(
+    columns: Sequence[str],
+    labels: Dict[str, str],
+    display_records: Sequence[Dict[str, str]],
     *,
-    tty: Optional[bool] = None,
-    term_width: Optional[int] = None,
-    show_gpu: bool = False,
-    show_cpu: bool = False,
+    color: bool,
+    term_width: int,
+    wrap_columns: Sequence[str] = (),
+    empty_message: str = "(no matching allocations)",
 ) -> str:
-    records = [
-        row.to_dict(
-            wide=wide,
-            include_avail=include_avail,
-            include_wait=include_wait,
-            request=request,
-            show_gpu=show_gpu,
-            show_cpu=show_cpu,
-        )
-        for row, request in pairs
-    ]
-    all_columns = (
-        list(records[0].keys())
-        if records
-        else _empty_columns(wide, include_avail, include_wait)
-    )
-    columns = _select_table_columns(all_columns, wide, include_avail)
+    """Render a table whose physical lines never exceed `term_width`.
 
-    if tty is None:
-        tty = sys.stdout.isatty()
-    if term_width is None:
-        term_width = shutil.get_terminal_size((120, 24)).columns
+    The caller decides which columns are good first-pass wrap targets. If the
+    result still does not fit, all columns may wrap down to their labels; if
+    even the labels cannot fit, the output falls back to stacked key/value
+    records.
+    """
     term_width = max(1, int(term_width))
-    color = _color_enabled(tty)
-    compact = _compact_table_enabled(wide, include_avail, tty)
-    if compact:
-        columns = [c for c in columns if c not in _COMPACT_TABLE_HIDE]
-    labels = {column: _display_column_label(column, compact) for column in columns}
-    display_records = [
-        {
-            column: _display_cell_value(column, record.get(column, ""), compact)
-            for column in columns
-        }
-        for record in records
-    ]
-    if tty and columns and _minimum_label_width(columns, labels) > term_width:
+    columns = list(columns)
+    if columns and _minimum_label_width(columns, labels) > term_width:
         return _render_stacked_table(
-            columns, labels, display_records, color=color, term_width=term_width
+            columns,
+            labels,
+            display_records,
+            color=color,
+            term_width=term_width,
+            empty_message=empty_message,
         )
-
-    # Wrap list-style columns (free_cpus, free_gpus) onto continuation lines
-    # when we're rendering for a tty. The wrap helper is content-agnostic —
-    # it only splits on ", " — so it handles both columns identically.
-    wrap_candidates = ("free_cpus", "free_gpus")
-    wrap_targets: List[str] = []
-    wrap_budgets: Dict[str, int] = {}
-    if compact:
-        for col in columns:
-            if col in _COMPACT_TABLE_WRAP and any(
-                record.get(col) for record in display_records
-            ):
-                wrap_targets.append(col)
-    elif include_avail and tty and columns:
-        for col in wrap_candidates:
-            if col in columns and any(record.get(col) for record in display_records):
-                wrap_targets.append(col)
 
     base_widths = {
         column: max(
@@ -4439,129 +4477,196 @@ def table_output(
         )
         for column in columns
     }
-
+    wrap_set = set(wrap_columns)
+    configured_wrap_targets = [
+        col for col in columns
+        if col in wrap_set and any(record.get(col) for record in display_records)
+    ]
+    multi_item_targets = [
+        col for col in configured_wrap_targets
+        if any(_table_cell_item_count(record.get(col, "")) > 1
+               for record in display_records)
+    ]
+    secondary_targets = [
+        col for col in configured_wrap_targets if col not in multi_item_targets
+    ]
+    wrap_targets: List[str] = []
     wrapped_cells: Dict[str, List[List[str]]] = {}
-    if compact and wrap_targets:
+
+    def apply_wrap(
+        targets: Sequence[str],
+        force_break: bool = False,
+    ) -> Dict[str, int]:
+        wrapped_cells.clear()
+        if not targets:
+            return dict(base_widths)
         budgets = _allocate_wrap_budgets(
-            columns, labels, base_widths, wrap_targets, term_width
+            columns, labels, base_widths, targets, term_width
         )
-        wrap_budgets.update(budgets)
-        for col in wrap_targets:
+        for col in targets:
+            budget = max(1, budgets[col])
             wrapped_cells[col] = [
-                _wrap_table_cell(col, r.get(col, ""), budgets[col])
-                for r in display_records
+                _wrap_table_cell(
+                    col,
+                    record.get(col, ""),
+                    budget,
+                    force_break=force_break,
+                )
+                for record in display_records
             ]
-        widths = dict(base_widths)
-        for col in wrap_targets:
-            widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
-    elif wrap_targets:
-        non_wrap_cell_width = sum(
-            base_widths[c] for c in columns if c not in wrap_targets
-        )
-        separator_chars = 2 * (len(columns) - 1) if len(columns) > 1 else 0
-        available = max(40, term_width - non_wrap_cell_width - separator_chars)
-        natural = {col: base_widths[col] for col in wrap_targets}
-        total_natural = sum(natural.values()) or 1
-        budgets: Dict[str, int] = {}
-        for col in wrap_targets:
-            share = max(20, int(available * natural[col] / total_natural))
-            budgets[col] = min(natural[col], share) if natural[col] > 0 else 20
-        wrap_budgets.update(budgets)
-        for col in wrap_targets:
-            wrapped_cells[col] = [
-                _wrap_gpu_list(r.get(col, ""), budgets[col]) for r in display_records
-            ]
-        widths = dict(base_widths)
-        for col in wrap_targets:
-            widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
-    else:
-        widths = base_widths
+        next_widths = dict(base_widths)
+        for col in targets:
+            next_widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
+        return next_widths
 
-    if tty and columns and _table_line_width(columns, widths) > term_width:
-        # First enforce the current wrap budgets with hard breaks. This only
-        # kicks in when a single long token would otherwise overflow the row.
+    def extend_wrap_targets(targets: Sequence[str]) -> None:
+        for col in targets:
+            if col not in wrap_targets:
+                wrap_targets.append(col)
+
+    widths = dict(base_widths)
+    if columns and _table_line_width(columns, widths) > term_width:
+        extend_wrap_targets(multi_item_targets)
+        widths = apply_wrap(wrap_targets)
+
+    if columns and _table_line_width(columns, widths) > term_width:
+        extend_wrap_targets(secondary_targets)
+        widths = apply_wrap(wrap_targets)
+
+    if columns and _table_line_width(columns, widths) > term_width:
         if wrap_targets:
-            for col in wrap_targets:
-                budget = max(1, wrap_budgets.get(col, widths[col]))
-                wrapped_cells[col] = [
-                    _wrap_table_cell(
-                        col, r.get(col, ""), budget, force_break=True
-                    )
-                    for r in display_records
-                ]
-            widths = dict(base_widths)
-            for col in wrap_targets:
-                widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
+            widths = apply_wrap(wrap_targets, force_break=True)
 
-        # If fixed identity columns are still too wide, wrap them down to
-        # their labels. The table header remains intact because impossible
-        # label-only widths were handled by the stacked fallback above.
         if _table_line_width(columns, widths) > term_width:
             for col in columns:
                 if col in wrap_targets or base_widths[col] <= len(labels[col]):
                     continue
                 wrap_targets.append(col)
-            wrap_budgets = _allocate_wrap_budgets(
-                columns, labels, base_widths, wrap_targets, term_width
-            )
-            for col in wrap_targets:
-                wrapped_cells[col] = [
-                    _wrap_table_cell(
-                        col, r.get(col, ""), wrap_budgets[col],
-                        force_break=True,
-                    )
-                    for r in display_records
-                ]
-            widths = dict(base_widths)
-            for col in wrap_targets:
-                widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
+            widths = apply_wrap(wrap_targets, force_break=True)
 
         if _table_line_width(columns, widths) > term_width:
             return _render_stacked_table(
-                columns, labels, display_records, color=color, term_width=term_width
+                columns,
+                labels,
+                display_records,
+                color=color,
+                term_width=term_width,
+                empty_message=empty_message,
             )
 
     header = "  ".join(labels[column].ljust(widths[column]) for column in columns)
     rule = "  ".join("-" * widths[column] for column in columns)
     lines = [header, rule]
-    # When any record wraps onto continuation lines, separate records with a
-    # blank line so the eye can tell where one row ends and the next begins.
     if wrap_targets:
         max_lines_per_record = [
             max((len(wrapped_cells[col][i]) for col in wrap_targets), default=1) or 1
-            for i in range(len(records))
+            for i in range(len(display_records))
         ]
     else:
-        max_lines_per_record = [1] * len(records)
+        max_lines_per_record = [1] * len(display_records)
     separate_records = bool(wrap_targets and any(n > 1 for n in max_lines_per_record))
-    for index, record in enumerate(records):
+    for index, record in enumerate(display_records):
         if separate_records and index > 0:
             lines.append("")
         if wrap_targets:
-            max_lines = max_lines_per_record[index]
-            for li in range(max_lines):
+            for line_index in range(max_lines_per_record[index]):
                 parts: List[str] = []
-                for c in columns:
-                    if c in wrap_targets:
-                        cell_lines = wrapped_cells[c][index] or [""]
-                        text = cell_lines[li] if li < len(cell_lines) else ""
+                for column in columns:
+                    if column in wrap_targets:
+                        cell_lines = wrapped_cells[column][index] or [""]
+                        text = (
+                            cell_lines[line_index]
+                            if line_index < len(cell_lines)
+                            else ""
+                        )
                     else:
-                        text = display_records[index].get(c, "") if li == 0 else ""
-                    parts.append(_styled_cell(c, text.ljust(widths[c]), text, color))
+                        text = record.get(column, "") if line_index == 0 else ""
+                    parts.append(
+                        _styled_cell(column, text.ljust(widths[column]), text, color)
+                    )
                 lines.append("  ".join(parts))
         else:
-            def cell(c: str) -> str:
-                value = display_records[index].get(c, "")
-                return _styled_cell(c, value.ljust(widths[c]), value, color)
-            lines.append("  ".join(cell(c) for c in columns))
-    if not records:
-        lines.append("(no matching allocations)")
+            lines.append(
+                "  ".join(
+                    _styled_cell(
+                        column,
+                        record.get(column, "").ljust(widths[column]),
+                        record.get(column, ""),
+                        color,
+                    )
+                    for column in columns
+                )
+            )
+    if not display_records:
+        lines.append(empty_message)
     return "\n".join(lines)
+
+
+def table_output(
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
+    include_details: bool = False,
+    include_avail: bool = False,
+    include_wait: bool = True,
+    *,
+    tty: Optional[bool] = None,
+    term_width: Optional[int] = None,
+    show_gpu: bool = False,
+    show_cpu: bool = False,
+) -> str:
+    records = [
+        row.to_dict(
+            include_details=include_details,
+            include_avail=include_avail,
+            include_wait=include_wait,
+            request=request,
+            show_gpu=show_gpu,
+            show_cpu=show_cpu,
+        )
+        for row, request in pairs
+    ]
+    all_columns = (
+        list(records[0].keys())
+        if records
+        else _empty_columns(include_details, include_avail, include_wait)
+    )
+    columns = _select_table_columns(all_columns, include_avail)
+
+    if tty is None:
+        tty = sys.stdout.isatty()
+    if term_width is None:
+        term_width = shutil.get_terminal_size((120, 24)).columns
+    term_width = max(1, int(term_width))
+    color = _color_enabled(tty)
+    compact = _compact_table_enabled(include_avail)
+    if compact:
+        columns = [c for c in columns if c not in _COMPACT_TABLE_HIDE]
+    labels = {column: _display_column_label(column, compact) for column in columns}
+    display_records = [
+        {
+            column: _display_cell_value(column, record.get(column, ""), compact)
+            for column in columns
+        }
+        for record in records
+    ]
+    wrap_targets: Sequence[str]
+    if compact:
+        wrap_targets = tuple(col for col in columns if col in _COMPACT_TABLE_WRAP)
+    else:
+        wrap_targets = ("tags", "free_cpus", "free_gpus", "note")
+    return _render_width_capped_table(
+        columns,
+        labels,
+        display_records,
+        color=color,
+        term_width=term_width,
+        wrap_columns=wrap_targets,
+        empty_message="(no matching allocations)",
+    )
 
 
 def csv_output(
     pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
-    wide: bool,
+    include_details: bool = True,
     include_avail: bool = False,
     include_wait: bool = True,
     *,
@@ -4570,7 +4675,7 @@ def csv_output(
 ) -> str:
     records = [
         row.to_dict(
-            wide=wide,
+            include_details=include_details,
             include_avail=include_avail,
             include_wait=include_wait,
             request=request,
@@ -4582,7 +4687,7 @@ def csv_output(
     columns = (
         list(records[0].keys())
         if records
-        else _empty_columns(wide, include_avail, include_wait)
+        else _empty_columns(include_details, include_avail, include_wait)
     )
     stream = StringIO()
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
@@ -4593,7 +4698,7 @@ def csv_output(
 
 def json_output(
     pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
-    wide: bool,
+    include_details: bool = True,
     include_avail: bool = False,
     include_wait: bool = True,
     include_help: bool = False,
@@ -4603,7 +4708,7 @@ def json_output(
 ) -> str:
     records = [
         row.to_dict(
-            wide=wide,
+            include_details=include_details,
             include_avail=include_avail,
             include_wait=include_wait,
             request=request,
@@ -4625,7 +4730,7 @@ def json_output(
                 "cluster": "SLURM cluster name (e.g. notchpeak, granite)",
                 "account": "account to pass via --account",
                 "qos": "QOS to pass via --qos; partition is usually the same name",
-                "partition": "partition name (with --wide); pass via --partition",
+                "partition": "partition name; pass via --partition",
                 "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
                 "request": "resource request: '<gpu>:<count>@<wall>[,<mem>]' or "
                         "'cpu:<cpus>@<wall>[,<mem>]'. The 'wait' value on this row "
@@ -4658,7 +4763,7 @@ def json_output(
                         "when a request is active, only nodes large enough to "
                         "host the request contribute, and only matching GPU "
                         "types are listed",
-                "gpu_types": "GPU types exposed by the partition (with --wide)",
+                "gpu_types": "GPU types exposed by the partition",
                 "gpu": "the row's GPU type resolved from the resource request's "
                         "gpu_type (e.g. request 'h100' resolves to row 'h100nvl'). "
                         "Shown when an active resource request carries a gpu_type.",
@@ -4667,7 +4772,7 @@ def json_output(
                 "cpu": "the row's CPU arch resolved from the resource request's "
                         "arch atom (e.g. request '*genoa' resolves to row 'Genoa'). "
                         "Shown when an active resource request carries a CPU arch.",
-                "cpu_archs": "node arch/feature tags for the partition (with --wide)",
+                "cpu_archs": "node arch/feature tags for the partition",
                 "cpu_vendor": "derived from cpu_archs: 'intel', 'amd', "
                         "'mixed', or '' when unknown. Sort key 'vendor' ranks "
                         "intel<amd<mixed<unknown.",
@@ -4893,6 +4998,7 @@ def pivot_output(
     pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     *,
     tty: Optional[bool] = None,
+    term_width: Optional[int] = None,
 ) -> str:
     """Render a (cluster, account, qos) × request pivot table of wait times.
 
@@ -4932,37 +5038,42 @@ def pivot_output(
             [cluster, account, qos]
             + [cells.get((key, s), "?") for s in request_labels]
         )
-    widths = [
-        max(len(headers[i]), max((len(r[i]) for r in body), default=0))
-        for i in range(len(headers))
-    ]
     if tty is None:
         tty = sys.stdout.isatty()
+    if term_width is None:
+        term_width = shutil.get_terminal_size((120, 24)).columns
     color = _color_enabled(tty)
-    n_id_cols = 3  # cluster, account, qos
-    rule = "  ".join("-" * widths[i] for i in range(len(headers)))
-
-    def styled_header(i: int) -> str:
-        return headers[i].ljust(widths[i])
-
-    def styled_body(row_cells: List[str]) -> str:
-        out = []
-        for i, raw in enumerate(row_cells):
-            cell = raw.ljust(widths[i])
-            # Request columns carry wait values; reuse the table renderer's
-            # column-semantic dispatch by labelling them as "wait".
-            column = "wait" if i >= n_id_cols else ""
-            out.append(_styled_cell(column, cell, raw, color))
-        return "  ".join(out)
-
-    lines = ["  ".join(styled_header(i) for i in range(len(headers))), rule]
-    for r in body:
-        lines.append(styled_body(r))
+    columns = ["cluster", "account", "qos"] + [
+        f"wait_{i}" for i in range(len(request_headers))
+    ]
+    labels = {column: headers[i] for i, column in enumerate(columns)}
+    display_records = [
+        {
+            column: row_cells[i] if i < len(row_cells) else ""
+            for i, column in enumerate(columns)
+        }
+        for row_cells in body
+    ]
+    lines = _render_width_capped_table(
+        columns,
+        labels,
+        display_records,
+        color=color,
+        term_width=max(1, int(term_width)),
+        wrap_columns=columns,
+        empty_message="(no matching allocations)",
+    ).splitlines()
     legend = "(cells: predicted queue wait via sbatch --test-only; ? = unknown)"
-    if color:
-        legend = _paint(legend, _ANSI_DIM, enable=color)
     lines.append("")
-    lines.append(legend)
+    legend_lines = textwrap.wrap(
+        legend,
+        width=max(1, int(term_width)),
+        break_long_words=True,
+        break_on_hyphens=False,
+    ) or [legend]
+    if color:
+        legend_lines = [_paint(line, _ANSI_DIM, enable=color) for line in legend_lines]
+    lines.extend(legend_lines)
     return "\n".join(lines)
 
 
@@ -5116,8 +5227,8 @@ def run_self_test() -> int:
     assert "gpu" in row.tags
     assert "default" in row.tags
     assert "cluster" in row.to_dict()
-    assert csv_output([(row, None)], False).startswith("cluster,account,qos")
-    assert json.loads(json_output([(row, None)], False))[0]["account"] == "soc-gpu-np"
+    assert csv_output([(row, None)]).startswith("cluster,account,qos")
+    assert json.loads(json_output([(row, None)]))[0]["account"] == "soc-gpu-np"
 
     cluster, partition, bucket = parse_gres_line(
         "notchpeak|notchpeak-gpu|gpu:a100:4,gpu:2080ti:8(IDX:0-7)"
@@ -5145,6 +5256,9 @@ def run_self_test() -> int:
     assert "nvidia" in a100_line and "ampere" in a100_line, a100_line
     # SM rendered bare (the column header says SM); FREE shows free/total GPUs.
     assert " 80 " in a100_line and "3/4" in a100_line, a100_line
+    narrow_gpu_summary = format_gpu_summary(fake_avail, term_width=40)
+    assert max(len(line) for line in narrow_gpu_summary.splitlines()) <= 40, \
+        narrow_gpu_summary
 
     fc_row = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
@@ -5155,6 +5269,9 @@ def run_self_test() -> int:
     assert resolve_row_gpu_types(fc_row, fake_pgpus) == ("h100nvl",)
     # Verify table_output handles empty results without crashing.
     assert "(no matching allocations)" in table_output([], False)
+    compact_alloc_table = table_output([(row, None)], tty=False, term_width=40)
+    assert max(len(line) for line in compact_alloc_table.splitlines()) <= 40, \
+        compact_alloc_table
 
     # Case-insensitive --format and --sort.
     assert _lower_choice("JSON") == "json"
@@ -5421,6 +5538,11 @@ def run_self_test() -> int:
     assert nt_line.index("Genoa 96c×1") < nt_line.index("Genoa 96c×2"), nt_line
     assert "; " in nt_line, nt_line
     assert "×5" in nt_line and "×3" in nt_line
+    narrow_cpu_summary = format_cpu_summary(
+        {"granite": {"granite": {"gen", "chpc"}}}, nt_avail, term_width=40
+    )
+    assert max(len(line) for line in narrow_cpu_summary.splitlines()) <= 40, \
+        narrow_cpu_summary
 
     # _render_simple_table emits header + rule + rows, all width-aligned.
     rendered_table = _render_simple_table(
@@ -5442,6 +5564,36 @@ def run_self_test() -> int:
         "verylongtoken:99/99,",
         "x:1/2",
     ]
+    assert _split_table_cell_items("a:1/2, b:0/4; c:3/3") == [
+        "a:1/2,", "b:0/4;", "c:3/3",
+    ]
+    assert _split_table_cell_items("gpu:a100:4(IDX:0,2); gpu:h100:8") == [
+        "gpu:a100:4(IDX:0,2);", "gpu:h100:8",
+    ]
+    wrapped_hosts = _wrap_table_cell(
+        "hosts",
+        "Genoa 96c×1 746G ×5; Genoa 96c×2 1.5T ×3",
+        22,
+    )
+    assert wrapped_hosts == ["Genoa 96c×1 746G ×5;", "Genoa 96c×2 1.5T ×3"], \
+        wrapped_hosts
+
+    # Width-capped rendering wraps multi-item columns before identity columns.
+    priority_table = _render_width_capped_table(
+        ["id", "items"],
+        {"id": "ID", "items": "ITEMS"},
+        [{
+            "id": "very-long-identity",
+            "items": "alpha, beta, gamma, delta",
+        }],
+        color=False,
+        term_width=32,
+        wrap_columns=("id", "items"),
+    )
+    assert max(len(line) for line in priority_table.splitlines()) <= 32, \
+        priority_table
+    assert priority_table.count("very-long-identity") == 1, priority_table
+    assert "ID:" not in priority_table, priority_table
 
     # table_output wraps compact TTY cells so rows fit normal terminals.
     avail_row = AllocationRow(
@@ -5460,7 +5612,7 @@ def run_self_test() -> int:
     import re as _re
     _ansi = _re.compile(r"\x1b\[[0-9;]*m")
     rendered = table_output(
-        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+        [(avail_row, None)], include_avail=True, tty=True, term_width=80
     )
     rendered_lines = rendered.splitlines()
     # Header + rule + first data line + at least one indented continuation.
@@ -5470,13 +5622,14 @@ def run_self_test() -> int:
     assert "CPU_VENDOR" not in rendered_lines[0]
     assert "def" in rendered and "gpu,default" not in rendered
     assert "a100" in rendered and "h200" in rendered, rendered
-    # When piped (tty=False) we get a single physical line per row.
+    # Even when piped with explicit table output, physical lines are capped.
     rendered_piped = table_output(
-        [(avail_row, None)], wide=False, include_avail=True, tty=False, term_width=60
+        [(avail_row, None)], include_avail=True, tty=False, term_width=60
     )
-    assert len(rendered_piped.splitlines()) == 3  # header + rule + one row
-    assert "TAGS" in rendered_piped.splitlines()[0]
-    assert "CPU_VENDOR" in rendered_piped.splitlines()[0]
+    assert max(len(_ansi.sub("", line)) for line in rendered_piped.splitlines()) <= 60, \
+        rendered_piped
+    assert "FLAGS:" in rendered_piped
+    assert "CPU_VENDOR" not in rendered_piped
 
     # free_cpus also wraps when its content is long and we're rendering for tty.
     wide_cpu_row = AllocationRow(
@@ -5491,7 +5644,7 @@ def run_self_test() -> int:
     )
     wide_cpu_row.free_gpus = ""
     rendered_cpu = table_output(
-        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+        [(wide_cpu_row, None)], include_avail=True, tty=True, term_width=80
     )
     rendered_cpu_lines = rendered_cpu.splitlines()
     assert len(rendered_cpu_lines) >= 4, rendered_cpu
@@ -5514,21 +5667,25 @@ def run_self_test() -> int:
     fc_row.free_cpus = "32/128"
     fc_row.free_gpus = "a100:1/4"
     rendered_fc = table_output(
-        [(fc_row, None)], wide=False, include_avail=True, tty=True, term_width=80
+        [(fc_row, None)], include_avail=True, tty=True, term_width=80
     )
     assert "fc" in rendered_fc and "freecycle" not in rendered_fc, rendered_fc
 
     # Compact column set with availability keeps tags visible because
     # freecycle/guest are decision-critical, but hides score/debug columns.
-    full_cols = list(avail_row.to_dict(wide=False, include_avail=True).keys())
-    compact = _select_table_columns(full_cols, wide=False, include_avail=True)
+    full_cols = list(avail_row.to_dict(include_avail=True).keys())
+    compact = _select_table_columns(full_cols, include_avail=True)
     assert "priority" not in compact and "fairshare" not in compact
     assert "usage" not in compact and "default" not in compact
     assert "tags" in compact
     assert "cluster" in compact and "free_gpus" in compact
-    # --wide brings them back.
-    wide_cols = _select_table_columns(full_cols, wide=True, include_avail=True)
-    assert "priority" in wide_cols and "tags" in wide_cols
+    detail_cols = list(avail_row.to_dict(include_details=True, include_avail=True).keys())
+    assert "partition" in detail_cols and "gpu_types" in detail_cols
+    assert "cpu_archs" in detail_cols and "priority" in detail_cols
+    csv_header = csv_output([(avail_row, None)], include_avail=True).splitlines()[0]
+    assert "partition" in csv_header and "gpu_types" in csv_header
+    json_record = json.loads(json_output([(avail_row, None)], include_avail=True))[0]
+    assert "partition" in json_record and "cpu_archs" in json_record
 
     # Two wrapping records must be separated by a blank line.
     second = AllocationRow(
@@ -5541,7 +5698,6 @@ def run_self_test() -> int:
     second.free_gpus = avail_row.free_gpus  # long, will wrap
     rendered_two = table_output(
         [(avail_row, None), (second, None)],
-        wide=False,
         include_avail=True,
         tty=True,
         term_width=60,
@@ -6104,7 +6260,7 @@ def run_self_test() -> int:
     decoy.cpu_features = ("geforce",)
     assert _row_has_premium_cpu(decoy) is False
 
-    payload = json.loads(json_output(prem_pairs, wide=True, include_help=True))
+    payload = json.loads(json_output(prem_pairs, include_help=True))
     assert isinstance(payload, dict)
     assert set(payload.keys()) == {"_help", "rows"}
     assert payload["_help"]["premium_gpus"] == list(PREMIUM_GPUS)
@@ -6112,7 +6268,7 @@ def run_self_test() -> int:
     assert "fields" in payload["_help"]
     assert "request" in payload["_help"]["fields"]
     assert len(payload["rows"]) == len(prem_pairs)
-    assert isinstance(json.loads(json_output(prem_pairs, wide=False)), list)
+    assert isinstance(json.loads(json_output(prem_pairs, include_details=False)), list)
 
     # parse_resource_spec round-trip + label format.
     sh = parse_resource_spec("a100:4,mem=32G,time=24h")
@@ -6451,9 +6607,10 @@ def run_self_test() -> int:
     for removed in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
                     "--guest", "--no-guest", "--avail", "--cpus", "--cores",
                     "--gpu-type", "--cpu-type", "--gpus", "--request", "--wait-for",
-                    "--tier", "--list-tiers"):
+                    "--tier", "--list-tiers", "--wide"):
         assert not re.search(rf"{re.escape(removed)}\b(?!-)", rendered), \
             f"removed flag {removed!r} leaked into --help"
+        assert_parse_exits(parser_fmt, [removed])
     # Surviving flags ARE in help.
     for visible in ("--no-availability", "--show-all", "--freecycle-only",
                     "--exclude-freecycle", "--guest-only", "--exclude-guest",
@@ -6583,6 +6740,12 @@ def run_self_test() -> int:
     # Body row shows the pivot row with three wait cells (now / 1h / ?).
     assert any("now" in line and "1h" in line and "?" in line for line in pivot_lines[2:]), \
         pivot_text
+    narrow_pivot = pivot_output(
+        [(pivot_row, s_a1), (pivot_row, s_a4), (pivot_row, s_h1)],
+        tty=False,
+        term_width=50,
+    )
+    assert max(len(line) for line in narrow_pivot.splitlines()) <= 50, narrow_pivot
     # Empty input handled.
     assert pivot_output([]) == "(no matching allocations)"
     # No-request pairs (no-wait mode) produce the same sentinel.
@@ -6699,17 +6862,19 @@ def run_self_test() -> int:
 
     # JSON output stability: include_help=False yields a bare array (consumed
     # via --no-json-help); include_help=True still wraps with _help + rows.
-    bare = json.loads(json_output([(pivot_row, s_a1)], wide=False))
+    bare = json.loads(json_output([(pivot_row, s_a1)], include_details=False))
     assert isinstance(bare, list)
-    wrapped = json.loads(json_output([(pivot_row, s_a1)], wide=False, include_help=True))
+    wrapped = json.loads(json_output(
+        [(pivot_row, s_a1)], include_details=False, include_help=True
+    ))
     assert "_help" in wrapped and "rows" in wrapped
 
     # _resolve_output_format auto-switches when stdout is not a TTY (we
     # simulate with an explicit format set instead — the auto path is
     # exercised by main()).
     a = parser_fmt.parse_args(["--format", "csv"])
-    fmt, wide, auto = _resolve_output_format(a)
-    assert fmt == "csv" and wide is False and auto is False
+    fmt, auto = _resolve_output_format(a)
+    assert fmt == "csv" and auto is False
 
     # --pivot rejected with --format=json or --format=csv (validated in main()).
     # Just verify the parser accepts the combo so the runtime check is what
@@ -6832,24 +6997,22 @@ def run_self_test() -> int:
     return 0
 
 
-def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool, bool]:
-    """Pick (fmt, wide, auto_switched) for this run.
+def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool]:
+    """Pick (fmt, auto_switched) for this run.
 
-    Default: table on a TTY, json (wide) when stdout is piped or redirected.
+    Default: table on a TTY, json when stdout is piped or redirected.
     Explicit --format always wins. --sbatch keeps fmt=None unless the user
     set it, since sbatch's text/json branching is decided by main().
     """
     fmt = args.format
-    wide = args.wide
     auto_switched = False
     if fmt is None and not args.sbatch:
         if sys.stdout.isatty():
             fmt = "table"
         else:
             fmt = "json"
-            wide = True
             auto_switched = True
-    return (fmt or "table"), wide, auto_switched
+    return (fmt or "table"), auto_switched
 
 
 def _print_wait_check_banner(
@@ -6930,16 +7093,16 @@ def _maybe_emit_column_swap_notice(
     """Tell verbose users that availability data hid some columns.
 
     In table mode, when free_nodes/free_cpus/free_gpus are present and
-    --wide isn't set, _select_table_columns drops the columns listed in
-    _AVAIL_COMPACT_HIDE so the layout fits 100-col terminals.
+    _select_table_columns drops score columns so the layout fits normal
+    terminals.
     """
-    if args.wide or not include_avail:
+    if not include_avail:
         return
     hidden = ", ".join(_AVAIL_COMPACT_HIDE)
     _emit_verbose(
         args.verbose,
-        f"availability columns present — hiding {hidden} so free_* fits; "
-        "pass --wide to keep them.",
+        f"availability columns present — hiding {hidden} in table output; "
+        "use --format csv/json for the full field set.",
     )
 
 
@@ -6988,7 +7151,7 @@ def _maybe_emit_format_auto_notice(
         return
     print(
         "[chpc-allocs] stdout is piped or redirected — defaulting to JSON "
-        "(wide, with _help). Pass --format=table to keep table output, "
+        "(full detail, with _help). Pass --format=table to keep table output, "
         "--format=json to silence this notice, or --no-json-help to drop the legend.",
         file=sys.stderr,
     )
@@ -7027,6 +7190,10 @@ def main(argv: Sequence[str]) -> int:
             "--ntasks, and --time\n"
             "  example: chpc-allocs --sbatch a100:4 --quick"
         )
+    fmt, auto_switched = _resolve_output_format(args)
+    machine_details = fmt in ("csv", "json") and not (
+        args.best or args.sbatch or args.pivot
+    )
 
     if args.list_gpus or args.list_cpus:
         _maybe_emit_inventory_atom_notice(args, user_requests)
@@ -7062,21 +7229,21 @@ def main(argv: Sequence[str]) -> int:
     partition_avail = show_partition_availability() if include_avail else None
     # When availability data is loaded, derive the gpu-types map from it for
     # free (no second sinfo call) — needed by the 'premium' sort key so
-    # a100/h100/h200/a6000 rows surface even without --wide.
+    # a100/h100/h200/a6000 rows surface in compact table output.
     # Matches the request show_partition_gpus returns.
     if partition_avail is not None:
         partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
             for c, parts in partition_avail.items()
         }
-    elif args.wide:
+    elif machine_details:
         partition_gpus = show_partition_gpus()
     else:
         partition_gpus = {}
-    # cpu_vendor classification feeds the 'vendor' sort key, so fetch features
-    # unless we're skipping availability AND the user didn't ask for --wide.
+    # cpu_vendor classification feeds the 'vendor' sort key; CSV/JSON also use
+    # the full CPU feature set as part of the machine-readable schema.
     partition_features = (
-        {} if args.no_availability and not args.wide
+        {} if args.no_availability and not machine_details
         else show_partition_features()
     )
     attach_metadata(
@@ -7134,7 +7301,6 @@ def main(argv: Sequence[str]) -> int:
             file=sys.stderr,
         )
 
-    fmt, wide, auto_switched = _resolve_output_format(args)
     _maybe_emit_format_auto_notice(auto_switched, args.verbose, quiet=args.quiet)
 
     if args.best:
@@ -7154,13 +7320,15 @@ def main(argv: Sequence[str]) -> int:
         _maybe_emit_gpu_resolution_notice(pairs, args.verbose, quiet=args.quiet)
         if fmt == "csv":
             output = csv_output(
-                pairs, wide,
+                pairs,
+                include_details=True,
                 include_avail=include_avail, include_wait=include_wait,
                 show_gpu=show_gpu, show_cpu=show_cpu,
             )
         elif fmt == "json":
             output = json_output(
-                pairs, wide,
+                pairs,
+                include_details=True,
                 include_avail=include_avail, include_wait=include_wait,
                 include_help=not args.no_json_help,
                 show_gpu=show_gpu, show_cpu=show_cpu,
@@ -7168,7 +7336,8 @@ def main(argv: Sequence[str]) -> int:
         else:
             _maybe_emit_column_swap_notice(args, include_avail)
             output = table_output(
-                pairs, wide,
+                pairs,
+                include_details=False,
                 include_avail=include_avail, include_wait=include_wait,
                 show_gpu=show_gpu, show_cpu=show_cpu,
             )
