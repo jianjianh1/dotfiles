@@ -1206,6 +1206,8 @@ class PartitionAvail:
         # (arch_short, cores_per_socket, sockets, mem_gib) -> node count.
         # arch_short is "" when no feature classifies; mem_gib is mem_mb//1024.
         self.node_types: Dict[Tuple[str, int, int, int], int] = {}
+        # (arch_short, cores_per_socket) -> [cpus_free, cpus_total]
+        self.cpus_by_shape: Dict[Tuple[str, int], List[int]] = {}
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
@@ -1214,6 +1216,11 @@ class PartitionAvail:
 
     def add_node_type(self, sig: Tuple[str, int, int, int]) -> None:
         self.node_types[sig] = self.node_types.get(sig, 0) + 1
+
+    def add_cpu_shape(self, arch: str, cps: int, free: int, total: int) -> None:
+        slot = self.cpus_by_shape.setdefault((arch, cps), [0, 0])
+        slot[0] += free
+        slot[1] += total
 
 
 def _strip_partition_marker(name: str) -> str:
@@ -1308,6 +1315,12 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             continue
         arch_short = _node_arch_short(features_blob)
         bucket.add_node_type((arch_short, cps, sockets, mem_mb // 1024))
+        bucket.add_cpu_shape(
+            arch_short,
+            cps,
+            cpus_idle if free_node else 0,
+            cpus_total,
+        )
     return result
 
 
@@ -2516,6 +2529,7 @@ def attach_row_availability(
     feat_per_cluster = (partition_features or {}).get(row.cluster, {})
     nodes_free = nodes_total = 0
     cpus_free = cpus_total = 0
+    cpu_shapes: Dict[Tuple[str, int], List[int]] = {}
     gpus: Dict[str, List[int]] = {}
     seen_partitions: Set[str] = set()
     matched = False
@@ -2541,6 +2555,10 @@ def attach_row_availability(
         nodes_total += bucket.nodes_total
         cpus_free += bucket.cpus_free
         cpus_total += bucket.cpus_total
+        for shape_key, (sfree, stotal) in bucket.cpus_by_shape.items():
+            slot = cpu_shapes.setdefault(shape_key, [0, 0])
+            slot[0] += sfree
+            slot[1] += stotal
         for gtype, (free, total) in allowed_gpus:
             slot = gpus.setdefault(gtype, [0, 0])
             slot[0] += free
@@ -2548,7 +2566,17 @@ def attach_row_availability(
     if not matched:
         return
     row.free_nodes = f"{nodes_free}/{nodes_total}"
-    row.free_cpus = f"{cpus_free}/{cpus_total}"
+    if cpu_shapes:
+        ordered = sorted(
+            cpu_shapes.items(),
+            key=lambda kv: (-kv[1][1], kv[0][0] or "~", kv[0][1]),
+        )
+        row.free_cpus = ", ".join(
+            _format_cpu_shape_token(arch, cps, free, total)
+            for (arch, cps), (free, total) in ordered
+        )
+    else:
+        row.free_cpus = f"{cpus_free}/{cpus_total}"
     if gpus:
         row.free_gpus = ", ".join(
             f"{gtype}:{free}/{total}"
@@ -3060,6 +3088,16 @@ def _select_table_columns(all_columns: List[str], wide: bool, include_avail: boo
     return list(all_columns)
 
 
+def _format_cpu_shape_token(arch: str, cps: int, free: int, total: int) -> str:
+    """Render one CPU shape bucket as 'arch{cps}c:free/total'.
+
+    arch is the canonical short token (gen, skl, csl, …); falls back to '?'
+    when the node had no classifiable feature. cps is cores-per-socket.
+    """
+    label = arch or "?"
+    return f"{label}{cps}c:{free}/{total}"
+
+
 def _wrap_gpu_list(text: str, width: int) -> List[str]:
     """Wrap a 'gtype:f/t, gtype:f/t, ...' string to fit within `width` chars per line.
 
@@ -3199,16 +3237,15 @@ def table_output(
         term_width = shutil.get_terminal_size((120, 24)).columns
     color = _color_enabled(tty)
 
-    # Wrap free_gpus only when it's the rightmost column AND we're rendering for a tty.
-    wrap_target: Optional[str] = None
-    if (
-        include_avail
-        and columns
-        and columns[-1] == "free_gpus"
-        and tty
-        and any(record.get("free_gpus") for record in records)
-    ):
-        wrap_target = "free_gpus"
+    # Wrap list-style columns (free_cpus, free_gpus) onto continuation lines
+    # when we're rendering for a tty. The wrap helper is content-agnostic —
+    # it only splits on ", " — so it handles both columns identically.
+    wrap_candidates = ("free_cpus", "free_gpus")
+    wrap_targets: List[str] = []
+    if include_avail and tty and columns:
+        for col in wrap_candidates:
+            if col in columns and any(record.get(col) for record in records):
+                wrap_targets.append(col)
 
     base_widths = {
         column: max(
@@ -3218,21 +3255,33 @@ def table_output(
         for column in columns
     }
 
-    if wrap_target:
-        prefix_cols = columns[:-1]
-        prefix_width = sum(base_widths[c] for c in prefix_cols) + 2 * len(prefix_cols)
-        wrap_width = max(40, term_width - prefix_width)
-        wrapped_cells = [_wrap_gpu_list(r.get(wrap_target, ""), wrap_width) for r in records]
-        target_w = max(
-            len(wrap_target),
-            max(
-                (max(len(line) for line in cell) for cell in wrapped_cells if cell),
-                default=0,
-            ),
+    wrapped_cells: Dict[str, List[List[str]]] = {}
+    if wrap_targets:
+        non_wrap_cell_width = sum(
+            base_widths[c] for c in columns if c not in wrap_targets
         )
-        widths = {**base_widths, wrap_target: target_w}
+        separator_chars = 2 * (len(columns) - 1) if len(columns) > 1 else 0
+        available = max(40, term_width - non_wrap_cell_width - separator_chars)
+        natural = {col: base_widths[col] for col in wrap_targets}
+        total_natural = sum(natural.values()) or 1
+        budgets: Dict[str, int] = {}
+        for col in wrap_targets:
+            share = max(20, int(available * natural[col] / total_natural))
+            budgets[col] = min(natural[col], share) if natural[col] > 0 else 20
+        for col in wrap_targets:
+            wrapped_cells[col] = [
+                _wrap_gpu_list(r.get(col, ""), budgets[col]) for r in records
+            ]
+        widths = dict(base_widths)
+        for col in wrap_targets:
+            widths[col] = max(
+                len(col),
+                max(
+                    (max(len(line) for line in cell) for cell in wrapped_cells[col] if cell),
+                    default=0,
+                ),
+            )
     else:
-        wrapped_cells = None
         widths = base_widths
 
     header = "  ".join(column.upper().ljust(widths[column]) for column in columns)
@@ -3240,28 +3289,33 @@ def table_output(
     lines = [header, rule]
     # When any record wraps onto continuation lines, separate records with a
     # blank line so the eye can tell where one row ends and the next begins.
-    separate_records = bool(
-        wrap_target and any(len(cell) > 1 for cell in (wrapped_cells or []))
-    )
+    if wrap_targets:
+        max_lines_per_record = [
+            max((len(wrapped_cells[col][i]) for col in wrap_targets), default=1) or 1
+            for i in range(len(records))
+        ]
+    else:
+        max_lines_per_record = [1] * len(records)
+    separate_records = bool(wrap_targets and any(n > 1 for n in max_lines_per_record))
     for index, record in enumerate(records):
         if separate_records and index > 0:
             lines.append("")
-        def cell(c: str) -> str:
-            value = record.get(c, "")
-            return _styled_cell(c, value.ljust(widths[c]), value, color)
-
-        if wrap_target:
-            cell_lines = wrapped_cells[index] or [""]
-            prefix_cols = columns[:-1]
-            prefix = "  ".join(cell(c) for c in prefix_cols)
-            sep = "  " if prefix else ""
-            lines.append(prefix + sep + cell_lines[0])
-            indent = " " * (
-                sum(widths[c] for c in prefix_cols) + 2 * len(prefix_cols)
-            )
-            for cont in cell_lines[1:]:
-                lines.append(indent + cont)
+        if wrap_targets:
+            max_lines = max_lines_per_record[index]
+            for li in range(max_lines):
+                parts: List[str] = []
+                for c in columns:
+                    if c in wrap_targets:
+                        cell_lines = wrapped_cells[c][index] or [""]
+                        text = cell_lines[li] if li < len(cell_lines) else ""
+                    else:
+                        text = record.get(c, "") if li == 0 else ""
+                    parts.append(_styled_cell(c, text.ljust(widths[c]), text, color))
+                lines.append("  ".join(parts))
         else:
+            def cell(c: str) -> str:
+                value = record.get(c, "")
+                return _styled_cell(c, value.ljust(widths[c]), value, color)
             lines.append("  ".join(cell(c) for c in columns))
     if not records:
         lines.append("(no matching allocations)")
@@ -3805,17 +3859,48 @@ def run_self_test() -> int:
     bucket.cpus_total = 128
     bucket.cpus_free = 32
     bucket.add_gpu("h100nvl", 4, 16)
+    bucket.add_cpu_shape("gen", 96, 32, 128)
     fc_row3 = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
     )
     attach_row_availability(fc_row3, avail)
     assert fc_row3.free_nodes == "1/2"
-    assert fc_row3.free_cpus == "32/128"
+    assert fc_row3.free_cpus == "gen96c:32/128"
     assert fc_row3.free_gpus == "h100nvl:4/16"
     record = fc_row3.to_dict(include_avail=True)
     assert record["free_nodes"] == "1/2"
     assert record["free_gpus"] == "h100nvl:4/16"
     assert "free_nodes" not in fc_row3.to_dict()  # opt-in only
+
+    # Per-shape CPU formatter and ordering — biggest pool first, '?' last.
+    assert _format_cpu_shape_token("gen", 96, 192, 384) == "gen96c:192/384"
+    assert _format_cpu_shape_token("", 64, 0, 64) == "?64c:0/64"
+    multi_avail = {"notchpeak": {"notchpeak-shared-short": PartitionAvail()}}
+    mb = multi_avail["notchpeak"]["notchpeak-shared-short"]
+    mb.nodes_total = 6
+    mb.nodes_free = 4
+    mb.cpus_total = 512
+    mb.cpus_free = 224
+    mb.add_cpu_shape("skl", 16, 32, 128)
+    mb.add_cpu_shape("gen", 96, 192, 384)
+    mb.add_cpu_shape("", 32, 0, 0)  # empty shape ignored by sort but still appears
+    multi_row = AllocationRow(
+        "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
+    )
+    attach_row_availability(multi_row, multi_avail)
+    assert multi_row.free_cpus.startswith("gen96c:192/384"), multi_row.free_cpus
+    assert "skl16c:32/128" in multi_row.free_cpus, multi_row.free_cpus
+
+    # Fallback: when bucket has no per-shape data, the legacy F/T form is used.
+    fb_avail = {"granite": {"granite": PartitionAvail()}}
+    fb = fb_avail["granite"]["granite"]
+    fb.nodes_total = 1
+    fb.nodes_free = 1
+    fb.cpus_total = 96
+    fb.cpus_free = 48
+    fb_row = AllocationRow("granite", "sadayappan", "me", "", "granite", "")
+    attach_row_availability(fb_row, fb_avail)
+    assert fb_row.free_cpus == "48/96", fb_row.free_cpus
 
     # CPU summary: GPU partitions are filtered out when partition_avail
     # carries gpus, and a CPU-only partition surfaces availability columns.
@@ -3913,13 +3998,38 @@ def run_self_test() -> int:
     assert len(rendered_lines) >= 4, rendered
     continuation = rendered_lines[3]
     assert continuation.startswith(" "), repr(continuation)
-    assert continuation.lstrip().startswith(("a100", "h100", "l40s", "rtx", "h200")), \
-        repr(continuation)
+    assert "a100" in continuation or "h100" in continuation \
+        or "l40s" in continuation or "rtx" in continuation \
+        or "h200" in continuation, repr(continuation)
     # When piped (tty=False) we get a single physical line per row.
     rendered_piped = table_output(
         [(avail_row, None)], wide=False, include_avail=True, tty=False, term_width=60
     )
     assert len(rendered_piped.splitlines()) == 3  # header + rule + one row
+
+    # free_cpus also wraps when its content is long and we're rendering for tty.
+    wide_cpu_row = AllocationRow(
+        "notchpeak", "soc-np", "me", "", "soc-np", "soc-np"
+    )
+    wide_cpu_row.qos_info = QOSInfo("soc-np")
+    wide_cpu_row.tags = classify(wide_cpu_row)
+    wide_cpu_row.free_nodes = "4/12"
+    wide_cpu_row.free_cpus = (
+        "gen96c:192/384, skl16c:32/128, csl20c:40/160, "
+        "icx32c:64/256, spr48c:96/384"
+    )
+    wide_cpu_row.free_gpus = ""
+    rendered_cpu = table_output(
+        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=60
+    )
+    rendered_cpu_lines = rendered_cpu.splitlines()
+    assert len(rendered_cpu_lines) >= 4, rendered_cpu
+    # At least one line after the data row should carry a CPU shape token.
+    assert any(
+        "gen96c" in ln or "skl16c" in ln or "csl20c" in ln
+            or "icx32c" in ln or "spr48c" in ln
+        for ln in rendered_cpu_lines[3:]
+    ), rendered_cpu
 
     # Compact column set: --avail (no --wide) hides priority/fairshare/usage/default/tags.
     full_cols = list(avail_row.to_dict(wide=False, include_avail=True).keys())
