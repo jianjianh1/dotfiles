@@ -966,7 +966,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     out.add_argument(
         "--legend", action="store_true",
-        help="After the table, print a short key for the GPUS/INVENTORY "
+        help="After the table, print a short key for the GPU/GPUS "
         "split, NOTE/FLAGS codes, and the CPUS request grammar. "
         "No effect on csv/json output (json carries _help instead). "
         "e.g. --legend a100:4",
@@ -2804,7 +2804,7 @@ def format_gpu_summary(
 
     Annotates each GRES token with vendor, NVIDIA generation, and SM compute
     capability via _classify_gpu_token. Unrecognized tokens still render —
-    GENERATION/SM cells are blank rather than absent.
+    GEN/SM cells are blank rather than absent.
 
     When `requests` is given, only (cluster, partition, gtype) rows accepted
     by some request's HardwareFilter are emitted: the partition's CPU
@@ -2827,9 +2827,9 @@ def format_gpu_summary(
             )
             if cpu_ok_requests is not None and not cpu_ok_requests:
                 continue
-            nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}n"
-            cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}c"
-            node_type_cell = _render_node_types_cell(bucket.node_types)
+            nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}"
+            cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}"
+            hosts_cell = _render_node_types_cell(bucket.node_types) or "—"
             for gtype, (free, total) in sorted(bucket.gpus.items()):
                 if cpu_ok_requests is not None and not any(
                     s.accepts_gpu_token(gtype) for s in cpu_ok_requests
@@ -2841,18 +2841,18 @@ def format_gpu_summary(
                 else:
                     gen, sm = cls
                     vendor = "nvidia"
-                    sm_cell = f"sm_{sm}"
+                    sm_cell = str(sm)
                 rows.append([
                     cluster, partition, vendor, gtype, gen, sm_cell,
-                    f"{free}/{total}", node_type_cell, nodes_ft, cpus_ft,
+                    f"{free}/{total}", hosts_cell, nodes_ft, cpus_ft,
                 ])
     if not rows:
         if requests:
             return "(no GPU resources match request)"
         return "(no GPU partitions found)"
     return _render_simple_table(
-        ["CLUSTER", "PARTITION", "VENDOR", "GTYPE", "GENERATION", "SM",
-         "GPUS_F/T", "NODE_TYPE", "NODES_F/T", "CPUS_F/T"],
+        ["CLUSTER", "PARTITION", "VENDOR", "KIND", "GEN", "SM",
+         "FREE", "HOSTS", "NODES", "CORES"],
         rows,
     )
 
@@ -2964,14 +2964,14 @@ def format_cpu_summary(
     """Render CPU-only partitions as a table.
 
     GPU partitions (those whose PartitionAvail.gpus is non-empty) are filtered
-    out so the listing complements --list-gpus. Architecture names are
-    long-form (e.g. "Cascade Lake", "Genoa") via CPU_ARCH_LONG.
+    out so the listing complements --list-gpus. KIND values are long-form
+    arch names (e.g. "Cascade Lake", "Genoa") via CPU_ARCH_LONG.
 
-    With partition_avail: emits NODE_TYPE (per-partition node-layout
-    signatures) and availability columns; ARCH is omitted because
-    each NODE_TYPE entry already carries its arch.
+    With partition_avail: KIND + HOSTS (per-partition node-layout signatures)
+    + availability columns NODES and CORES. KIND gives the quick label;
+    HOSTS shows the per-node breakdown.
 
-    Without partition_avail: emits an ARCH column and no filtering.
+    Without partition_avail: emits only KIND.
     """
     if not partition_features:
         return "(no partition features found)"
@@ -2994,28 +2994,25 @@ def format_cpu_summary(
                 continue
             vendor_short = classify_cpu_vendor(feats)
             vendor = _VENDOR_DISPLAY.get(vendor_short, "")
-            row = [cluster, partition, vendor]
+            kind_cell = _arch_display_list(feats) or "—"
+            row = [cluster, partition, vendor, kind_cell]
             if show_avail:
                 row.append(_render_node_types_cell(
                     avail_bucket.node_types if avail_bucket else {}
-                ))
+                ) or "—")
                 if avail_bucket is None:
                     row.extend(["", ""])
                 else:
-                    row.append(f"{avail_bucket.nodes_free}/{avail_bucket.nodes_total}n")
-                    row.append(f"{avail_bucket.cpus_free}/{avail_bucket.cpus_total}c")
-            else:
-                row.append(_arch_display_list(feats))
+                    row.append(f"{avail_bucket.nodes_free}/{avail_bucket.nodes_total}")
+                    row.append(f"{avail_bucket.cpus_free}/{avail_bucket.cpus_total}")
             rows.append(row)
     if not rows:
         if requests:
             return "(no CPU partitions match request)"
         return "(no CPU-only partitions found)"
-    headers = ["CLUSTER", "PARTITION", "VENDOR"]
+    headers = ["CLUSTER", "PARTITION", "VENDOR", "KIND"]
     if show_avail:
-        headers += ["NODE_TYPE", "NODES_F/T", "CPUS_F/T"]
-    else:
-        headers.append("ARCH")
+        headers += ["HOSTS", "NODES", "CORES"]
     return _render_simple_table(headers, rows)
 
 
@@ -4021,7 +4018,7 @@ _COMPACT_TABLE_LABELS = {
     "tags": "FLAGS",
     "free_nodes": "NODES",
     "free_cpus": "CPUS",
-    "free_gpus": "INVENTORY",
+    "free_gpus": "GPUS",
 }
 
 _COMPACT_TABLE_HIDE = {"cpu_vendor", "gpu_vendor"}
@@ -4077,8 +4074,8 @@ def render_legend() -> str:
     """
     return (
         "\nLegend\n"
-        "  GPUS column      GPU type for the requested resources (e.g. a40, a100)\n"
-        "  INVENTORY column free/total GPUs in the partition, by type\n"
+        "  GPU column       GPU type resolved for the request (e.g. a40, a100)\n"
+        "  GPUS column      free/total GPUs in the partition, by type\n"
         "  FLAGS:  fc=freecycle (preemptable)  guest=preemptable on idle owner nodes\n"
         "          res=reservation required   def=this is your default QOS\n"
         "  NOTE:   queue       a fitting node exists; you're waiting on priority/policy\n"
@@ -5134,12 +5131,17 @@ def run_self_test() -> int:
     fake_avail = {"notchpeak": {"notchpeak-gpu": PartitionAvail()}}
     fake_avail["notchpeak"]["notchpeak-gpu"].add_gpu("a100", 3, 4)
     summary = format_gpu_summary(fake_avail)
-    assert "CLUSTER" in summary and "GTYPE" in summary, summary
+    assert "CLUSTER" in summary and "KIND" in summary, summary
+    # New header order: VENDOR, KIND, GEN, SM, FREE, HOSTS, NODES, CORES.
+    assert "GEN" in summary and "SM" in summary, summary
+    assert "FREE" in summary and "HOSTS" in summary, summary
+    assert "NODES" in summary and "CORES" in summary, summary
     assert "notchpeak-gpu" in summary, summary
     # a100 row carries vendor/generation/SM annotations.
     a100_line = next(ln for ln in summary.splitlines() if "a100" in ln)
     assert "nvidia" in a100_line and "ampere" in a100_line, a100_line
-    assert "sm_80" in a100_line and "3/4" in a100_line, a100_line
+    # SM rendered bare (the column header says SM); FREE shows free/total GPUs.
+    assert " 80 " in a100_line and "3/4" in a100_line, a100_line
 
     fc_row = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
@@ -5375,8 +5377,11 @@ def run_self_test() -> int:
     cpu_summary_avail = format_cpu_summary(cpu_features, cpu_only_avail)
     assert "granite-gpu" not in cpu_summary_avail, cpu_summary_avail
     assert "notchpeak-shared-short" in cpu_summary_avail, cpu_summary_avail
-    assert "5/10n" in cpu_summary_avail and "80/200c" in cpu_summary_avail
-    assert "NODES_F/T" in cpu_summary_avail and "CPUS_F/T" in cpu_summary_avail
+    # Renamed cells drop the n/c suffixes; the column headers convey the unit.
+    assert "5/10" in cpu_summary_avail and "80/200" in cpu_summary_avail
+    assert "NODES" in cpu_summary_avail and "CORES" in cpu_summary_avail
+    # KIND now appears even in the avail mode (parallel to the GPU listing).
+    assert "KIND" in cpu_summary_avail and "HOSTS" in cpu_summary_avail
 
     # Memory + node-type formatters.
     assert _format_mem_gib(746) == "746G"
@@ -5390,7 +5395,7 @@ def run_self_test() -> int:
     assert _node_arch_short("chpc,c96,m768") == ""
     assert _node_arch_short("(null)") == ""
 
-    # NODE_TYPE column renders sorted by descending count, joined with '; '.
+    # HOSTS column renders sorted by descending count, joined with '; '.
     nt_avail = {"granite": {"granite": PartitionAvail()}}
     nb = nt_avail["granite"]["granite"]
     nb.nodes_total = 8
@@ -5404,7 +5409,7 @@ def run_self_test() -> int:
     nt_summary = format_cpu_summary(
         {"granite": {"granite": {"gen", "chpc"}}}, nt_avail
     )
-    assert "NODE_TYPE" in nt_summary, nt_summary
+    assert "HOSTS" in nt_summary, nt_summary
     nt_line = next(
         ln for ln in nt_summary.splitlines() if " granite " in f" {ln} "
     )
@@ -7022,7 +7027,7 @@ def main(argv: Sequence[str]) -> int:
     if args.list_gpus or args.list_cpus:
         _maybe_emit_inventory_atom_notice(args, user_requests)
     if args.list_gpus:
-        # Always fetch features so the inventory shows host CPU detail (NODE_TYPE
+        # Always fetch features so the inventory shows host CPU detail (HOSTS
         # cell, vendor classification) the same way --list-cpus does. Both paths
         # pay the same two sinfo calls.
         print(format_gpu_summary(
