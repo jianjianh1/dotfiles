@@ -3996,7 +3996,87 @@ def render_legend() -> str:
     )
 
 
-def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
+def _table_line_width(columns: Sequence[str], widths: Dict[str, int]) -> int:
+    """Visible width of one physical table line with two-space separators."""
+    if not columns:
+        return 0
+    return sum(widths[c] for c in columns) + (2 * (len(columns) - 1))
+
+
+def _minimum_label_width(columns: Sequence[str], labels: Dict[str, str]) -> int:
+    """Smallest possible table width if every column shrinks to its label."""
+    if not columns:
+        return 0
+    return sum(len(labels[c]) for c in columns) + (2 * (len(columns) - 1))
+
+
+def _allocate_wrap_budgets(
+    columns: Sequence[str],
+    labels: Dict[str, str],
+    base_widths: Dict[str, int],
+    wrap_targets: Sequence[str],
+    term_width: int,
+) -> Dict[str, int]:
+    """Allocate capped widths for wrapped columns within the terminal budget."""
+    if not wrap_targets:
+        return {}
+    non_wrap_cell_width = sum(
+        base_widths[c] for c in columns if c not in wrap_targets
+    )
+    separator_chars = 2 * (len(columns) - 1) if len(columns) > 1 else 0
+    available = max(0, term_width - non_wrap_cell_width - separator_chars)
+    minimums = {col: len(labels[col]) for col in wrap_targets}
+    budgets = dict(minimums)
+    spare = max(0, available - sum(minimums.values()))
+    natural_extra = {
+        col: max(0, base_widths[col] - minimums[col]) for col in wrap_targets
+    }
+    extra_total = sum(natural_extra.values())
+    if not spare or not extra_total:
+        return budgets
+
+    assigned = 0
+    remainders: List[Tuple[float, str]] = []
+    for col in wrap_targets:
+        exact = spare * natural_extra[col] / extra_total
+        extra = min(natural_extra[col], int(exact))
+        budgets[col] += extra
+        assigned += extra
+        remainders.append((exact - int(exact), col))
+
+    leftover = spare - assigned
+    for _fraction, col in sorted(remainders, reverse=True):
+        if leftover <= 0:
+            break
+        room = base_widths[col] - budgets[col]
+        if room <= 0:
+            continue
+        add = min(room, leftover)
+        budgets[col] += add
+        leftover -= add
+    return budgets
+
+
+def _wrapped_column_width(
+    label: str,
+    cells: Sequence[Sequence[str]],
+) -> int:
+    return max(
+        len(label),
+        max(
+            (max(len(line) for line in cell) for cell in cells if cell),
+            default=0,
+        ),
+    )
+
+
+def _wrap_table_cell(
+    column: str,
+    text: str,
+    width: int,
+    *,
+    force_break: bool = False,
+) -> List[str]:
     if not text:
         return [""]
     if column in {"free_cpus", "free_gpus", "tags"}:
@@ -4014,7 +4094,7 @@ def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
             pieces = textwrap.wrap(
                 tok + suffix,
                 width=max(1, width),
-                break_long_words=False,
+                break_long_words=force_break,
                 break_on_hyphens=False,
             ) or [tok + suffix]
             for piece in pieces:
@@ -4034,9 +4114,50 @@ def _wrap_table_cell(column: str, text: str, width: int) -> List[str]:
     return textwrap.wrap(
         text,
         width=max(1, width),
-        break_long_words=False,
+        break_long_words=force_break,
         break_on_hyphens=False,
     ) or [""]
+
+
+def _render_stacked_table(
+    columns: Sequence[str],
+    labels: Dict[str, str],
+    display_records: Sequence[Dict[str, str]],
+    *,
+    color: bool,
+    term_width: int,
+) -> str:
+    """Fallback renderer for terminals too narrow for a useful table header."""
+    if not display_records:
+        return "(no matching allocations)"
+    width = max(1, term_width)
+    lines: List[str] = []
+    for index, record in enumerate(display_records):
+        if index > 0:
+            lines.append("")
+        for column in columns:
+            label = labels[column]
+            raw = record.get(column, "")
+            prefix = f"{label}: "
+            if len(prefix) >= width:
+                label_lines = textwrap.wrap(
+                    label + ":",
+                    width=width,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                ) or [label + ":"]
+                lines.extend(label_lines)
+                prefix = "  "
+            value_width = max(1, width - len(prefix))
+            cell_lines = _wrap_table_cell(
+                column, raw, value_width, force_break=True
+            )
+            for line_index, cell_line in enumerate(cell_lines):
+                row_prefix = prefix if line_index == 0 else " " * len(prefix)
+                lines.append(
+                    row_prefix + _styled_cell(column, cell_line, raw, color)
+                )
+    return "\n".join(lines)
 
 
 # ANSI styling — opt-out via NO_COLOR (https://no-color.org). Color is
@@ -4170,6 +4291,7 @@ def table_output(
         tty = sys.stdout.isatty()
     if term_width is None:
         term_width = shutil.get_terminal_size((120, 24)).columns
+    term_width = max(1, int(term_width))
     color = _color_enabled(tty)
     compact = _compact_table_enabled(wide, include_avail, tty)
     if compact:
@@ -4182,15 +4304,22 @@ def table_output(
         }
         for record in records
     ]
+    if tty and columns and _minimum_label_width(columns, labels) > term_width:
+        return _render_stacked_table(
+            columns, labels, display_records, color=color, term_width=term_width
+        )
 
     # Wrap list-style columns (free_cpus, free_gpus) onto continuation lines
     # when we're rendering for a tty. The wrap helper is content-agnostic —
     # it only splits on ", " — so it handles both columns identically.
     wrap_candidates = ("free_cpus", "free_gpus")
     wrap_targets: List[str] = []
+    wrap_budgets: Dict[str, int] = {}
     if compact:
         for col in columns:
-            if col in _COMPACT_TABLE_WRAP and any(record.get(col) for record in display_records):
+            if col in _COMPACT_TABLE_WRAP and any(
+                record.get(col) for record in display_records
+            ):
                 wrap_targets.append(col)
     elif include_avail and tty and columns:
         for col in wrap_candidates:
@@ -4200,29 +4329,20 @@ def table_output(
     base_widths = {
         column: max(
             len(labels[column]),
-            max((len(record.get(column, "")) for record in display_records), default=0),
+            max(
+                (len(record.get(column, "")) for record in display_records),
+                default=0,
+            ),
         )
         for column in columns
     }
 
     wrapped_cells: Dict[str, List[List[str]]] = {}
     if compact and wrap_targets:
-        non_wrap_cell_width = sum(
-            base_widths[c] for c in columns if c not in wrap_targets
+        budgets = _allocate_wrap_budgets(
+            columns, labels, base_widths, wrap_targets, term_width
         )
-        separator_chars = 2 * (len(columns) - 1) if len(columns) > 1 else 0
-        available = max(0, term_width - non_wrap_cell_width - separator_chars)
-        minimums = {col: len(labels[col]) for col in wrap_targets}
-        min_total = sum(minimums.values())
-        natural_extra = {
-            col: max(0, base_widths[col] - minimums[col]) for col in wrap_targets
-        }
-        extra_total = sum(natural_extra.values()) or 1
-        spare = max(0, available - min_total)
-        budgets: Dict[str, int] = {}
-        for col in wrap_targets:
-            extra = int(spare * natural_extra[col] / extra_total) if spare else 0
-            budgets[col] = min(base_widths[col], minimums[col] + extra)
+        wrap_budgets.update(budgets)
         for col in wrap_targets:
             wrapped_cells[col] = [
                 _wrap_table_cell(col, r.get(col, ""), budgets[col])
@@ -4230,13 +4350,7 @@ def table_output(
             ]
         widths = dict(base_widths)
         for col in wrap_targets:
-            widths[col] = max(
-                len(labels[col]),
-                max(
-                    (max(len(line) for line in cell) for cell in wrapped_cells[col] if cell),
-                    default=0,
-                ),
-            )
+            widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
     elif wrap_targets:
         non_wrap_cell_width = sum(
             base_widths[c] for c in columns if c not in wrap_targets
@@ -4249,21 +4363,60 @@ def table_output(
         for col in wrap_targets:
             share = max(20, int(available * natural[col] / total_natural))
             budgets[col] = min(natural[col], share) if natural[col] > 0 else 20
+        wrap_budgets.update(budgets)
         for col in wrap_targets:
             wrapped_cells[col] = [
                 _wrap_gpu_list(r.get(col, ""), budgets[col]) for r in display_records
             ]
         widths = dict(base_widths)
         for col in wrap_targets:
-            widths[col] = max(
-                len(col),
-                max(
-                    (max(len(line) for line in cell) for cell in wrapped_cells[col] if cell),
-                    default=0,
-                ),
-            )
+            widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
     else:
         widths = base_widths
+
+    if tty and columns and _table_line_width(columns, widths) > term_width:
+        # First enforce the current wrap budgets with hard breaks. This only
+        # kicks in when a single long token would otherwise overflow the row.
+        if wrap_targets:
+            for col in wrap_targets:
+                budget = max(1, wrap_budgets.get(col, widths[col]))
+                wrapped_cells[col] = [
+                    _wrap_table_cell(
+                        col, r.get(col, ""), budget, force_break=True
+                    )
+                    for r in display_records
+                ]
+            widths = dict(base_widths)
+            for col in wrap_targets:
+                widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
+
+        # If fixed identity columns are still too wide, wrap them down to
+        # their labels. The table header remains intact because impossible
+        # label-only widths were handled by the stacked fallback above.
+        if _table_line_width(columns, widths) > term_width:
+            for col in columns:
+                if col in wrap_targets or base_widths[col] <= len(labels[col]):
+                    continue
+                wrap_targets.append(col)
+            wrap_budgets = _allocate_wrap_budgets(
+                columns, labels, base_widths, wrap_targets, term_width
+            )
+            for col in wrap_targets:
+                wrapped_cells[col] = [
+                    _wrap_table_cell(
+                        col, r.get(col, ""), wrap_budgets[col],
+                        force_break=True,
+                    )
+                    for r in display_records
+                ]
+            widths = dict(base_widths)
+            for col in wrap_targets:
+                widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
+
+        if _table_line_width(columns, widths) > term_width:
+            return _render_stacked_table(
+                columns, labels, display_records, color=color, term_width=term_width
+            )
 
     header = "  ".join(labels[column].ljust(widths[column]) for column in columns)
     rule = "  ".join("-" * widths[column] for column in columns)
@@ -5180,20 +5333,17 @@ def run_self_test() -> int:
         "a100:1/4, h100nvl:0/8, l40s:0/16, rtx6000:3/13, "
         "rtxpr4000bl:1/43, rtxpr6000bl:5/36, h200_1g.18gb:55/56"
     )
-    # 100 is the practical floor for this fixture: the longest GPU token
-    # (`h200_1g.18gb:55/56`, 18 chars) doesn't split, so it sets the
-    # INVENTORY column's minimum width. 100 still exercises the wrap path
-    # (verified by the >=4 line-count assertion below). Strip ANSI codes
-    # before measuring — the WAIT="?" cell carries a dim escape sequence.
+    # Strip ANSI codes before measuring — the WAIT="?" cell carries a dim
+    # escape sequence when tty=True.
     import re as _re
     _ansi = _re.compile(r"\x1b\[[0-9;]*m")
     rendered = table_output(
-        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=100
+        [(avail_row, None)], wide=False, include_avail=True, tty=True, term_width=80
     )
     rendered_lines = rendered.splitlines()
     # Header + rule + first data line + at least one indented continuation.
     assert len(rendered_lines) >= 4, rendered
-    assert max(len(_ansi.sub("", line)) for line in rendered_lines) <= 100, rendered
+    assert max(len(_ansi.sub("", line)) for line in rendered_lines) <= 80, rendered
     assert "FLAGS" in rendered_lines[0] and "NODES" in rendered_lines[0]
     assert "CPU_VENDOR" not in rendered_lines[0]
     assert "def" in rendered and "gpu,default" not in rendered
@@ -5219,11 +5369,11 @@ def run_self_test() -> int:
     )
     wide_cpu_row.free_gpus = ""
     rendered_cpu = table_output(
-        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=100
+        [(wide_cpu_row, None)], wide=False, include_avail=True, tty=True, term_width=80
     )
     rendered_cpu_lines = rendered_cpu.splitlines()
     assert len(rendered_cpu_lines) >= 4, rendered_cpu
-    assert max(len(_ansi.sub("", line)) for line in rendered_cpu_lines) <= 100, rendered_cpu
+    assert max(len(_ansi.sub("", line)) for line in rendered_cpu_lines) <= 80, rendered_cpu
     # At least one line after the data row should carry a CPU shape token.
     assert any(
         "gen96c" in ln or "skl16c" in ln or "csl20c" in ln
@@ -5268,9 +5418,16 @@ def run_self_test() -> int:
     second.free_cpus = "100/640"
     second.free_gpus = avail_row.free_gpus  # long, will wrap
     rendered_two = table_output(
-        [(avail_row, None), (second, None)], wide=False, include_avail=True, tty=True, term_width=60
+        [(avail_row, None), (second, None)],
+        wide=False,
+        include_avail=True,
+        tty=True,
+        term_width=60,
     )
     assert "\n\n" in rendered_two, "expected blank line between wrapping records"
+    assert (
+        max(len(_ansi.sub("", line)) for line in rendered_two.splitlines()) <= 60
+    ), rendered_two
 
     # Wait-time formatter.
     assert _format_wait(None) == "?"
