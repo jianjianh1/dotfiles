@@ -64,10 +64,10 @@ DEFAULT_SORT = ("cluster", "account", "qos")
 
 
 # ════════════════════════════════════════════════════════════════════
-# Shape grammar — classification tables (CPU vendor/microarch, GPU
+# Request grammar — classification tables (CPU vendor/microarch, GPU
 # generation/SM compute capability). These data tables and their
 # alias/classification helpers form the vocabulary used by the
-# HardwareFilter and shape parsers below.
+# HardwareFilter and request parsers below.
 # ════════════════════════════════════════════════════════════════════
 
 # GPU types treated as "premium" for default sort ranking. Substring-matched
@@ -144,7 +144,7 @@ CPU_ARCH_LONG = {
 _ZEN_ARCH_LITERALS = tuple(f"zen{i}" for i in range(1, 6))
 
 # Vendor-OR `--constraint` expressions, built once. SLURM constraint syntax:
-# `a|b|c` = any-of. Used by ProbeShape.to_sbatch_args when only a vendor is
+# `a|b|c` = any-of. Used by ResourceSpec.to_sbatch_args when only a vendor is
 # requested (no specific arch).
 VENDOR_CONSTRAINT_EXPR = {
     "intel": "|".join(INTEL_CPU_FEATURES),
@@ -186,7 +186,7 @@ def _features_match_vendor(features, vendor: str) -> bool:
 
 
 # NVIDIA GPU generation aliases → canonical short tag. Long forms collapse
-# to a single canonical name stored in ProbeShape.gpu_gen.
+# to a single canonical name stored in ResourceSpec.gpu_gen.
 GPU_GEN_ALIASES = {
     "kepler": "kepler",
     "maxwell": "maxwell",
@@ -392,8 +392,8 @@ def classify_cpu_vendor(features) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
-# Shape grammar — parser hints, regex, and recognized atoms
-# Consolidated here so adding/changing a shape atom touches one place.
+# Request grammar — parser hints, regex, and recognized atoms
+# Consolidated here so adding/changing a request atom touches one place.
 # ════════════════════════════════════════════════════════════════════
 
 _VENDORS = ("intel", "amd")
@@ -418,15 +418,15 @@ _GPUS_EXPECTED = (
     "'TYPE' (1 of that type, e.g. a100)"
 )
 _GPUS_HINT = "chpc-allocs --list-gpus for available types"
-_SHAPE_HINT = "chpc-allocs --help (Probe shape group), or examples in --help"
+_REQUEST_HINT = "chpc-allocs --help (positional REQUEST), or examples in --help"
 
 _MEM_RE = re.compile(r"^\d+[kmgtKMGT][bB]?$")
 
 
-# Probe-shape defaults — used by ProbeShape() and parse_shape_spec().
-DEFAULT_PROBE_CPUS = 1
-DEFAULT_PROBE_NODES = 1
-DEFAULT_PROBE_TIME = "01:00:00"
+# Resource request defaults — used by ResourceSpec() and parse_resource_spec().
+DEFAULT_REQUEST_CPUS = 1
+DEFAULT_REQUEST_NODES = 1
+DEFAULT_REQUEST_TIME = "01:00:00"
 
 # Wait-vs-free explanation tokens for the `note` column.
 NOTE_QUEUE = "queue"
@@ -438,8 +438,8 @@ NOTE_INVALID_QOS = "invalid-qos"
 NOTE_INVALID_PARTITION = "invalid-partition"
 NOTE_INVALID_CONSTRAINT = "invalid-constraint"
 NOTE_UNAVAILABLE = "unavailable"
-NOTE_PROBE_TIMEOUT = "probe-timeout"
-NOTE_PROBE_ERROR = "probe-error"
+NOTE_WAIT_CHECK_TIMEOUT = "wait-check-timeout"
+NOTE_WAIT_CHECK_ERROR = "wait-check-error"
 
 
 class QOSInfo:
@@ -521,39 +521,39 @@ class AllocationRow:
         self.free_nodes = ""
         self.free_cpus = ""
         self.free_gpus = ""
-        self.availability_by_shape: Dict[str, Tuple[str, str, str]] = {}
-        # (nodes_fitting, nodes_sized) per shape — feeds the `note` column.
+        self.availability_by_request: Dict[str, Tuple[str, str, str]] = {}
+        # (nodes_fitting, nodes_sized) per request — feeds the `note` column.
         # Empty when the bucket lacked per-node records.
-        self.fit_by_shape: Dict[str, Tuple[int, int]] = {}
-        self.wait_by_shape: Dict[str, Optional[int]] = {}
-        self.probe_reason_by_shape: Dict[str, str] = {}
+        self.fit_by_request: Dict[str, Tuple[int, int]] = {}
+        self.wait_by_request: Dict[str, Optional[int]] = {}
+        self.wait_check_reason_by_request: Dict[str, str] = {}
 
     @property
     def is_default(self) -> bool:
         return bool(self.default_qos) and self.qos == self.default_qos
 
-    def _gpus_cell(self, shape: Optional["ProbeShape"]) -> str:
+    def _gpus_cell(self, request: Optional["ResourceSpec"]) -> str:
         """Compact cell for the `gpu` column: the row's GPU type resolved
-        from the probe shape's gpu_type (e.g. shape says 'h100', row exposes
-        'h100nvl'). Empty for CPU-only rows or shapes without a gpu_type.
+        from the resource request's gpu_type (e.g. request says 'h100', row exposes
+        'h100nvl'). Empty for CPU-only rows or requests without a gpu_type.
         """
-        if not self.gpu_types or shape is None:
+        if not self.gpu_types or request is None:
             return ""
-        resolved = shape.resolved_gpu_type(self)
+        resolved = request.resolved_gpu_type(self)
         return resolved or ""
 
-    def _cpu_cell(self, shape: Optional["ProbeShape"]) -> str:
+    def _cpu_cell(self, request: Optional["ResourceSpec"]) -> str:
         """Compact cell for the `cpu` column: the row's CPU arch resolved
-        from the probe shape's cpu_archs (e.g. shape says 'genoa', row
-        exposes 'gen' → cell shows 'Genoa'). Empty for shapes without
+        from the resource request's cpu_archs (e.g. request says 'genoa', row
+        exposes 'gen' → cell shows 'Genoa'). Empty for requests without
         cpu_archs or rows whose features don't satisfy any of them.
 
         Mirror of `_gpus_cell` so users running `cpu:32*genoa` see which
         rows resolve to which arch without having to pass `--wide`.
         """
-        if not self.cpu_features or shape is None or not shape.filter.cpu_archs:
+        if not self.cpu_features or request is None or not request.filter.cpu_archs:
             return ""
-        wanted = set(shape.filter.cpu_archs)
+        wanted = set(request.filter.cpu_archs)
         seen: Dict[str, None] = {}
         for feat in self.cpu_features:
             canon = _canon_cpu_arch(feat)
@@ -561,28 +561,28 @@ class AllocationRow:
                 seen[canon] = None
         return ", ".join(CPU_ARCH_LONG.get(c, c) for c in seen)
 
-    def _availability_for_shape(
-        self, shape: Optional["ProbeShape"]
+    def _availability_for_request(
+        self, request: Optional["ResourceSpec"]
     ) -> Tuple[str, str, str]:
-        if shape is not None and shape.label in self.availability_by_shape:
-            return self.availability_by_shape[shape.label]
+        if request is not None and request.label in self.availability_by_request:
+            return self.availability_by_request[request.label]
         return self.free_nodes, self.free_cpus, self.free_gpus
 
-    def _note_for_shape(self, shape: Optional["ProbeShape"]) -> str:
+    def _note_for_request(self, request: Optional["ResourceSpec"]) -> str:
         """Explain a non-trivial wait when raw availability looks plentiful.
 
         Empty when wait is `now` (no friction to explain) or `?` (we don't
-        know enough to point a finger). Only meaningful when fit_by_shape
+        know enough to point a finger). Only meaningful when fit_by_request
         is populated (per-node sinfo records exist); otherwise empty.
         """
-        if shape is None:
+        if request is None:
             return ""
-        wait_secs = self.wait_by_shape.get(shape.label)
+        wait_secs = self.wait_by_request.get(request.label)
         if wait_secs is None:
-            return self.probe_reason_by_shape.get(shape.label, "")
+            return self.wait_check_reason_by_request.get(request.label, "")
         if wait_secs <= 60:
             return ""
-        fit = self.fit_by_shape.get(shape.label)
+        fit = self.fit_by_request.get(request.label)
         if fit is None:
             return ""
         fitting, sized = fit
@@ -597,11 +597,11 @@ class AllocationRow:
         wide: bool = False,
         include_avail: bool = False,
         include_wait: bool = True,
-        shape: Optional["ProbeShape"] = None,
+        request: Optional["ResourceSpec"] = None,
         show_gpu: bool = False,
         show_cpu: bool = False,
     ) -> Dict[str, str]:
-        # Column order is intentional: identity → probe → "will it fit" →
+        # Column order is intentional: identity → wait check → "will it fit" →
         # QOS metadata → wide diagnostics → live availability. Python dict
         # insertion order propagates to the table/CSV/JSON renderers, so this
         # is the single point of truth for column layout.
@@ -611,21 +611,21 @@ class AllocationRow:
             "qos": self.qos,
         }
         if include_avail and include_wait:
-            if shape is not None:
-                data["shape"] = shape.label
-                wait_secs = self.wait_by_shape.get(shape.label)
+            if request is not None:
+                data["request"] = request.label
+                wait_secs = self.wait_by_request.get(request.label)
             else:
-                data["shape"] = ""
+                data["request"] = ""
                 wait_secs = None
             data["wait"] = _format_wait(wait_secs)
-            data["note"] = self._note_for_shape(shape)
+            data["note"] = self._note_for_request(request)
         data["wall"] = self.qos_info.max_wall
         data["tags"] = ",".join(self.tags)
         if show_gpu:
-            data["gpu"] = self._gpus_cell(shape)
+            data["gpu"] = self._gpus_cell(request)
         data["gpu_vendor"] = self.gpu_vendor
         if show_cpu:
-            data["cpu"] = self._cpu_cell(shape)
+            data["cpu"] = self._cpu_cell(request)
         data["cpu_vendor"] = self.cpu_vendor
         data["default"] = "yes" if self.is_default else ""
         data["priority"] = self.qos_info.priority
@@ -652,7 +652,7 @@ class AllocationRow:
                 }
             )
         if include_avail:
-            free_nodes, free_cpus, free_gpus = self._availability_for_shape(shape)
+            free_nodes, free_cpus, free_gpus = self._availability_for_request(request)
             data["free_nodes"] = free_nodes
             data["free_cpus"] = free_cpus
             data["free_gpus"] = free_gpus
@@ -670,26 +670,26 @@ Quickstart:
   chpc-allocs a100:4              predict wait for one a100x4 job
   chpc-allocs cpu:32              predict wait for one 32-core CPU job
   chpc-allocs a100:4 cpu:32       compare alternatives ('+' also works)
-  chpc-allocs --quick             list allocations without live probes
+  chpc-allocs --quick             list allocations without live wait checks
   chpc-allocs --best a100:4       paste-ready #SBATCH for the fastest match
   chpc-allocs --list-gpus         show cluster GPU inventory
-  chpc-allocs --explain a100:4    preview filters and planned wait probes
+  chpc-allocs --explain a100:4    preview filters and planned wait checks
 
-Run `chpc-allocs --help` for the full shape grammar, filters, and output modes.
+Run `chpc-allocs --help` for the full request grammar, filters, and output modes.
 """
 
 DESCRIPTION = """\
 chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
-A "probe" here is a hypothetical job (`sbatch --test-only`) used to predict
+A "wait check" here is a hypothetical job (`sbatch --test-only`) used to predict
 wait time. With no args, a short quickstart is printed. Pass one or more
-SHAPE tokens to probe those shapes; separate alternatives with spaces or '+',
+REQUEST tokens to run wait checks for those requests; separate alternatives with spaces or '+',
 and combine requirements inside one job with '*'.
 
 Common entry points:
   chpc-allocs                       print a short quickstart
-  chpc-allocs a100:4                a single a100x4 probe
-  chpc-allocs cpu:32                a single 32-core CPU probe
+  chpc-allocs a100:4                a single a100x4 wait check
+  chpc-allocs cpu:32                a single 32-core CPU wait check
   chpc-allocs a100:4 cpu:32         two alternatives (space = OR)
   chpc-allocs a100:4+cpu:32         two alternatives ('+' = OR, no quoting)
   chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
@@ -697,8 +697,8 @@ Common entry points:
   chpc-allocs 'gpu:4*ampere'        any 4 Ampere GPUs (gen atom)
   chpc-allocs 'gpu:1,sm_min=80'     any GPU with compute capability >= 8.0
   chpc-allocs --best a100:4         lowest-wait runnable triple as paste-ready #SBATCH
-  chpc-allocs --quick               list allocations, no probes
-  chpc-allocs --explain a100:4      preview filters and wait probes; no sbatch probes
+  chpc-allocs --quick               list allocations, no wait checks
+  chpc-allocs --explain a100:4      preview filters and wait checks; no sbatch wait checks
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
   chpc-allocs --list-gpus a100:1    inventory narrowed to partitions exposing a100
 """
@@ -712,9 +712,9 @@ Quickstart:
   chpc-allocs a100:4+cpu:32@12h               # two alternatives ('+' = OR)
   chpc-allocs 'a100:4*cpu:32@12h'             # one combined job ('*' = AND)
   chpc-allocs 'a100:4*cpu:32+h100:1'          # AND inside, OR across ('*' binds tighter)
-  chpc-allocs --explain a100:4                # preview filters and wait probes; no sbatch probes
+  chpc-allocs --explain a100:4                # preview filters and wait checks; no sbatch wait checks
 
-Shape grammar:
+Request grammar:
   chpc-allocs h100:1                          # 'h100' resolves to actual GRES (e.g. h100nvl)
   chpc-allocs 'a100:4*intel'                  # a100x4 only on Intel hosts
   chpc-allocs 'cpu:32*genoa'                  # 32-core CPU on Genoa nodes (alias 'gen')
@@ -739,8 +739,8 @@ Shape grammar:
                  (also sm_70, sm_80, ...)
     Ranges (key=value only): sm_min=80, gen_min=ampere
     Note: '+' suffix (e.g. 'sm80+') is NOT supported — '+' is the
-          shape-list OR separator. Use 'sm_min=80' instead.
-    Availability columns are shape-aware: constrained runs show matching
+          request-list OR separator. Use 'sm_min=80' instead.
+    Availability columns are request-aware: constrained runs show matching
           free_nodes/free_cpus/free_gpus, not broad partition totals.
 
 Filtering rows (repeatable, OR-matched, case-insensitive substrings):
@@ -763,7 +763,7 @@ Sorting and trimming:
   chpc-allocs --full 'a100:1+a100:4'                    # don't collapse uniform-wait rows
   chpc-allocs --show-all a100:4                         # keep '?' / rejected / over-MaxWall rows
 
-Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):
+Inventory shortcuts (do not consult your allocations; REQUEST_LIST narrows):
   chpc-allocs --list-gpus                               # full GPU inventory
   chpc-allocs --list-gpus a100:1                        # only partitions exposing a100
   chpc-allocs --list-gpus 'a100:4*intel'                # ... and only Intel hosts
@@ -775,13 +775,13 @@ Recipes:
   chpc-allocs --best a100:4 --format json | jq .        # same, machine-readable
   chpc-allocs --sbatch a100:4 --quick                   # all matching allocations as #SBATCH blocks
   chpc-allocs --sbatch a100:4 --format json             # JSON array of {cluster,account,qos,partition}
-  chpc-allocs --pivot 'a100:1+a100:4+h100:1'            # shapes side-by-side, table only
+  chpc-allocs --pivot 'a100:1+a100:4+h100:1'            # requests side-by-side, table only
   chpc-allocs intel+amd --pivot                         # compare Intel vs AMD
 
-Speed (skip probes/queries):
+Speed (skip wait checks/queries):
   chpc-allocs --quick                                   # = --no-wait --no-availability --no-usage
-  chpc-allocs --no-wait a100:4                          # keep capacity/usage, skip wait probe
-  chpc-allocs --no-availability --no-usage cpu:32       # probe only, no sinfo/sshare
+  chpc-allocs --no-wait a100:4                          # keep capacity/usage, skip wait check
+  chpc-allocs --no-availability --no-usage cpu:32       # wait check only, no sinfo/sshare
 
 Scripting / output:
   chpc-allocs a100:1 --format json | jq '.rows[]'       # JSON with _help legend
@@ -790,7 +790,7 @@ Scripting / output:
 Diagnostics:
   chpc-allocs -v a100:1                       # narrate dropped rows + progress
   chpc-allocs --show-all a100:1               # don't hide marginal rows
-  chpc-allocs --explain 'a100:4*intel+h100:1' # show filters and wait probes; no sbatch probes
+  chpc-allocs --explain 'a100:4*intel+h100:1' # show filters and wait checks; no sbatch wait checks
 """
 
 
@@ -800,7 +800,7 @@ def _lower_choice(value: str) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        usage="chpc-allocs [SHAPE ...] [FILTER ...] [OUTPUT ...]",
+        usage="chpc-allocs [REQUEST ...] [FILTER ...] [OUTPUT ...]",
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -813,17 +813,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print version and exit.",
     )
 
-    # Positional probe spec. Two-level grammar:
-    #   '+' = OR (separate independent probes)
+    # Positional resource request spec. Two-level grammar:
+    #   '+' = OR (separate independent wait checks)
     #   '*' = AND (combine pieces into one job; binds tighter than '+')
     # E.g. 'a100:4*cpu:32+h100:1' = (a100:4 with 32 cpus) OR (h100:1).
     # Quote when '*' might glob in your shell. Parsed in main() via
-    # parse_shape_list.
+    # parse_resource_list.
     parser.add_argument(
-        "shape_pos", nargs="*", metavar="SHAPE", default=[],
-        help="Probe shape, or list joined with spaces or '+' (alternatives, OR) "
+        "request_pos", nargs="*", metavar="REQUEST", default=[],
+        help="Resource request, or list joined with spaces or '+' (alternatives, OR) "
         "and '*' (combine into one job, AND; binds tighter than '+'). "
-        "Per-shape grammar: 'a100:4' (GPU), 'cpu:32' (32 cores per node), "
+        "Per-request grammar: 'a100:4' (GPU), 'cpu:32' (32 cores per node), "
         "'gpu:4' (any GPU x 4), '32' (= cpu:32), '2n' (2 nodes). Multi-node "
         "rule: cpu:N and cores=N are PER-NODE when nodes>1; use 'total:N' "
         "or 'total=N' to specify total cores across the job. Append '@DUR' "
@@ -836,7 +836,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "gen=, sm=, gen_min=, sm_min=) also accepted, e.g. "
         "'gpu:1,sm_min=80', 'a100:4,gen=hopper', '2n,cpu:32'. Combined "
         "example: 'a100:4*intel+h100:1@30m'. Quote when your shell would "
-        "expand '*'. Multiple positional shapes are treated as alternatives, "
+        "expand '*'. Multiple positional requests are treated as alternatives, "
         "so `a100:4 cpu:32` is equivalent to `a100:4+cpu:32`.",
     )
 
@@ -846,8 +846,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Narrow the allocations shown. Name filters (--cluster/--account/"
             "--qos) are case-insensitive substrings, repeatable, OR-matched. "
-            "Hardware narrowing happens implicitly via the probe shape "
-            "(SHAPE_LIST) — a row whose hardware can't run any probed shape "
+            "Hardware narrowing happens implicitly via the resource request "
+            "(REQUEST_LIST) — a row whose hardware can't run any checked request "
             "is dropped."
         ),
     )
@@ -944,13 +944,13 @@ def _build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--sort", default=None, metavar="KEYS",
         help="Comma-separated sort keys (case-insensitive). Categories: "
-        "Time: wait, shape, wall. "
+        "Time: wait, request, wall. "
         "Quality: premium (alias: gpu-tier; a100/h100/h200/a6000 first, "
         "then genoa/sapphirerapids/emeraldrapids/icelake/zen4/zen5 CPU rows), "
         "vendor (intel<amd<mixed<unknown), default, tags. "
         "Identity: cluster, account, qos. "
         "Score: priority, fairshare, usage. "
-        "Default with wait: wait,shape,premium,vendor,cluster,qos. "
+        "Default with wait: wait,request,premium,vendor,cluster,qos. "
         "Default no-wait: premium,vendor,cluster,account,qos. "
         "e.g. --sort wait,premium,cluster",
     )
@@ -967,24 +967,24 @@ def _build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--legend", action="store_true",
         help="After the table, print a short key for the GPUS/INVENTORY "
-        "split, NOTE/FLAGS codes, and the CPUS shape grammar. "
+        "split, NOTE/FLAGS codes, and the CPUS request grammar. "
         "No effect on csv/json output (json carries _help instead). "
         "e.g. --legend a100:4",
     )
     out.add_argument(
         "--full", "--keep-walltimes", dest="full", action="store_true",
         help="Skip the uniform-wait row collapse: keep every walltime row "
-        "even when a multi-shape SHAPE_LIST gave the same wait across them. "
+        "even when a multi-request REQUEST_LIST gave the same wait across them. "
         "Alias: --keep-walltimes. e.g. --full 'a100:1+a100:4'",
     )
     out.add_argument(
         "--show-all", dest="show_all", action="store_true",
         help="Don't hide marginal rows: '?' waits, scheduler rejections, "
-        "no-MaxWall QOS, or over-MaxWall shapes. e.g. --show-all a100:4",
+        "no-MaxWall QOS, or over-MaxWall requests. e.g. --show-all a100:4",
     )
 
     # Presentation modes are mutually exclusive: --best (single best triple),
-    # --sbatch (one block per matching allocation), --pivot (shapes side-by-
+    # --sbatch (one block per matching allocation), --pivot (requests side-by-
     # side). Argparse enforces and renders the exclusion in usage.
     presentation = out.add_mutually_exclusive_group()
     presentation.add_argument(
@@ -997,20 +997,20 @@ def _build_parser() -> argparse.ArgumentParser:
     presentation.add_argument(
         "--sbatch", action="store_true",
         help="Emit a paste-ready #SBATCH block per allocation. Requires "
-        "SHAPE so --nodes/--ntasks/--time are present "
-        "(clusters/account/partition/qos plus shape directives like "
-        "--time/--nodes/--ntasks/--gres/--constraint when SHAPE_LIST is "
+        "REQUEST so --nodes/--ntasks/--time are present "
+        "(clusters/account/partition/qos plus request directives like "
+        "--time/--nodes/--ntasks/--gres/--constraint when REQUEST_LIST is "
         "given). Each block has a '# <cluster> · <account>/<qos>' header "
         "annotated with predicted wait when available. The multi-allocation "
         "form of --best. With --format=json, emits a JSON array of records "
-        "with sbatch_directives, shape_label, predicted_wait_seconds. "
+        "with sbatch_directives, request_label, predicted_wait_seconds. "
         "e.g. --sbatch a100:4 --quick",
     )
     presentation.add_argument(
         "--pivot", action="store_true",
-        help="Pivot layout: rows = (cluster, account, qos), columns = shape "
+        help="Pivot layout: rows = (cluster, account, qos), columns = request "
         "labels, cells = wait times. Table format only; useful with a "
-        "multi-shape SHAPE_LIST. e.g. 'a100:1+a100:4' --pivot",
+        "multi-request REQUEST_LIST. e.g. 'a100:1+a100:4' --pivot",
     )
 
     # ----- Diagnostics & speed --------------------------------------------
@@ -1024,7 +1024,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     diag.add_argument(
         "--no-wait", action="store_true",
-        help="Skip the wait probe (no 'wait' column). Faster. "
+        help="Skip the wait check (no 'wait' column). Faster. "
         "e.g. --no-wait --format csv",
     )
     diag.add_argument(
@@ -1042,25 +1042,25 @@ def _build_parser() -> argparse.ArgumentParser:
     diag.add_argument(
         "--quick", action="store_true",
         help="Macro for --no-wait --no-availability --no-usage. Enumerate "
-        "allocations fast, no probes. e.g. --quick --format csv > allocs.csv",
+        "allocations fast, no wait checks. e.g. --quick --format csv > allocs.csv",
     )
     diag.add_argument(
         "--explain", action="store_true",
-        help="Preview filters and planned wait probes, then exit; skips "
-        "sbatch --test-only wait probes but still reads SLURM metadata. "
+        help="Preview filters and planned wait checks, then exit; skips "
+        "sbatch --test-only wait checks but still reads SLURM metadata. "
         "Honors --format=json. e.g. --explain a100:4+cpu:32",
     )
     # --verbose and --quiet are mutex: one tunes stderr up, the other down.
     chatter = diag.add_mutually_exclusive_group()
     chatter.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Narrate dropped rows + probe progress to stderr. "
+        help="Narrate dropped rows + wait check progress to stderr. "
         "e.g. -v a100:4",
     )
     chatter.add_argument(
         "-q", "--quiet", action="store_true",
-        help="Suppress informational stderr (auto-format notice, probe "
-        "banner, GPU-resolution notice, probe start/end lines). Errors "
+        help="Suppress informational stderr (auto-format notice, wait check "
+        "banner, GPU-resolution notice, wait check start/end lines). Errors "
         "and zero-result hints still print. e.g. --quick --quiet | head",
     )
     diag.add_argument(
@@ -1073,7 +1073,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "Inventory shortcuts",
         description=(
             "Print cluster inventory without consulting your allocations. "
-            "Each exits after printing. If a SHAPE_LIST is supplied, the "
+            "Each exits after printing. If a REQUEST_LIST is supplied, the "
             "inventory is narrowed to partitions that satisfy it (vendor / "
             "microarch / GPU gen / SM atoms all apply)."
         ),
@@ -1084,7 +1084,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inv_mode.add_argument(
         "--list-gpus", action="store_true",
         help="Cluster/partition GPU type:count inventory from sinfo. "
-        "A SHAPE_LIST narrows the listing. "
+        "A REQUEST_LIST narrows the listing. "
         "e.g. --list-gpus, --list-gpus a100:1, --list-gpus 'a100:4*intel'",
     )
     inv_mode.add_argument(
@@ -1093,7 +1093,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Cluster/partition CPU inventory from sinfo: vendor, "
             "architecture, and per-node layout (cores×sockets, memory). "
             "SLURM does not expose specific CPU SKU strings on this cluster. "
-            "A SHAPE_LIST narrows the listing. "
+            "A REQUEST_LIST narrows the listing. "
             "e.g. --list-cpus, --list-cpus 'cpu:32*genoa'"
         ),
     )
@@ -1109,11 +1109,11 @@ def _print_short_help() -> None:
     print(SHORT_HELP.rstrip())
 
 
-def _shape_list_from_args(shape_args: Sequence[str]) -> Optional[str]:
-    """Return the effective SHAPE_LIST from positional SHAPE tokens."""
-    parts = [s.strip() for s in shape_args if s and s.strip()]
+def _request_list_from_args(resource_args: Sequence[str]) -> Optional[str]:
+    """Return the effective REQUEST_LIST from positional REQUEST tokens."""
+    parts = [s.strip() for s in resource_args if s and s.strip()]
     if not parts:
-        return "" if shape_args else None
+        return "" if resource_args else None
     return "+".join(parts)
 
 
@@ -1373,7 +1373,7 @@ def is_free_node_state(state: str) -> bool:
 
 
 class NodeRecord(NamedTuple):
-    """One sinfo row, normalized for shape-aware availability rollups.
+    """One sinfo row, normalized for request-aware availability rollups.
 
     mem_total / mem_alloc are 0 when sinfo didn't expose them; the fit
     predicates downgrade to a CPU+GPU-only check on that signal.
@@ -1403,7 +1403,7 @@ class PartitionAvail:
         self.node_types: Dict[Tuple[str, int, int, int], int] = {}
         # (arch_short, cores_per_socket) -> [cpus_free, cpus_total,
         # nodes_free, nodes_total]
-        self.cpus_by_shape: Dict[Tuple[str, int], List[int]] = {}
+        self.cpus_by_class: Dict[Tuple[str, int], List[int]] = {}
         self.node_records: List[NodeRecord] = []
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
@@ -1414,10 +1414,10 @@ class PartitionAvail:
     def add_node_type(self, sig: Tuple[str, int, int, int]) -> None:
         self.node_types[sig] = self.node_types.get(sig, 0) + 1
 
-    def add_cpu_shape(
+    def add_cpu_class(
         self, arch: str, cps: int, free: int, total: int, is_free: bool,
     ) -> None:
-        slot = self.cpus_by_shape.setdefault((arch, cps), [0, 0, 0, 0])
+        slot = self.cpus_by_class.setdefault((arch, cps), [0, 0, 0, 0])
         slot[0] += free
         slot[1] += total
         if is_free:
@@ -1544,7 +1544,7 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
             alloc_mem_mb = 0
         arch_short = _node_arch_short(features_blob)
         bucket.add_node_type((arch_short, cps, sockets, mem_mb // 1024))
-        bucket.add_cpu_shape(
+        bucket.add_cpu_class(
             arch_short,
             cps,
             cpus_idle if free_node else 0,
@@ -1639,14 +1639,14 @@ def _format_wall_short(value: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
-# Shape grammar — HardwareFilter
+# Request grammar — HardwareFilter
 # ════════════════════════════════════════════════════════════════════
 
 
 class HardwareFilter:
     """Bundle of CPU/GPU constraint atoms applied to an AllocationRow.
 
-    Stored once on `ProbeShape.filter`. Empty by default — the no-op filter
+    Stored once on `ResourceSpec.filter`. Empty by default — the no-op filter
     accepts every row. The data fields and the predicate methods that consume
     them live together so adding a new constraint atom touches one place.
 
@@ -1725,7 +1725,7 @@ class HardwareFilter:
     def cpu_satisfies(self, features) -> bool:
         """True iff `features` satisfy every set CPU constraint.
 
-        Empty `features` (metadata not loaded) returns True so probes still
+        Empty `features` (metadata not loaded) returns True so wait checks still
         run on rows whose features sinfo didn't expose — same convention
         used elsewhere for missing metadata.
         """
@@ -1747,7 +1747,7 @@ class HardwareFilter:
         )
 
     def label_markers(self) -> List[str]:
-        """Ordered marker strings appended to ProbeShape labels.
+        """Ordered marker strings appended to ResourceSpec labels.
 
         Order: arch tokens, then vendor (only when no arch — arch implies
         vendor), then gen / gen_min (with `+` suffix), then sm / sm_min.
@@ -1772,29 +1772,29 @@ EMPTY_FILTER = HardwareFilter()
 
 
 # ════════════════════════════════════════════════════════════════════
-# Shape grammar — ProbeShape
+# Request grammar — ResourceSpec
 # ════════════════════════════════════════════════════════════════════
 
 
-class ProbeShape:
-    """Shape of the hypothetical job used for `sbatch --test-only` wait probing.
+class ResourceSpec:
+    """Request of the hypothetical job used for `sbatch --test-only` wait checking.
 
     Defaults: 1 node, 1 CPU, 1-hour wall, `--gres=gpu:1` on GPU rows, no
-    GRES on CPU rows. parse_shape_spec() builds these from a user-supplied
-    SHAPE_LIST so the predicted wait reflects the actual job they intend
+    GRES on CPU rows. parse_resource_spec() builds these from a user-supplied
+    REQUEST_LIST so the predicted wait reflects the actual job they intend
     to run.
     """
 
     def __init__(
         self,
-        nodes: int = DEFAULT_PROBE_NODES,
-        cpus: int = DEFAULT_PROBE_CPUS,
+        nodes: int = DEFAULT_REQUEST_NODES,
+        cpus: int = DEFAULT_REQUEST_CPUS,
         cpus_per_node: Optional[int] = None,
         cpus_is_total: bool = False,
         mem: Optional[str] = None,
         gpu_type: Optional[str] = None,
         gpu_count: Optional[int] = None,
-        time: str = DEFAULT_PROBE_TIME,
+        time: str = DEFAULT_REQUEST_TIME,
         filter: HardwareFilter = EMPTY_FILTER,
     ) -> None:
         self.nodes = nodes
@@ -1852,7 +1852,7 @@ class ProbeShape:
         return tuple(t for t in row.gpu_types if self.accepts_gpu_token(t))
 
     def resolved_gpu_type(self, row: "AllocationRow") -> Optional[str]:
-        """Return the row-specific GRES name for this shape, or None.
+        """Return the row-specific GRES name for this request, or None.
 
         Priority:
           1. self.gpu_type set, no gen/SM: shortest substring match (legacy).
@@ -1860,7 +1860,7 @@ class ProbeShape:
           3. Neither: None (caller emits bare gpu:N).
 
         When `row.gpu_types` is empty (metadata not loaded) and only gpu_type
-        is set, fall back to the literal — preserves legacy probe behavior.
+        is set, fall back to the literal — preserves legacy wait check behavior.
         """
         gen_sm = self.filter.has_gpu_constraint()
         if not (self.gpu_type or gen_sm):
@@ -1871,7 +1871,7 @@ class ProbeShape:
         if cands:
             return min(cands, key=lambda s: (len(s), s))
         # Legacy: gpu_type-only with no substring match falls back to literal
-        # so `--gres=gpu:<literal>:N` reproduces pre-classifier probe behavior.
+        # so `--gres=gpu:<literal>:N` reproduces pre-classifier wait check behavior.
         if self.gpu_type and not gen_sm:
             return _shortest_matching_gpu(set(row.gpu_types), self.gpu_type) or self.gpu_type
         return None
@@ -1899,15 +1899,15 @@ class ProbeShape:
         return args
 
     def should_skip(self, row: "AllocationRow") -> bool:
-        """True when this shape can't possibly run on this row (skip the probe)."""
+        """True when this request can't possibly run on this row (skip the wait check)."""
         gpu_constraint = self.filter.has_gpu_constraint()
         if self.requires_gpu() and "gpu" not in row.tags:
             return True
-        # Mirror: an explicit CPU shape (the user typed cpu/total/mem/vendor/arch)
-        # shouldn't probe GPU rows. Most GPU partitions require a GRES, so
-        # leaving them in produces probe rows reporting GPU contention for a
+        # Mirror: an explicit CPU request (the user typed cpu/total/mem/vendor/arch)
+        # shouldn't wait check GPU rows. Most GPU partitions require a GRES, so
+        # leaving them in produces wait check rows reporting GPU contention for a
         # job that only asked for CPUs — and a paste-ready --sbatch with an
-        # injected --gres=gpu:1. A bare default ProbeShape() makes no such
+        # injected --gres=gpu:1. A bare default ResourceSpec() makes no such
         # statement, so it stays unrestricted (the self-test asserts this).
         if (
             not self.requires_gpu()
@@ -1924,7 +1924,7 @@ class ProbeShape:
         return False
 
     def requires_gpu(self) -> bool:
-        """True when this shape's hardware constraints can only be served by a GPU."""
+        """True when this request's hardware constraints can only be served by a GPU."""
         return (
             self.gpu_type is not None
             or self.gpu_count is not None
@@ -1934,20 +1934,20 @@ class ProbeShape:
     def has_explicit_cpu_intent(self) -> bool:
         """True when the user typed a CPU-side atom (cpu:N, total:N, per-node,
         mem=, vendor=, or an arch). Used by `should_skip` to keep GPU rows
-        out of CPU-shape probes; a bare ProbeShape() returns False so the
-        legacy 'default probe doesn't skip anything' contract still holds.
+        out of CPU-request wait checks; a bare ResourceSpec() returns False so the
+        legacy 'default wait check doesn't skip anything' contract still holds.
         """
         return (
             self.cpus_per_node is not None
             or self.cpus_is_total
-            or self.cpus != DEFAULT_PROBE_CPUS
+            or self.cpus != DEFAULT_REQUEST_CPUS
             or self.mem is not None
             or self.filter.cpu_vendor is not None
             or bool(self.filter.cpu_archs)
         )
 
     def accepts_gpu_token(self, token: str) -> bool:
-        """True iff `token` satisfies the shape's gpu_type substring (if set)
+        """True iff `token` satisfies the request's gpu_type substring (if set)
         and the HardwareFilter's gen/sm constraint (if set)."""
         if self.gpu_type and self.gpu_type not in token.lower():
             return False
@@ -1956,67 +1956,67 @@ class ProbeShape:
         return True
 
 
-def _filtered_cpu_shape_items(
-    bucket: "PartitionAvail", shape: "ProbeShape",
+def _filtered_cpu_class_items(
+    bucket: "PartitionAvail", request: "ResourceSpec",
 ) -> List[Tuple[Tuple[str, int], Tuple[int, int, int, int]]]:
-    """Bucket's per-(arch, cps) CPU entries restricted to those `shape` accepts.
+    """Bucket's per-(arch, cps) CPU entries restricted to those `request` accepts.
 
-    Shape with no CPU constraint → every entry passes through. Unclassified
+    Request with no CPU constraint → every entry passes through. Unclassified
     nodes (arch_short == "") are dropped when a constraint is set, since
     we can't prove they satisfy it.
 
     Each value tuple is (free_cpus, total_cpus, free_nodes, total_nodes).
     """
-    if not shape.filter.has_cpu_constraint():
+    if not request.filter.has_cpu_constraint():
         return [
             ((arch, cps), (free, total, fn, tn))
-            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_class.items()
         ]
     return [
         ((arch, cps), (free, total, fn, tn))
-        for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
-        if arch and shape.filter.cpu_satisfies({arch})
+        for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_class.items()
+        if arch and request.filter.cpu_satisfies({arch})
     ]
 
 
 def _filtered_gpu_items(
-    bucket: "PartitionAvail", shape: "ProbeShape",
+    bucket: "PartitionAvail", request: "ResourceSpec",
 ) -> List[Tuple[str, Tuple[int, int]]]:
-    """Bucket's GPU entries restricted to types `shape` accepts.
+    """Bucket's GPU entries restricted to types `request` accepts.
 
-    Shape with no GPU constraint at all → every entry passes through.
+    Request with no GPU constraint at all → every entry passes through.
     """
-    if not shape.gpu_type and not shape.filter.has_gpu_constraint():
+    if not request.gpu_type and not request.filter.has_gpu_constraint():
         return [(g, (free, total)) for g, (free, total) in bucket.gpus.items()]
     return [
         (g, (free, total))
         for g, (free, total) in bucket.gpus.items()
-        if shape.accepts_gpu_token(g)
+        if request.accepts_gpu_token(g)
     ]
 
 
-def _bucket_matches_shape(
-    bucket: "PartitionAvail", features: Set[str], shape: "ProbeShape",
+def _bucket_matches_request(
+    bucket: "PartitionAvail", features: Set[str], request: "ResourceSpec",
 ) -> bool:
-    """True iff `bucket` and `features` jointly satisfy `shape`.
+    """True iff `bucket` and `features` jointly satisfy `request`.
 
-    - Shape's CPU filter must accept `features` (empty features pass,
+    - Request's CPU filter must accept `features` (empty features pass,
       matching cpu_satisfies' missing-metadata convention).
-    - Shape requires GPU → at least one GPU type in the bucket must be
-      accepted; a CPU-only bucket fails for any GPU-requiring shape.
+    - Request requires GPU → at least one GPU type in the bucket must be
+      accepted; a CPU-only bucket fails for any GPU-requiring request.
     """
-    if not shape.filter.cpu_satisfies(features):
+    if not request.filter.cpu_satisfies(features):
         return False
-    if shape.requires_gpu():
+    if request.requires_gpu():
         if not bucket.gpus:
             return False
-        if not any(shape.accepts_gpu_token(g) for g in bucket.gpus):
+        if not any(request.accepts_gpu_token(g) for g in bucket.gpus):
             return False
     return True
 
 
 # ════════════════════════════════════════════════════════════════════
-# Shape grammar — parsers
+# Request grammar — parsers
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -2038,8 +2038,8 @@ def _spec_error(
     )
 
 
-def _shape_error(spec: str, problem: str, expected: str) -> CommandError:
-    return _spec_error("shape spec", spec, problem, expected, _SHAPE_HINT)
+def _request_error(spec: str, problem: str, expected: str) -> CommandError:
+    return _spec_error("request spec", spec, problem, expected, _REQUEST_HINT)
 
 
 def _gpus_error(spec: str, problem: str) -> CommandError:
@@ -2081,7 +2081,7 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     """Validate a `prefix:N` shorthand (e.g. 'cpu:32', 'gpu:4') and return N."""
     count_text = tok[len(prefix):].strip()
     if not count_text or not count_text.isdigit() or int(count_text) <= 0:
-        raise _shape_error(
+        raise _request_error(
             spec,
             f"{prefix!r} shorthand needs a positive integer count, got {count_text!r}",
             hint,
@@ -2089,7 +2089,7 @@ def _parse_prefix_count(tok: str, prefix: str, spec: str, hint: str) -> int:
     return int(count_text)
 
 
-# All known keys for `key=value` shape tokens. Used both by `_apply_kv_token`
+# All known keys for `key=value` request tokens. Used both by `_apply_kv_token`
 # (to dispatch) and by its unknown-key suggestion via difflib.get_close_matches.
 _KV_TOKEN_KEYS = (
     "cores", "total", "mem", "nodes", "time", "gpus", "vendor", "arch",
@@ -2097,7 +2097,7 @@ _KV_TOKEN_KEYS = (
 )
 
 
-# `gen=`/`gen_min=`/`sm=`/`sm_min=` share a common parse-and-store shape;
+# `gen=`/`gen_min=`/`sm=`/`sm_min=` share a common parse-and-store request;
 # this table parametrizes the four otherwise-near-duplicate handlers.
 _GEN_SM_KV_KEYS = {
     "gen":     ("gpu_gen",     _canon_gpu_gen, _GEN_HINT, "generation"),
@@ -2106,7 +2106,7 @@ _GEN_SM_KV_KEYS = {
     "sm_min":  ("gpu_sm_min",  _parse_sm_int,  _SM_HINT,  "SM"),
 }
 
-_AT_HINT = "<shape>@<duration>, e.g. 'a100:1@30m', 'cpu:32@12h'"
+_AT_HINT = "<request>@<duration>, e.g. 'a100:1@30m', 'cpu:32@12h'"
 
 
 def _parse_at_suffix(low: str, tok: str, spec: str) -> Tuple[str, Optional[str]]:
@@ -2117,11 +2117,11 @@ def _parse_at_suffix(low: str, tok: str, spec: str) -> Tuple[str, Optional[str]]
     head = head.strip()
     dur = dur.strip()
     if not head:
-        raise _shape_error(spec, f"empty shape before '@' in {tok!r}", _AT_HINT)
+        raise _request_error(spec, f"empty request before '@' in {tok!r}", _AT_HINT)
     if not dur:
-        raise _shape_error(spec, f"empty duration after '@' in {tok!r}", _AT_HINT)
+        raise _request_error(spec, f"empty duration after '@' in {tok!r}", _AT_HINT)
     if parse_wall_seconds(dur) is None:
-        raise _shape_error(
+        raise _request_error(
             spec,
             f"duration {dur!r} after '@' is not a recognized walltime",
             "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 30m)",
@@ -2132,14 +2132,14 @@ def _parse_at_suffix(low: str, tok: str, spec: str) -> Tuple[str, Optional[str]]
 def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
     """Validate & store one comma-separated `key=value` token into state."""
     if not val:
-        raise _shape_error(
+        raise _request_error(
             spec,
             f"empty value for {key!r}",
             f"{key}=VALUE (e.g. {key}=8 for an integer, {key}=24h for a duration)",
         )
     if key == "cores":
         if not val.isdigit() or int(val) <= 0:
-            raise _shape_error(
+            raise _request_error(
                 spec,
                 f"cores value {val!r} is not a positive integer",
                 "cores=N where N > 0 (e.g. cores=8, cores=32)",
@@ -2147,7 +2147,7 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
         state["cpus_per_node"] = int(val)
     elif key == "total":
         if not val.isdigit() or int(val) <= 0:
-            raise _shape_error(
+            raise _request_error(
                 spec,
                 f"total value {val!r} is not a positive integer",
                 "total=N where N > 0 (e.g. total=64); use 'cores=' for per-node",
@@ -2156,21 +2156,21 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
         state["cpus_is_total"] = True
     elif key == "mem":
         if not _MEM_RE.match(val):
-            raise _shape_error(
+            raise _request_error(
                 spec, f"mem value {val!r} has no unit",
                 "integer + unit, e.g. 16G, 32G, 128M",
             )
         state["mem"] = val
     elif key == "nodes":
         if not val.isdigit() or int(val) <= 0:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"nodes value {val!r} is not a positive integer",
                 "nodes=N where N > 0 (e.g. nodes=2)",
             )
         state["nodes"] = int(val)
     elif key == "time":
         if parse_wall_seconds(val) is None:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"time value {val!r} is not a recognized duration",
                 "HH:MM:SS, D-HH:MM:SS, Nd, or compact 'Nh'/'Nm' (e.g. 24h, 3d, 4:00:00)",
             )
@@ -2180,14 +2180,14 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
     elif key == "vendor":
         v = val.lower()
         if v not in _VENDORS:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"vendor value {val!r} is not recognized", _VENDOR_HINT,
             )
         state["cpu_vendor"] = v
     elif key == "arch":
         canon = _canon_cpu_arch(val)
         if canon is None:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"arch value {val!r} is not recognized", _ARCH_HINT,
             )
         if canon not in state["cpu_archs"]:
@@ -2196,7 +2196,7 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
         state_key, parser, hint, label = _GEN_SM_KV_KEYS[key]
         parsed = parser(val)
         if parsed is None:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"{key} value {val!r} is not a recognized {label}", hint,
             )
         state[state_key] = parsed
@@ -2205,7 +2205,7 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
         suggestions = difflib.get_close_matches(key, _KV_TOKEN_KEYS, n=2, cutoff=0.6)
         if suggestions:
             problem += f" (did you mean {' or '.join(repr(s) for s in suggestions)}?)"
-        raise _shape_error(
+        raise _request_error(
             spec,
             problem,
             "one of cores=, mem=, time=, gpus=, nodes=, vendor=, arch=, "
@@ -2214,7 +2214,7 @@ def _apply_kv_token(key: str, val: str, state: dict, spec: str) -> None:
 
 
 def _apply_positional_token(low: str, state: dict, spec: str) -> None:
-    """Apply one positional shape token.
+    """Apply one positional request token.
 
     Recognized forms (checked in order):
       Nn         -> nodes=N (e.g. '2n')
@@ -2230,7 +2230,7 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
     if len(low) > 1 and low.endswith("n") and low[:-1].isdigit():
         n = int(low[:-1])
         if n <= 0:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"node count {low!r} must be > 0",
                 "Nn where N > 0 (e.g. 2n, 4n)",
             )
@@ -2257,7 +2257,7 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
         return
     if low.isdigit():
         if int(low) <= 0:
-            raise _shape_error(
+            raise _request_error(
                 spec, f"bare integer {low!r} must be > 0", "N > 0 (treated as cores=N)",
             )
         state["cpus_per_node"] = int(low)
@@ -2281,8 +2281,8 @@ def _apply_positional_token(low: str, state: dict, spec: str) -> None:
     state["gpu_type"], state["gpu_count"] = parse_gpu_spec(low)
 
 
-# Keys partitioned for ProbeShape / HardwareFilter at construction time.
-_PROBESHAPE_STATE_KEYS = (
+# Keys partitioned for ResourceSpec / HardwareFilter at construction time.
+_RESOURCE_SPEC_STATE_KEYS = (
     "nodes", "cpus", "cpus_per_node", "cpus_is_total",
     "mem", "gpu_type", "gpu_count", "time",
 )
@@ -2292,8 +2292,8 @@ _FILTER_STATE_KEYS = (
 )
 
 
-def parse_shape_spec(spec: str) -> ProbeShape:
-    """Parse a single shape SPEC into a ProbeShape.
+def parse_resource_spec(spec: str) -> ResourceSpec:
+    """Parse a single request SPEC into a ResourceSpec.
 
     Tokens (comma-separated, any order):
       cores=N | total=N | mem=SIZE | time=DUR | gpus=SPEC | nodes=N
@@ -2312,7 +2312,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
       <NV-gen>     -> GPU gen filter (ampere, hopper, ada, ...)
       sm<NN>       -> exact SM compute capability (sm80, sm_80, ...)
     Walltime suffix on any positional shorthand:
-      <shape>@<DUR> -> shape + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
+      <request>@<DUR> -> request + time=DUR (e.g. 'a100:1@30m', 'cpu:32@12h')
 
     Per-node rule:
       cpu:N and cores=N are PER NODE; total cores = N * nodes. Use 'total:N'
@@ -2335,20 +2335,20 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     """
     s = (spec or "").strip()
     if not s:
-        raise _shape_error(
+        raise _request_error(
             spec, "empty SPEC",
             "comma-separated tokens, e.g. 'a100:4,mem=32G,time=24h' or 'cpu:32,time=12h'",
         )
-    # Keys must be the union of _PROBESHAPE_STATE_KEYS and _FILTER_STATE_KEYS;
+    # Keys must be the union of _RESOURCE_SPEC_STATE_KEYS and _FILTER_STATE_KEYS;
     # `_apply_kv_token` and `_apply_positional_token` write here, then the
-    # construction below partitions the dict for ProbeShape vs HardwareFilter.
+    # construction below partitions the dict for ResourceSpec vs HardwareFilter.
     state: Dict[str, object] = {
-        "nodes": DEFAULT_PROBE_NODES,
-        "cpus": DEFAULT_PROBE_CPUS,
+        "nodes": DEFAULT_REQUEST_NODES,
+        "cpus": DEFAULT_REQUEST_CPUS,
         "cpus_per_node": None,
         "cpus_is_total": False,
         "mem": None,
-        "time": DEFAULT_PROBE_TIME,
+        "time": DEFAULT_REQUEST_TIME,
         "gpu_type": None,
         "gpu_count": None,
         "cpu_vendor": None,
@@ -2376,7 +2376,7 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     # SLURM total. 'total:' / 'total=' bypass this. The two are mutually
     # exclusive — flag the conflict early instead of silently dropping one.
     if state["cpus_per_node"] is not None and state["cpus_is_total"]:
-        raise _shape_error(
+        raise _request_error(
             spec,
             "cannot mix per-node cores (cpu:/cores=) with total:/total= in one spec",
             "use either per-node ('2n,cpu:32') or total ('2n,total:64'), not both",
@@ -2384,28 +2384,28 @@ def parse_shape_spec(spec: str) -> ProbeShape:
     if state["cpus_per_node"] is not None:
         state["cpus"] = state["cpus_per_node"] * state["nodes"]
 
-    shape_args = {k: state[k] for k in _PROBESHAPE_STATE_KEYS}
+    resource_args = {k: state[k] for k in _RESOURCE_SPEC_STATE_KEYS}
     filter_args = {k: state[k] for k in _FILTER_STATE_KEYS}
     filter_args["cpu_archs"] = tuple(filter_args["cpu_archs"])
-    return ProbeShape(filter=HardwareFilter(**filter_args), **shape_args)
+    return ResourceSpec(filter=HardwareFilter(**filter_args), **resource_args)
 
 
-def parse_shape_list(spec: str) -> List[ProbeShape]:
-    """Parse a SHAPE_LIST: '+' joins alternatives, '*' combines into one job.
+def parse_resource_list(spec: str) -> List[ResourceSpec]:
+    """Parse a REQUEST_LIST: '+' joins alternatives, '*' combines into one job.
 
-    Top-level '+' separates independent probes (OR). Inside each group, '*'
-    merges pieces into a single shape (AND): the AND-joined pieces are
-    comma-concatenated and handed to parse_shape_spec, so later tokens
+    Top-level '+' separates independent wait checks (OR). Inside each group, '*'
+    merges pieces into a single request (AND): the AND-joined pieces are
+    comma-concatenated and handed to parse_resource_spec, so later tokens
     overwrite earlier same-field values (last-wins, matching how duplicate
-    keys behave inside one comma-token shape).
+    keys behave inside one comma-token request).
     """
     s = (spec or "").strip()
     _LIST_HINT = (
-        "shapes joined with '+' (alternatives) and '*' (combine), "
+        "requests joined with '+' (alternatives) and '*' (combine), "
         "e.g. 'a100:4', 'a100:4*cpu:32', 'a100:4*cpu:32+h100:1'"
     )
     if not s:
-        raise _shape_error(spec, "empty SHAPE_LIST", _LIST_HINT)
+        raise _request_error(spec, "empty REQUEST_LIST", _LIST_HINT)
     if s.endswith("+"):
         last_atom = (
             s[:-1]
@@ -2419,27 +2419,27 @@ def parse_shape_list(spec: str) -> List[ProbeShape]:
             _parse_sm_token(last_atom) is not None
             or _canon_gpu_gen(last_atom) is not None
         ):
-            raise _shape_error(
+            raise _request_error(
                 spec,
                 "'+' suffix is not supported for GPU ranges",
                 "use key=value ranges such as sm_min=80 or gen_min=ampere; "
-                "'+' separates shape alternatives",
+                "'+' separates request alternatives",
             )
-    shapes: List[ProbeShape] = []
+    requests: List[ResourceSpec] = []
     for or_raw in s.split("+"):
         or_piece = or_raw.strip()
         if not or_piece:
-            raise _shape_error(
+            raise _request_error(
                 spec, "empty piece between '+' separators", _LIST_HINT,
             )
         and_pieces = [p.strip() for p in or_piece.split("*")]
         if any(not p for p in and_pieces):
-            raise _shape_error(
+            raise _request_error(
                 spec, "empty piece between '*' separators", _LIST_HINT,
             )
         merged = ",".join(and_pieces)
-        shapes.append(parse_shape_spec(merged))
-    return shapes
+        requests.append(parse_resource_spec(merged))
+    return requests
 
 
 def _shortest_matching_gpu(
@@ -2477,8 +2477,8 @@ def parse_test_only_stderr(text: str) -> Optional[datetime]:
         return None
 
 
-def _clean_probe_message(text: str) -> str:
-    """Return a compact one-line scheduler message for unknown probe failures."""
+def _clean_wait_check_message(text: str) -> str:
+    """Return a compact one-line scheduler message for unknown wait check failures."""
     lines = []
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -2488,12 +2488,12 @@ def _clean_probe_message(text: str) -> str:
         if line:
             lines.append(line)
     if not lines:
-        return NOTE_PROBE_ERROR
+        return NOTE_WAIT_CHECK_ERROR
     msg = "; ".join(lines)
     return msg[:77] + "..." if len(msg) > 80 else msg
 
 
-def classify_probe_failure(text: str) -> str:
+def classify_wait_check_failure(text: str) -> str:
     """Map `sbatch --test-only` rejection text to a short note token.
 
     The raw scheduler output is often verbose or repeats boilerplate. The note
@@ -2501,9 +2501,9 @@ def classify_probe_failure(text: str) -> str:
     """
     lower = (text or "").lower()
     if not lower.strip():
-        return NOTE_PROBE_ERROR
+        return NOTE_WAIT_CHECK_ERROR
     if "timed out" in lower:
-        return NOTE_PROBE_TIMEOUT
+        return NOTE_WAIT_CHECK_TIMEOUT
     if "invalid account" in lower or "invalid account" in lower.replace("_", " "):
         return NOTE_INVALID_ACCOUNT
     if "invalid qos" in lower or "qos is invalid" in lower:
@@ -2520,7 +2520,7 @@ def classify_probe_failure(text: str) -> str:
         or "node configuration" in lower and "not available" in lower
     ):
         return NOTE_UNAVAILABLE
-    return _clean_probe_message(text)
+    return _clean_wait_check_message(text)
 
 
 def _format_wait(seconds: Optional[int]) -> str:
@@ -2546,17 +2546,17 @@ def _format_wait(seconds: Optional[int]) -> str:
 def predict_wait_result(
     row: "AllocationRow",
     timeout: float = 10.0,
-    shape: Optional[ProbeShape] = None,
+    request: Optional[ResourceSpec] = None,
 ) -> Tuple[Optional[int], str]:
-    """Return (seconds-until-start, failure-reason) for a shaped probe job.
+    """Return (seconds-until-start, failure-reason) for a resource-request wait check.
 
     Iterates through `_candidate_partitions(row)` because some QOS names don't
     match the partition (e.g. `granite-freecycle` QOS lives on `granite`
     partition; the existing helper produces both candidates in order).
     """
-    if shape is None:
-        shape = ProbeShape()
-    if shape.should_skip(row):
+    if request is None:
+        request = ResourceSpec()
+    if request.should_skip(row):
         return None, "incompatible"
     sbatch = shutil.which("sbatch")
     if not sbatch:
@@ -2576,7 +2576,7 @@ def predict_wait_result(
             "-p", partition,
             "-q", row.qos,
         ]
-        args.extend(shape.to_sbatch_args(row))
+        args.extend(request.to_sbatch_args(row))
         args.append("--wrap=true")
         try:
             result = subprocess.run(
@@ -2588,9 +2588,9 @@ def predict_wait_result(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            return None, NOTE_PROBE_TIMEOUT
+            return None, NOTE_WAIT_CHECK_TIMEOUT
         except OSError:
-            return None, NOTE_PROBE_ERROR
+            return None, NOTE_WAIT_CHECK_ERROR
         # `--test-only` prints to stderr regardless of success.
         start = parse_test_only_stderr(result.stderr) or parse_test_only_stderr(result.stdout)
         if start is not None:
@@ -2601,58 +2601,58 @@ def predict_wait_result(
             # that would break the math on a single-TZ cluster like CHPC.
             delta = (start - datetime.now()).total_seconds()
             return max(0, int(delta)), ""
-        failure_reason = classify_probe_failure(
+        failure_reason = classify_wait_check_failure(
             "\n".join(part for part in (result.stderr, result.stdout) if part)
         )
-    return None, failure_reason or NOTE_PROBE_ERROR
+    return None, failure_reason or NOTE_WAIT_CHECK_ERROR
 
 
 def predict_wait(
     row: "AllocationRow",
     timeout: float = 10.0,
-    shape: Optional[ProbeShape] = None,
+    request: Optional[ResourceSpec] = None,
 ) -> Optional[int]:
     """Return seconds-until-start, preserving the historical scalar API."""
-    wait_secs, _reason = predict_wait_result(row, timeout=timeout, shape=shape)
+    wait_secs, _reason = predict_wait_result(row, timeout=timeout, request=request)
     return wait_secs
 
 
 _PROGRESS_NOTICE_THRESHOLD = 24
 # Width for the rolling-counter clear-line write — wide enough to wipe
-# any "[chpc-allocs] probing N/M..." string we're likely to emit.
+# any "[chpc-allocs] checking N/M..." string we're likely to emit.
 _PROGRESS_CLEAR_WIDTH = 60
 
 
 def predict_wait_times(
     rows: List["AllocationRow"],
-    shapes: Optional[List[ProbeShape]] = None,
+    requests: Optional[List[ResourceSpec]] = None,
     max_workers: int = 8,
-    probe_timeout: float = 10.0,
+    wait_check_timeout: float = 10.0,
     *,
     verbose: bool = False,
     quiet: bool = False,
 ) -> None:
-    """Populate `row.wait_by_shape[shape.label]` for every (row, shape), in parallel.
+    """Populate `row.wait_by_request[request.label]` for every (row, request), in parallel.
 
-    Unless `quiet`, prints a `Probing N wait probes...` start line and a
-    `probed N pairs in T s` end line on stderr — visible on TTY and piped
+    Unless `quiet`, prints a `Checking N wait checks...` start line and a
+    `checked N pairs in T s` end line on stderr — visible on TTY and piped
     runs alike, so users see something even when stdout is captured. With
     `verbose`, the same start line still fires; the end line is suppressed
     so it doesn't trail the per-row [v] narration. The interactive rolling
-    counter (TTY only, large probe counts, non-verbose, non-quiet) is
+    counter (TTY only, large wait check counts, non-verbose, non-quiet) is
     unchanged.
     """
     if not rows or shutil.which("sbatch") is None:
         return
-    if not shapes:
-        shapes = [ProbeShape()]
-    probe_pairs = [
-        (row, shape)
+    if not requests:
+        requests = [ResourceSpec()]
+    wait_check_pairs = [
+        (row, request)
         for row in rows
-        for shape in shapes
-        if not shape.should_skip(row)
+        for request in requests
+        if not request.should_skip(row)
     ]
-    pair_count = len(probe_pairs)
+    pair_count = len(wait_check_pairs)
     if pair_count == 0:
         return
     threshold_hit = pair_count >= _PROGRESS_NOTICE_THRESHOLD
@@ -2664,24 +2664,24 @@ def predict_wait_times(
     start_time = datetime.now()
     if not quiet:
         print(
-            f"[chpc-allocs] Probing {pair_count} wait probes "
-            f"({effective_workers} parallel, up to {probe_timeout:g}s each)...",
+            f"[chpc-allocs] Checking {pair_count} wait checks "
+            f"({effective_workers} parallel, up to {wait_check_timeout:g}s each)...",
             file=sys.stderr,
         )
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
-        for row, shape in probe_pairs:
+        for row, request in wait_check_pairs:
             futures[
                 pool.submit(
                     predict_wait_result,
                     row,
-                    timeout=probe_timeout,
-                    shape=shape,
+                    timeout=wait_check_timeout,
+                    request=request,
                 )
-            ] = (row, shape)
+            ] = (row, request)
         completed = 0
         for future in as_completed(futures):
-            row, shape = futures[future]
+            row, request = futures[future]
             try:
                 result = future.result()
                 if isinstance(result, tuple):
@@ -2690,15 +2690,15 @@ def predict_wait_times(
                     # Compatibility for tests or callers that monkeypatch the
                     # historical scalar predict_wait API into this slot.
                     wait_secs, reason = result, ""
-                row.wait_by_shape[shape.label] = wait_secs
-                row.probe_reason_by_shape[shape.label] = reason
+                row.wait_by_request[request.label] = wait_secs
+                row.wait_check_reason_by_request[request.label] = reason
             except Exception:
-                row.wait_by_shape[shape.label] = None
-                row.probe_reason_by_shape[shape.label] = NOTE_PROBE_ERROR
+                row.wait_by_request[request.label] = None
+                row.wait_check_reason_by_request[request.label] = NOTE_WAIT_CHECK_ERROR
             completed += 1
             if use_rolling:
                 sys.stderr.write(
-                    f"\r[chpc-allocs] probing {completed}/{pair_count}..."
+                    f"\r[chpc-allocs] checking {completed}/{pair_count}..."
                 )
                 sys.stderr.flush()
     if use_rolling:
@@ -2709,7 +2709,7 @@ def predict_wait_times(
     if not quiet and not verbose:
         elapsed = (datetime.now() - start_time).total_seconds()
         print(
-            f"[chpc-allocs] probed {pair_count} pairs in {elapsed:.1f}s",
+            f"[chpc-allocs] checked {pair_count} pairs in {elapsed:.1f}s",
             file=sys.stderr,
         )
 
@@ -2746,7 +2746,7 @@ def _candidate_partitions(row: "AllocationRow") -> List[str]:
     blank for many account/qos combinations on CHPC), and even when it does,
     the matching partition name is sometimes the QOS name with a suffix
     stripped (e.g. QOS `granite-gpu-freecycle` runs on partition `granite-gpu`).
-    Probes try each candidate in order and stop at the first one SLURM accepts.
+    Wait checks try each candidate in order and stop at the first one SLURM accepts.
     """
     candidates: List[str] = []
     if row.partition:
@@ -2798,7 +2798,7 @@ def _render_simple_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) 
 def format_gpu_summary(
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
-    shapes: Optional[Sequence["ProbeShape"]] = None,
+    requests: Optional[Sequence["ResourceSpec"]] = None,
 ) -> str:
     """Render GPU inventory as a table with one row per (cluster, partition, gtype).
 
@@ -2806,10 +2806,10 @@ def format_gpu_summary(
     capability via _classify_gpu_token. Unrecognized tokens still render —
     GENERATION/SM cells are blank rather than absent.
 
-    When `shapes` is given, only (cluster, partition, gtype) rows accepted
-    by some shape's HardwareFilter are emitted: the partition's CPU
-    features must satisfy the shape's CPU constraint, and the gtype must
-    satisfy the shape's GPU constraint. `partition_features` supplies the
+    When `requests` is given, only (cluster, partition, gtype) rows accepted
+    by some request's HardwareFilter are emitted: the partition's CPU
+    features must satisfy the request's CPU constraint, and the gtype must
+    satisfy the request's GPU constraint. `partition_features` supplies the
     CPU side; without it, CPU constraints are treated as missing-metadata
     (pass) — same convention as `cpu_satisfies`.
     """
@@ -2821,18 +2821,18 @@ def format_gpu_summary(
             if not bucket.gpus:
                 continue
             features = feat_map.get(cluster, {}).get(partition, set())
-            cpu_ok_shapes = (
-                [s for s in shapes if s.filter.cpu_satisfies(features)]
-                if shapes else None
+            cpu_ok_requests = (
+                [s for s in requests if s.filter.cpu_satisfies(features)]
+                if requests else None
             )
-            if cpu_ok_shapes is not None and not cpu_ok_shapes:
+            if cpu_ok_requests is not None and not cpu_ok_requests:
                 continue
             nodes_ft = f"{bucket.nodes_free}/{bucket.nodes_total}n"
             cpus_ft = f"{bucket.cpus_free}/{bucket.cpus_total}c"
             node_type_cell = _render_node_types_cell(bucket.node_types)
             for gtype, (free, total) in sorted(bucket.gpus.items()):
-                if cpu_ok_shapes is not None and not any(
-                    s.accepts_gpu_token(gtype) for s in cpu_ok_shapes
+                if cpu_ok_requests is not None and not any(
+                    s.accepts_gpu_token(gtype) for s in cpu_ok_requests
                 ):
                     continue
                 cls = _classify_gpu_token(gtype)
@@ -2847,8 +2847,8 @@ def format_gpu_summary(
                     f"{free}/{total}", node_type_cell, nodes_ft, cpus_ft,
                 ])
     if not rows:
-        if shapes:
-            return "(no GPU resources match shape)"
+        if requests:
+            return "(no GPU resources match request)"
         return "(no GPU partitions found)"
     return _render_simple_table(
         ["CLUSTER", "PARTITION", "VENDOR", "GTYPE", "GENERATION", "SM",
@@ -2959,7 +2959,7 @@ def _arch_display_list(feats: Iterable[str]) -> str:
 def format_cpu_summary(
     partition_features: Dict[str, Dict[str, Set[str]]],
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
-    shapes: Optional[Sequence["ProbeShape"]] = None,
+    requests: Optional[Sequence["ResourceSpec"]] = None,
 ) -> str:
     """Render CPU-only partitions as a table.
 
@@ -2987,9 +2987,9 @@ def format_cpu_summary(
             )
             if avail_bucket is not None and avail_bucket.gpus:
                 continue
-            if shapes and not any(
+            if requests and not any(
                 not s.requires_gpu() and s.filter.cpu_satisfies(feats)
-                for s in shapes
+                for s in requests
             ):
                 continue
             vendor_short = classify_cpu_vendor(feats)
@@ -3008,8 +3008,8 @@ def format_cpu_summary(
                 row.append(_arch_display_list(feats))
             rows.append(row)
     if not rows:
-        if shapes:
-            return "(no CPU partitions match shape)"
+        if requests:
+            return "(no CPU partitions match request)"
         return "(no CPU-only partitions found)"
     headers = ["CLUSTER", "PARTITION", "VENDOR"]
     if show_avail:
@@ -3026,7 +3026,7 @@ def attach_metadata(
     partition_gpus: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None,
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
-    shapes: Optional[Sequence["ProbeShape"]] = None,
+    requests: Optional[Sequence["ResourceSpec"]] = None,
 ) -> None:
     qos_info = show_qos(row.qos for row in rows)
     share_info = {} if include_usage is False else show_usage(user)
@@ -3042,7 +3042,7 @@ def attach_metadata(
         row.tags = classify(row)
         if partition_avail is not None:
             attach_row_availability(
-                row, partition_avail, partition_features, shapes,
+                row, partition_avail, partition_features, requests,
             )
 
 
@@ -3053,37 +3053,37 @@ class AvailabilityAccum:
         self.cpus_free = 0
         self.cpus_total = 0
         # (arch, cps) -> [cpus_free, cpus_total, nodes_free, nodes_total]
-        self.cpu_shapes: Dict[Tuple[str, int], List[int]] = {}
+        self.cpu_classes: Dict[Tuple[str, int], List[int]] = {}
         self.gpus: Dict[str, List[int]] = {}
         self.matched = False
-        # Set when the accumulator was driven by a per-shape walk over
+        # Set when the accumulator was driven by a per-request walk over
         # per-node records — `nodes_fitting` and `nodes_sized` are only
         # meaningful in that case. The aggregate-fallback path (no
-        # node_records) leaves shape_aware=False and renders the legacy
+        # node_records) leaves request_aware=False and renders the legacy
         # nodes_free/nodes_total cell.
-        self.shape_aware = False
-        # Counters populated in shape mode:
-        #   nodes_sized:   nodes large enough to ever host one shape instance.
-        #   nodes_fitting: nodes that could host one shape instance right now.
+        self.request_aware = False
+        # Counters populated in request mode:
+        #   nodes_sized:   nodes large enough to ever host one request instance.
+        #   nodes_fitting: nodes that could host one request instance right now.
         self.nodes_sized = 0
         self.nodes_fitting = 0
 
-    def extend_cpu_shape(
+    def extend_cpu_class(
         self, arch: str, cps: int, free: int, total: int,
         free_nodes: int, total_nodes: int,
     ) -> None:
         """Bulk accumulation from a precomputed bucket entry."""
-        slot = self.cpu_shapes.setdefault((arch, cps), [0, 0, 0, 0])
+        slot = self.cpu_classes.setdefault((arch, cps), [0, 0, 0, 0])
         slot[0] += free
         slot[1] += total
         slot[2] += free_nodes
         slot[3] += total_nodes
 
-    def add_cpu_shape(
+    def add_cpu_class(
         self, arch: str, cps: int, free: int, total: int, is_free: bool,
     ) -> None:
-        """Per-node accumulation: count this node toward the shape's totals."""
-        self.extend_cpu_shape(arch, cps, free, total, 1 if is_free else 0, 1)
+        """Per-node accumulation: count this node toward the request's totals."""
+        self.extend_cpu_class(arch, cps, free, total, 1 if is_free else 0, 1)
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
@@ -3093,21 +3093,21 @@ class AvailabilityAccum:
     def render(self) -> Tuple[str, str, str]:
         if not self.matched:
             return "", "", ""
-        if self.shape_aware:
+        if self.request_aware:
             # 'fitting / could-host' — answers "could one instance of the
-            # shape run on a real node right now". The aggregate idle count
+            # request run on a real node right now". The aggregate idle count
             # is what `wait` would also see, but it doesn't co-locate the
             # resources; nodes_fitting does.
             free_nodes = f"{self.nodes_fitting}/{self.nodes_sized}"
         else:
             free_nodes = f"{self.nodes_free}/{self.nodes_total}"
-        if self.cpu_shapes:
+        if self.cpu_classes:
             ordered = sorted(
-                self.cpu_shapes.items(),
+                self.cpu_classes.items(),
                 key=lambda kv: (-kv[1][1], kv[0][0] or "~", kv[0][1]),
             )
             free_cpus = ", ".join(
-                _format_cpu_shape_token(arch, cps, free, total, fn, tn)
+                _format_cpu_class_token(arch, cps, free, total, fn, tn)
                 for (arch, cps), (free, total, fn, tn) in ordered
             )
         else:
@@ -3122,140 +3122,140 @@ class AvailabilityAccum:
         return free_nodes, free_cpus, free_gpus
 
 
-def _shape_cpu_matches_node(
-    shape: "ProbeShape", arch: str, partition_features: Set[str],
+def _request_cpu_matches_node(
+    request: "ResourceSpec", arch: str, partition_features: Set[str],
 ) -> bool:
-    if not shape.filter.has_cpu_constraint():
+    if not request.filter.has_cpu_constraint():
         return True
     if arch:
-        return shape.filter.cpu_satisfies((arch,))
+        return request.filter.cpu_satisfies((arch,))
     # Best effort for genuinely missing metadata. If partition-level features
     # exist, an unclassified node should not be counted toward a CPU constraint.
     return not partition_features
 
 
-def _node_gpu_items_for_shape(
+def _node_gpu_items_for_request(
     gpu_total: Dict[str, int],
-    shape: Optional["ProbeShape"],
+    request: Optional["ResourceSpec"],
 ) -> List[Tuple[str, int]]:
-    if shape is None or not shape.requires_gpu():
+    if request is None or not request.requires_gpu():
         return sorted(gpu_total.items())
     return sorted(
         (gtype, total) for gtype, total in gpu_total.items()
-        if shape.accepts_gpu_token(gtype)
+        if request.accepts_gpu_token(gtype)
     )
 
 
-def _shape_matches_node(
-    shape: "ProbeShape",
+def _request_matches_node(
+    request: "ResourceSpec",
     arch: str,
     gpu_total: Dict[str, int],
     partition_features: Set[str],
 ) -> bool:
-    if not _shape_cpu_matches_node(shape, arch, partition_features):
+    if not _request_cpu_matches_node(request, arch, partition_features):
         return False
-    if shape.requires_gpu() and not _node_gpu_items_for_shape(gpu_total, shape):
+    if request.requires_gpu() and not _node_gpu_items_for_request(gpu_total, request):
         return False
     return True
 
 
 def _node_accepted_gpu_total(
-    gpu_total: Dict[str, int], shape: "ProbeShape",
+    gpu_total: Dict[str, int], request: "ResourceSpec",
 ) -> int:
-    """Sum of node's GPU counts whose type the shape accepts."""
-    return sum(total for _, total in _node_gpu_items_for_shape(gpu_total, shape))
+    """Sum of node's GPU counts whose type the request accepts."""
+    return sum(total for _, total in _node_gpu_items_for_request(gpu_total, request))
 
 
 def _node_accepted_gpu_free(
     gpu_total: Dict[str, int],
     gpu_used: Dict[str, int],
-    shape: "ProbeShape",
+    request: "ResourceSpec",
 ) -> int:
-    """Free GPUs on this node whose type the shape accepts."""
+    """Free GPUs on this node whose type the request accepts."""
     return sum(
         max(0, total - gpu_used.get(gtype, 0))
-        for gtype, total in _node_gpu_items_for_shape(gpu_total, shape)
+        for gtype, total in _node_gpu_items_for_request(gpu_total, request)
     )
 
 
-def _shape_node_sized(
-    shape: "ProbeShape",
+def _request_node_sized(
+    request: "ResourceSpec",
     record: NodeRecord,
     partition_features: Set[str],
 ) -> bool:
-    """True when this node is *large enough* to ever host one shape instance —
+    """True when this node is *large enough* to ever host one request instance —
     irrespective of current load. Uses configured totals for CPUs / GPUs /
     memory; the memory check is skipped when sinfo didn't expose a value
     (mem_total == 0) so partial metadata doesn't drop otherwise-valid nodes.
     """
-    if not _shape_matches_node(
-        shape, record.arch, record.gpu_total, partition_features
+    if not _request_matches_node(
+        request, record.arch, record.gpu_total, partition_features
     ):
         return False
-    if record.cpus_total < shape.min_cpus_per_node:
+    if record.cpus_total < request.min_cpus_per_node:
         return False
-    if shape.min_gpus_per_node and (
-        _node_accepted_gpu_total(record.gpu_total, shape) < shape.min_gpus_per_node
+    if request.min_gpus_per_node and (
+        _node_accepted_gpu_total(record.gpu_total, request) < request.min_gpus_per_node
     ):
         return False
-    if (shape.min_mem_per_node is not None and record.mem_total > 0
-            and record.mem_total < shape.min_mem_per_node):
+    if (request.min_mem_per_node is not None and record.mem_total > 0
+            and record.mem_total < request.min_mem_per_node):
         return False
     return True
 
 
-def _shape_node_fits_now(
-    shape: "ProbeShape",
+def _request_node_fits_now(
+    request: "ResourceSpec",
     record: NodeRecord,
     partition_features: Set[str],
     *,
     assume_sized: bool = False,
 ) -> bool:
-    """True when this node currently has the headroom for one shape instance.
+    """True when this node currently has the headroom for one request instance.
 
     Pass `assume_sized=True` when the caller already verified the sized
     predicate — saves the redundant compatibility/total checks in the hot
-    multi-shape loop.
+    multi-request loop.
     """
-    if not assume_sized and not _shape_node_sized(shape, record, partition_features):
+    if not assume_sized and not _request_node_sized(request, record, partition_features):
         return False
     if not record.is_free:
         return False
-    if record.cpus_idle < shape.min_cpus_per_node:
+    if record.cpus_idle < request.min_cpus_per_node:
         return False
-    if shape.min_gpus_per_node and (
-        _node_accepted_gpu_free(record.gpu_total, record.gpu_used, shape)
-        < shape.min_gpus_per_node
+    if request.min_gpus_per_node and (
+        _node_accepted_gpu_free(record.gpu_total, record.gpu_used, request)
+        < request.min_gpus_per_node
     ):
         return False
-    if shape.min_mem_per_node is not None and record.mem_total > 0:
+    if request.min_mem_per_node is not None and record.mem_total > 0:
         mem_free = max(0, record.mem_total - record.mem_alloc)
-        if mem_free < shape.min_mem_per_node:
+        if mem_free < request.min_mem_per_node:
             return False
     return True
 
 
-def _accumulate_bucket_for_shape(
+def _accumulate_bucket_for_request(
     acc: AvailabilityAccum,
     bucket: "PartitionAvail",
     features: Set[str],
-    shape: Optional["ProbeShape"],
+    request: Optional["ResourceSpec"],
 ) -> None:
-    if shape is not None and not _bucket_matches_shape(bucket, features, shape):
+    if request is not None and not _bucket_matches_request(bucket, features, request):
         return
     if bucket.node_records:
-        if shape is not None:
-            acc.shape_aware = True
+        if request is not None:
+            acc.request_aware = True
         for record in bucket.node_records:
-            if shape is not None:
-                # Drop nodes that aren't big enough to host one shape
+            if request is not None:
+                # Drop nodes that aren't big enough to host one request
                 # instance — they were misleading clutter under the old
-                # compatibility-only filter (a 4-GPU shape against a
+                # compatibility-only filter (a 4-GPU request against a
                 # 2-GPU node would still credit the node's idle CPUs).
-                if not _shape_node_sized(shape, record, features):
+                if not _request_node_sized(request, record, features):
                     continue
-                if _shape_node_fits_now(
-                    shape, record, features, assume_sized=True
+                if _request_node_fits_now(
+                    request, record, features, assume_sized=True
                 ):
                     acc.nodes_fitting += 1
                 acc.nodes_sized += 1
@@ -3265,12 +3265,12 @@ def _accumulate_bucket_for_shape(
             if record.is_free:
                 acc.nodes_free += 1
                 acc.cpus_free += record.cpus_idle
-            acc.add_cpu_shape(
+            acc.add_cpu_class(
                 record.arch, record.cps,
                 record.cpus_idle if record.is_free else 0,
                 record.cpus_total, record.is_free,
             )
-            for gtype, total in _node_gpu_items_for_shape(record.gpu_total, shape):
+            for gtype, total in _node_gpu_items_for_request(record.gpu_total, request):
                 used = record.gpu_used.get(gtype, 0)
                 free = max(0, total - used) if record.is_free else 0
                 acc.add_gpu(gtype, free, total)
@@ -3280,50 +3280,50 @@ def _accumulate_bucket_for_shape(
     acc.nodes_free += bucket.nodes_free
     acc.nodes_total += bucket.nodes_total
     cpu_items = (
-        _filtered_cpu_shape_items(bucket, shape)
-        if shape is not None
+        _filtered_cpu_class_items(bucket, request)
+        if request is not None
         else [
             ((arch, cps), (free, total, fn, tn))
-            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_class.items()
         ]
     )
     if cpu_items:
         for (arch, cps), (free, total, fn, tn) in cpu_items:
-            acc.extend_cpu_shape(arch, cps, free, total, fn, tn)
+            acc.extend_cpu_class(arch, cps, free, total, fn, tn)
             acc.cpus_free += free
             acc.cpus_total += total
     else:
         acc.cpus_free += bucket.cpus_free
         acc.cpus_total += bucket.cpus_total
     gpu_items = (
-        _filtered_gpu_items(bucket, shape)
-        if shape is not None
+        _filtered_gpu_items(bucket, request)
+        if request is not None
         else bucket.gpus.items()
     )
     for gtype, (free, total) in gpu_items:
         acc.add_gpu(gtype, free, total)
 
 
-def _accumulate_bucket_for_shapes(
+def _accumulate_bucket_for_requests(
     acc: AvailabilityAccum,
     bucket: "PartitionAvail",
     features: Set[str],
-    shapes: Optional[Sequence["ProbeShape"]],
+    requests: Optional[Sequence["ResourceSpec"]],
 ) -> None:
-    if not shapes:
-        _accumulate_bucket_for_shape(acc, bucket, features, None)
+    if not requests:
+        _accumulate_bucket_for_request(acc, bucket, features, None)
         return
-    accepting = [s for s in shapes if _bucket_matches_shape(bucket, features, s)]
+    accepting = [s for s in requests if _bucket_matches_request(bucket, features, s)]
     if not accepting:
         return
     if bucket.node_records:
-        acc.shape_aware = True
+        acc.request_aware = True
         for record in bucket.node_records:
-            sized = [s for s in accepting if _shape_node_sized(s, record, features)]
+            sized = [s for s in accepting if _request_node_sized(s, record, features)]
             if not sized:
                 continue
             if any(
-                _shape_node_fits_now(s, record, features, assume_sized=True)
+                _request_node_fits_now(s, record, features, assume_sized=True)
                 for s in sized
             ):
                 acc.nodes_fitting += 1
@@ -3334,14 +3334,14 @@ def _accumulate_bucket_for_shapes(
             if record.is_free:
                 acc.nodes_free += 1
                 acc.cpus_free += record.cpus_idle
-            acc.add_cpu_shape(
+            acc.add_cpu_class(
                 record.arch, record.cps,
                 record.cpus_idle if record.is_free else 0,
                 record.cpus_total, record.is_free,
             )
             allowed_gpus: Dict[str, int] = {}
             for s in sized:
-                for gtype, total in _node_gpu_items_for_shape(record.gpu_total, s):
+                for gtype, total in _node_gpu_items_for_request(record.gpu_total, s):
                     allowed_gpus[gtype] = total
             for gtype, total in sorted(allowed_gpus.items()):
                 used = record.gpu_used.get(gtype, 0)
@@ -3357,17 +3357,17 @@ def _accumulate_bucket_for_shapes(
     if any(not s.filter.has_cpu_constraint() for s in accepting):
         cpu_items = [
             ((arch, cps), (free, total, fn, tn))
-            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_shape.items()
+            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_class.items()
         ]
     else:
         seen_cpu: Dict[Tuple[str, int], Tuple[int, int, int, int]] = {}
         for s in accepting:
-            for key, ft in _filtered_cpu_shape_items(bucket, s):
+            for key, ft in _filtered_cpu_class_items(bucket, s):
                 seen_cpu[key] = ft
         cpu_items = list(seen_cpu.items())
     if cpu_items:
         for (arch, cps), (free, total, fn, tn) in cpu_items:
-            acc.extend_cpu_shape(arch, cps, free, total, fn, tn)
+            acc.extend_cpu_class(arch, cps, free, total, fn, tn)
             acc.cpus_free += free
             acc.cpus_total += total
     else:
@@ -3385,20 +3385,20 @@ def attach_row_availability(
     row: AllocationRow,
     partition_avail: Dict[str, Dict[str, PartitionAvail]],
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
-    shapes: Optional[Sequence["ProbeShape"]] = None,
+    requests: Optional[Sequence["ResourceSpec"]] = None,
 ) -> None:
     """Roll up live availability across this row's candidate partitions.
 
-    When `shapes` is given, row.free_* stores a union across matching shapes
-    for no-wait output, while row.availability_by_shape stores exact
-    per-shape matching capacity for wait/probe output.
+    When `requests` is given, row.free_* stores a union across matching requests
+    for no-wait output, while row.availability_by_request stores exact
+    per-request matching capacity for wait-check output.
     """
     per_cluster = partition_avail.get(row.cluster, {})
     feat_per_cluster = (partition_features or {}).get(row.cluster, {})
     seen_partitions: Set[str] = set()
     row_acc = AvailabilityAccum()
-    shape_accs: Dict[str, AvailabilityAccum] = {
-        s.label: AvailabilityAccum() for s in shapes or ()
+    request_accs: Dict[str, AvailabilityAccum] = {
+        s.label: AvailabilityAccum() for s in requests or ()
     }
     for cand in _candidate_partitions(row):
         bucket = per_cluster.get(cand)
@@ -3406,22 +3406,22 @@ def attach_row_availability(
             continue
         seen_partitions.add(cand)
         features = feat_per_cluster.get(cand, set())
-        if shapes:
-            _accumulate_bucket_for_shapes(row_acc, bucket, features, shapes)
-            for s in shapes:
-                _accumulate_bucket_for_shape(shape_accs[s.label], bucket, features, s)
+        if requests:
+            _accumulate_bucket_for_requests(row_acc, bucket, features, requests)
+            for s in requests:
+                _accumulate_bucket_for_request(request_accs[s.label], bucket, features, s)
         else:
-            _accumulate_bucket_for_shape(row_acc, bucket, features, None)
+            _accumulate_bucket_for_request(row_acc, bucket, features, None)
     if not row_acc.matched:
         return
     row.free_nodes, row.free_cpus, row.free_gpus = row_acc.render()
-    row.availability_by_shape = {
-        label: acc.render() for label, acc in shape_accs.items() if acc.matched
+    row.availability_by_request = {
+        label: acc.render() for label, acc in request_accs.items() if acc.matched
     }
-    row.fit_by_shape = {
+    row.fit_by_request = {
         label: (acc.nodes_fitting, acc.nodes_sized)
-        for label, acc in shape_accs.items()
-        if acc.matched and acc.shape_aware
+        for label, acc in request_accs.items()
+        if acc.matched and acc.request_aware
     }
 
 
@@ -3671,12 +3671,12 @@ def _zero_results_hint(
     lines: List[str] = []
     if hidden_pairs:
         lines.append(
-            f"0 runnable rows shown; {hidden_pairs} compatible probe row"
+            f"0 runnable rows shown; {hidden_pairs} compatible wait check row"
             f"{'s were' if hidden_pairs != 1 else ' was'} hidden."
         )
         lines.append("Hints:")
         lines.append("  - Re-run with --show-all to see scheduler rejection reasons")
-        lines.append("  - Try a smaller shape or shorter walltime")
+        lines.append("  - Try a smaller request or shorter walltime")
         lines.append("  - Re-run with -v to see which filter dropped each row")
         return "\n".join(lines)
     if bits:
@@ -3700,10 +3700,10 @@ def _zero_results_hint(
 _WAIT_SENTINEL = 10**12  # sorts unknown waits to the end (still < float('inf') headaches)
 
 
-def _is_unprobeable_row(row: "AllocationRow") -> bool:
-    """True if probing this row would yield no actionable wait info.
+def _is_uncheckable_row(row: "AllocationRow") -> bool:
+    """True if checking this row would yield no actionable wait info.
 
-    Rows without QOS MaxWall metadata usually yield useless probes; pre-filter
+    Rows without QOS MaxWall metadata usually yield useless wait checks; pre-filter
     them to avoid expensive sbatch --test-only subprocess calls. Do not drop
     zero-free rows here: `sbatch --test-only` can still return an actionable
     future start time for busy-but-runnable allocations.
@@ -3714,62 +3714,62 @@ def _is_unprobeable_row(row: "AllocationRow") -> bool:
 
 
 def _is_low_information_pair(
-    row: "AllocationRow", shape: "ProbeShape"
+    row: "AllocationRow", request: "ResourceSpec"
 ) -> bool:
-    """True if the (row, shape) pair should be hidden from the default view.
+    """True if the (row, request) pair should be hidden from the default view.
 
-    Drops noise that's not actionable: failed probes, QOSes without MaxWall
-    metadata, and shapes whose walltime exceeds the QOS MaxWall. Rows with
+    Drops noise that's not actionable: failed wait checks, QOSes without MaxWall
+    metadata, and requests whose walltime exceeds the QOS MaxWall. Rows with
     zero currently fitting nodes stay visible when the scheduler returns a
     valid future start time.
     """
-    if row.wait_by_shape.get(shape.label) is None:
+    if row.wait_by_request.get(request.label) is None:
         return True
     if not row.qos_info.max_wall:
         return True
     qos_max = parse_wall_seconds(row.qos_info.max_wall)
-    shape_secs = parse_wall_seconds(shape.time)
-    if qos_max is not None and shape_secs is not None and shape_secs > qos_max:
+    request_secs = parse_wall_seconds(request.time)
+    if qos_max is not None and request_secs is not None and request_secs > qos_max:
         return True
     return False
 
 
-def expand_rows_by_shape(
+def expand_rows_by_request(
     rows: List["AllocationRow"],
-    shapes: Optional[List[ProbeShape]],
-) -> List[Tuple["AllocationRow", Optional[ProbeShape]]]:
-    """Cross-product rows × shapes into one pair per output record.
+    requests: Optional[List[ResourceSpec]],
+) -> List[Tuple["AllocationRow", Optional[ResourceSpec]]]:
+    """Cross-product rows × requests into one pair per output record.
 
-    Pairs where the shape can't run on the row (per `should_skip`) are
+    Pairs where the request can't run on the row (per `should_skip`) are
     dropped — the `gpu_types` column already conveys compatibility, so a
-    `wait=?` row would be noise. When `shapes` is None or empty, each row
+    `wait=?` row would be noise. When `requests` is None or empty, each row
     pairs with `None` (no-wait mode).
     """
-    if not shapes:
+    if not requests:
         return [(row, None) for row in rows]
     return [
-        (row, shape)
+        (row, request)
         for row in rows
-        for shape in shapes
-        if not shape.should_skip(row)
+        for request in requests
+        if not request.should_skip(row)
     ]
 
 
-def filter_rows_by_shapes(
+def filter_rows_by_requests(
     rows: List["AllocationRow"],
-    shapes: Optional[Sequence[ProbeShape]],
+    requests: Optional[Sequence[ResourceSpec]],
 ) -> List["AllocationRow"]:
-    """Keep rows compatible with at least one supplied shape.
+    """Keep rows compatible with at least one supplied request.
 
-    This lets SHAPE_LIST narrow output consistently even when wait probing is
-    disabled. Missing hardware metadata follows ProbeShape.should_skip()'s
+    This lets REQUEST_LIST narrow output consistently even when wait checking is
+    disabled. Missing hardware metadata follows ResourceSpec.should_skip()'s
     existing best-effort convention.
     """
-    if not shapes:
+    if not requests:
         return rows
     return [
         row for row in rows
-        if any(not shape.should_skip(row) for shape in shapes)
+        if any(not request.should_skip(row) for request in requests)
     ]
 
 
@@ -3784,15 +3784,15 @@ def _filter_signature(filter_: HardwareFilter) -> Tuple[object, ...]:
     )
 
 
-def _shape_signature(shape: ProbeShape) -> Tuple[object, ...]:
-    """Stable identity for a shape ignoring walltime — used for grouping."""
+def _request_signature(request: ResourceSpec) -> Tuple[object, ...]:
+    """Stable identity for a request ignoring walltime — used for grouping."""
     return (
-        shape.nodes,
-        shape.cpus,
-        shape.mem,
-        shape.gpu_type,
-        shape.gpu_count,
-        _filter_signature(shape.filter),
+        request.nodes,
+        request.cpus,
+        request.mem,
+        request.gpu_type,
+        request.gpu_count,
+        _filter_signature(request.filter),
     )
 
 
@@ -3801,54 +3801,54 @@ def _row_signature(row: AllocationRow) -> Tuple[str, str, str, str]:
 
 
 def collapse_uniform_walltimes(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
-) -> List[Tuple[AllocationRow, Optional[ProbeShape]]]:
-    """Merge (row, shape) pairs that share a wait across walltimes.
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
+) -> List[Tuple[AllocationRow, Optional[ResourceSpec]]]:
+    """Merge (row, request) pairs that share a wait across walltimes.
 
-    Within each (row, shape-without-walltime) group, if every walltime
+    Within each (row, request-without-walltime) group, if every walltime
     yields the same wait value, replace the group with one pair whose
-    shape carries a label spanning `min..max` of the group's walltimes.
+    request carries a label spanning `min..max` of the group's walltimes.
     Non-uniform groups (where wait differs across walltimes) are emitted
     unchanged so scaling stays visible.
 
-    Mutates `row.wait_by_shape` to add the merged label as a new key so
-    downstream sort/render paths (which look up wait via `shape.label`)
+    Mutates `row.wait_by_request` to add the merged label as a new key so
+    downstream sort/render paths (which look up wait via `request.label`)
     work unchanged.
     """
     grouped: Dict[Tuple[object, ...], List[int]] = {}
-    for index, (row, shape) in enumerate(pairs):
-        if shape is None:
+    for index, (row, request) in enumerate(pairs):
+        if request is None:
             continue
-        grouped.setdefault((_row_signature(row), _shape_signature(shape)), []).append(index)
+        grouped.setdefault((_row_signature(row), _request_signature(request)), []).append(index)
 
-    replaced: Dict[int, Tuple[AllocationRow, Optional[ProbeShape]]] = {}
+    replaced: Dict[int, Tuple[AllocationRow, Optional[ResourceSpec]]] = {}
     drop: Set[int] = set()
     for indices in grouped.values():
         if len(indices) < 2:
             continue
         members = [pairs[i] for i in indices]
-        waits = [row.wait_by_shape.get(shape.label) for row, shape in members]
+        waits = [row.wait_by_request.get(request.label) for row, request in members]
         if any(w is None for w in waits) or len(set(waits)) != 1:
             continue
         members_sorted = sorted(members, key=lambda p: parse_wall_seconds(p[1].time) or 0)
-        first_row, first_shape = members_sorted[0]
-        last_shape = members_sorted[-1][1]
+        first_row, first_request = members_sorted[0]
+        last_request = members_sorted[-1][1]
         time_label = (
-            _format_wall_short(first_shape.time)
+            _format_wall_short(first_request.time)
             + ".."
-            + _format_wall_short(last_shape.time)
+            + _format_wall_short(last_request.time)
         )
-        collapsed = ProbeShape(
-            nodes=first_shape.nodes,
-            cpus=first_shape.cpus,
-            mem=first_shape.mem,
-            gpu_type=first_shape.gpu_type,
-            gpu_count=first_shape.gpu_count,
-            time=first_shape.time,
-            filter=first_shape.filter,
+        collapsed = ResourceSpec(
+            nodes=first_request.nodes,
+            cpus=first_request.cpus,
+            mem=first_request.mem,
+            gpu_type=first_request.gpu_type,
+            gpu_count=first_request.gpu_count,
+            time=first_request.time,
+            filter=first_request.filter,
         )
         collapsed.label = collapsed._compute_label(time_label=time_label)
-        first_row.wait_by_shape[collapsed.label] = waits[0]
+        first_row.wait_by_request[collapsed.label] = waits[0]
         replaced[indices[0]] = (first_row, collapsed)
         drop.update(indices[1:])
 
@@ -3868,10 +3868,10 @@ def _row_has_premium_cpu(row: "AllocationRow") -> bool:
 
 
 def sort_pairs(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     sort_spec: str,
     reverse: bool,
-) -> List[Tuple[AllocationRow, Optional[ProbeShape]]]:
+) -> List[Tuple[AllocationRow, Optional[ResourceSpec]]]:
     keys = [key.strip().lower() for key in sort_spec.split(",") if key.strip()] or list(DEFAULT_SORT)
     # 'gpu-tier' reads more literally than 'premium'; both rank the same way
     # (a100/h100/h200/a6000 first), so we accept either spelling.
@@ -3887,7 +3887,7 @@ def sort_pairs(
         "usage",
         "tags",
         "wait",
-        "shape",
+        "request",
         "premium",
         "gpu-tier",
         "vendor",
@@ -3906,16 +3906,16 @@ def sort_pairs(
             "  allowed: " + ", ".join(sorted(allowed))
         )
 
-    def key_for(pair: Tuple[AllocationRow, Optional[ProbeShape]]) -> Tuple[object, ...]:
-        row, shape = pair
+    def key_for(pair: Tuple[AllocationRow, Optional[ResourceSpec]]) -> Tuple[object, ...]:
+        row, request = pair
         values = []
         data = row.to_dict()
         for key in keys:
             if key == "wait":
-                wait = row.wait_by_shape.get(shape.label) if shape is not None else None
+                wait = row.wait_by_request.get(request.label) if request is not None else None
                 values.append(_WAIT_SENTINEL if wait is None else wait)
-            elif key == "shape":
-                values.append(shape.label if shape is not None else "")
+            elif key == "request":
+                values.append(request.label if request is not None else "")
             elif key == "premium":
                 # 3-tier so a premium-GPU row beats a premium-CPU row beats
                 # a plain row. Mirrors PREMIUM_GPUS / PREMIUM_CPU_ARCHS.
@@ -3944,14 +3944,14 @@ _AVAIL_COMPACT_HIDE = ("default", "priority", "fairshare", "usage")
 
 
 def _empty_columns(wide: bool, include_avail: bool, include_wait: bool = True) -> List[str]:
-    sentinel_shape = ProbeShape() if include_wait else None
+    sentinel_request = ResourceSpec() if include_wait else None
     return list(
         AllocationRow("", "", "", "", "", "")
         .to_dict(
             wide=wide,
             include_avail=include_avail,
             include_wait=include_wait,
-            shape=sentinel_shape,
+            request=sentinel_request,
         )
         .keys()
     )
@@ -3971,11 +3971,11 @@ def _select_table_columns(all_columns: List[str], wide: bool, include_avail: boo
     return list(all_columns)
 
 
-def _format_cpu_shape_token(
+def _format_cpu_class_token(
     arch: str, cps: int, free: int, total: int,
     free_nodes: int, total_nodes: int,
 ) -> str:
-    """Render one CPU shape bucket as 'arch{cps}c×fn/tn n:f/t c'.
+    """Render one CPU request bucket as 'arch{cps}c×fn/tn n:f/t c'.
 
     arch is the canonical short token (gen, skl, csl, …); falls back to '?'
     when the node had no classifiable feature. cps is cores-per-socket. The
@@ -4017,6 +4017,7 @@ def _wrap_gpu_list(text: str, width: int) -> List[str]:
 
 
 _COMPACT_TABLE_LABELS = {
+    "request": "REQ",
     "tags": "FLAGS",
     "free_nodes": "NODES",
     "free_cpus": "CPUS",
@@ -4024,7 +4025,7 @@ _COMPACT_TABLE_LABELS = {
 }
 
 _COMPACT_TABLE_HIDE = {"cpu_vendor", "gpu_vendor"}
-# Identity columns (account, qos, shape) are intentionally excluded — splitting
+# Identity columns (account, qos, request) are intentionally excluded — splitting
 # them mid-token (e.g. `owner-\ngpu-guest`, `a:1@1\nh`) hurts readability more
 # than the extra width costs.
 _COMPACT_TABLE_WRAP = {
@@ -4069,24 +4070,24 @@ def _display_cell_value(column: str, raw: str, compact: bool) -> str:
 
 
 def render_legend() -> str:
-    """Human-readable key for the cryptic codes in the wait-probe table.
+    """Human-readable key for the cryptic codes in the wait-check table.
 
     Mirrors the explanations baked into JSON's `_help` block, but in a form a
     CLI user can eyeball without re-running with `--format json`.
     """
     return (
         "\nLegend\n"
-        "  GPUS column      GPU type for the requested shape (e.g. a40, a100)\n"
+        "  GPUS column      GPU type for the requested resources (e.g. a40, a100)\n"
         "  INVENTORY column free/total GPUs in the partition, by type\n"
         "  FLAGS:  fc=freecycle (preemptable)  guest=preemptable on idle owner nodes\n"
         "          res=reservation required   def=this is your default QOS\n"
         "  NOTE:   queue       a fitting node exists; you're waiting on priority/policy\n"
         "          fragmented  sized nodes exist but none has CPU+GPU+mem free at once\n"
-        "          too-small   no node in this partition is big enough for the shape\n"
-        "          qos-limit / invalid-* / unavailable / probe-{timeout,error}\n"
+        "          too-small   no node in this partition is big enough for the request\n"
+        "          qos-limit / invalid-* / unavailable / wait-check-{timeout,error}\n"
         "                      from `sbatch --test-only` rejection\n"
         "          (blank)     wait is `now` or no per-node data to attribute the wait\n"
-        "  CPUS cell shape: arch{cps}c×fn/tn n:f/t c\n"
+        "  CPUS cell request: arch{cps}c×fn/tn n:f/t c\n"
         "          arch    CPU class (mil=Milan, gen=Genoa, rom=Rome, csl=Cascade Lake, …)\n"
         "          ?       node has no classifiable CPU feature in sinfo metadata\n"
         "          cps     cores-per-socket\n"
@@ -4330,8 +4331,8 @@ def _note_color(raw: str) -> str:
         NOTE_INVALID_PARTITION,
         NOTE_INVALID_CONSTRAINT,
         NOTE_UNAVAILABLE,
-        NOTE_PROBE_TIMEOUT,
-        NOTE_PROBE_ERROR,
+        NOTE_WAIT_CHECK_TIMEOUT,
+        NOTE_WAIT_CHECK_ERROR,
     }:
         return _ANSI_RED
     return ""
@@ -4361,7 +4362,7 @@ def _styled_cell(column: str, padded: str, raw: str, enable: bool) -> str:
 
 
 def table_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
@@ -4376,11 +4377,11 @@ def table_output(
             wide=wide,
             include_avail=include_avail,
             include_wait=include_wait,
-            shape=shape,
+            request=request,
             show_gpu=show_gpu,
             show_cpu=show_cpu,
         )
-        for row, shape in pairs
+        for row, request in pairs
     ]
     all_columns = (
         list(records[0].keys())
@@ -4559,7 +4560,7 @@ def table_output(
 
 
 def csv_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
@@ -4572,11 +4573,11 @@ def csv_output(
             wide=wide,
             include_avail=include_avail,
             include_wait=include_wait,
-            shape=shape,
+            request=request,
             show_gpu=show_gpu,
             show_cpu=show_cpu,
         )
-        for row, shape in pairs
+        for row, request in pairs
     ]
     columns = (
         list(records[0].keys())
@@ -4591,7 +4592,7 @@ def csv_output(
 
 
 def json_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     wide: bool,
     include_avail: bool = False,
     include_wait: bool = True,
@@ -4605,17 +4606,17 @@ def json_output(
             wide=wide,
             include_avail=include_avail,
             include_wait=include_wait,
-            shape=shape,
+            request=request,
             show_gpu=show_gpu,
             show_cpu=show_cpu,
         )
-        for row, shape in pairs
+        for row, request in pairs
     ]
     if not include_help:
         return json.dumps(records, indent=2, sort_keys=True)
     payload = {
         "_help": {
-            "schema_version": 2,
+            "schema_version": 3,
             "premium_gpus": list(PREMIUM_GPUS),
             "premium_cpu_archs": list(PREMIUM_CPU_ARCHS),
             "intel_cpu_features": list(INTEL_CPU_FEATURES),
@@ -4626,46 +4627,46 @@ def json_output(
                 "qos": "QOS to pass via --qos; partition is usually the same name",
                 "partition": "partition name (with --wide); pass via --partition",
                 "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
-                "shape": "probed job shape: '<gpu>:<count>@<wall>[,<mem>]' or "
+                "request": "resource request: '<gpu>:<count>@<wall>[,<mem>]' or "
                         "'cpu:<cpus>@<wall>[,<mem>]'. The 'wait' value on this row "
-                        "is for THIS shape on THIS allocation. With a multi-shape "
-                        "SHAPE_LIST, each (allocation, shape) pair gets its own row.",
+                        "is for THIS request on THIS allocation. With a multi-request "
+                        "REQUEST_LIST, each (allocation, request) pair gets its own row.",
                 "wait": "predicted seconds until job start from `sbatch --test-only` "
-                        "for the shape on this row; 'now' means startable immediately, "
-                        "'?' / null means probe skipped or unknown",
+                        "for the request on this row; 'now' means startable immediately, "
+                        "'?' / null means wait check skipped or unknown",
                 "note": "explanation when wait > now: 'queue' (a node fits "
                         "right now, so the wait is policy/priority), "
                         "'fragmented' (sized nodes exist but no single node "
-                        "has the shape's CPUs+GPUs+memory free at once), "
+                        "has the request's CPUs+GPUs+memory free at once), "
                         "'too-small' (no node in the partition is large "
                         "enough). When wait is '?', contains a compact "
                         "sbatch rejection reason such as 'qos-limit', "
                         "'invalid-account', 'invalid-qos', or "
                         "'invalid-partition' when available. Empty when wait "
                         "is 'now'.",
-                "free_nodes": "with no shape: idle/total nodes from sinfo. "
-                        "With an active shape: 'fitting / could-host' — "
-                        "nodes that can host one shape instance right now, "
+                "free_nodes": "with no request: idle/total nodes from sinfo. "
+                        "With an active request: 'fitting / could-host' — "
+                        "nodes that can host one request instance right now, "
                         "out of nodes large enough to ever host it.",
-                "free_cpus": "free/total CPUs from sinfo. Per-shape tokens "
+                "free_cpus": "free/total CPUs from sinfo. Per-request tokens "
                         "read 'arch{cps}c×fn/tn n:fc/tc c' — fn/tn "
-                        "free/total nodes of that shape, fc/tc free/total cores "
+                        "free/total nodes of that request, fc/tc free/total cores "
                         "across those nodes (suffix 'n' = nodes, 'c' = cores). "
-                        "When a shape is active, only nodes large enough to "
-                        "host the shape are counted.",
+                        "When a request is active, only nodes large enough to "
+                        "host the request are counted.",
                 "free_gpus": "comma-separated 'gtype:free/total' from sinfo; "
-                        "when a shape is active, only nodes large enough to "
-                        "host the shape contribute, and only matching GPU "
+                        "when a request is active, only nodes large enough to "
+                        "host the request contribute, and only matching GPU "
                         "types are listed",
                 "gpu_types": "GPU types exposed by the partition (with --wide)",
-                "gpu": "the row's GPU type resolved from the probe shape's "
-                        "gpu_type (e.g. shape 'h100' resolves to row 'h100nvl'). "
-                        "Shown when an active probe shape carries a gpu_type.",
+                "gpu": "the row's GPU type resolved from the resource request's "
+                        "gpu_type (e.g. request 'h100' resolves to row 'h100nvl'). "
+                        "Shown when an active resource request carries a gpu_type.",
                 "gpu_vendor": "'nvidia' for rows with recognized GPU types, "
                         "else ''. Pair of cpu_vendor.",
-                "cpu": "the row's CPU arch resolved from the probe shape's "
-                        "arch atom (e.g. shape '*genoa' resolves to row 'Genoa'). "
-                        "Shown when an active probe shape carries a CPU arch.",
+                "cpu": "the row's CPU arch resolved from the resource request's "
+                        "arch atom (e.g. request '*genoa' resolves to row 'Genoa'). "
+                        "Shown when an active resource request carries a CPU arch.",
                 "cpu_archs": "node arch/feature tags for the partition (with --wide)",
                 "cpu_vendor": "derived from cpu_archs: 'intel', 'amd', "
                         "'mixed', or '' when unknown. Sort key 'vendor' ranks "
@@ -4678,31 +4679,31 @@ def json_output(
                 "usage": "RawUsage from sshare (lower = less recent consumption)",
             },
             "notes": [
-                "Rows are sorted by 'wait,shape,premium,vendor,cluster,qos' by default: "
-                "lowest predicted wait first, then grouped by shape, then "
+                "Rows are sorted by 'wait,request,premium,vendor,cluster,qos' by default: "
+                "lowest predicted wait first, then grouped by request, then "
                 "premium-GPU rows ahead of non-premium, then Intel CPUs ahead of AMD, "
                 "then alphabetical.",
                 "Premium GPUs are the substring matches in `_help.premium_gpus` "
                 "against `gpu_types` (case-insensitive).",
                 "freecycle/guest QOS rows are preemptable; jobs there should "
                 "use --requeue and checkpoint.",
-                "Multi-shape output is long format: one row per (allocation, shape) "
-                "pair. The `shape` column tells you which shape was probed for that wait.",
-                "Each shape is gated on accessibility — pairs where the shape "
+                "Multi-request output is long format: one row per (allocation, request) "
+                "pair. The `request` column tells you which request was checked for that wait.",
+                "Each request is gated on accessibility — pairs where the request "
                 "can't run on the row are dropped from output.",
-                "Availability columns are shape-aware when a shape is active: "
+                "Availability columns are request-aware when a request is active: "
                 "CPU and GPU constraints narrow free_nodes/free_cpus/free_gpus "
                 "to matching resources, and free_nodes counts whole-node "
-                "co-location (a 4-GPU shape against a 2-GPU node doesn't "
+                "co-location (a 4-GPU request against a 2-GPU node doesn't "
                 "credit the node's idle CPUs).",
                 "When wait > now and the cells still look free, the `note` "
                 "column distinguishes co-location ('fragmented'), policy "
                 "('queue'), and partition-too-small ('too-small').",
                 "Rows with missing hardware metadata are kept on a best-effort "
                 "basis; use --explain or -v to inspect uncertainty.",
-                "By default, rows are hidden when the probe returned `?`, "
-                "the QOS has no MaxWall, the shape's walltime exceeds the "
-                "QOS MaxWall, or the scheduler rejected the probe. Pass "
+                "By default, rows are hidden when the wait check returned `?`, "
+                "the QOS has no MaxWall, the request's walltime exceeds the "
+                "QOS MaxWall, or the scheduler rejected the wait check. Pass "
                 "--show-all to include those marginal rows.",
             ],
         },
@@ -4731,14 +4732,14 @@ def _effective_partition(row: AllocationRow) -> str:
     return ""
 
 
-def _shape_sbatch_directive_lines(
+def _request_sbatch_directive_lines(
     row: AllocationRow,
-    shape: Optional[ProbeShape],
+    request: Optional[ResourceSpec],
 ) -> List[str]:
-    if shape is None:
+    if request is None:
         return []
     lines: List[str] = []
-    args = shape.to_sbatch_args(row)
+    args = request.to_sbatch_args(row)
     i = 0
     while i < len(args):
         arg = args[i]
@@ -4759,9 +4760,9 @@ def _shape_sbatch_directive_lines(
 
 def sbatch_directive_lines(
     row: AllocationRow,
-    shape: Optional[ProbeShape] = None,
+    request: Optional[ResourceSpec] = None,
 ) -> List[str]:
-    """Return paste-ready #SBATCH lines for an allocation and optional shape."""
+    """Return paste-ready #SBATCH lines for an allocation and optional request."""
     lines = []
     if row.cluster:
         lines.append(f"#SBATCH --clusters={row.cluster}")
@@ -4772,18 +4773,18 @@ def sbatch_directive_lines(
         lines.append(f"#SBATCH --partition={partition}")
     if row.qos:
         lines.append(f"#SBATCH --qos={row.qos}")
-    lines.extend(_shape_sbatch_directive_lines(row, shape))
+    lines.extend(_request_sbatch_directive_lines(row, request))
     return lines
 
 
 def best_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     fmt: str,
 ) -> str:
     """Render the lowest-wait pair as a paste-ready #SBATCH block (or JSON).
 
     Assumes `pairs` is already sorted with the shortest wait first (the
-    default sort spec puts wait,shape ahead of identity). Falls back to a
+    default sort spec puts wait,request ahead of identity). Falls back to a
     `# no allocations matched` sentinel when filtering eliminated everything.
     """
     if not pairs:
@@ -4791,16 +4792,16 @@ def best_output(
             return json.dumps(None)
         return "# no runnable allocations matched"
     pairs = [
-        (row, shape) for row, shape in pairs
-        if shape is None or row.wait_by_shape.get(shape.label) is not None
+        (row, request) for row, request in pairs
+        if request is None or row.wait_by_request.get(request.label) is not None
     ]
     if not pairs:
         if fmt == "json":
             return json.dumps(None)
         return "# no runnable allocations matched"
-    row, shape = pairs[0]
+    row, request = pairs[0]
     alternatives = len(pairs) - 1
-    record = _allocation_json_record(row, shape)
+    record = _allocation_json_record(row, request)
     if fmt == "json":
         record["alternatives"] = alternatives
         return json.dumps(record, indent=2, sort_keys=True)
@@ -4817,57 +4818,57 @@ def best_output(
 
 
 def _allocation_json_record(
-    row: AllocationRow, shape: Optional[ProbeShape]
+    row: AllocationRow, request: Optional[ResourceSpec]
 ) -> Dict[str, object]:
-    wait_secs = row.wait_by_shape.get(shape.label) if shape else None
+    wait_secs = row.wait_by_request.get(request.label) if request else None
     return {
         "cluster": row.cluster,
         "account": row.account,
         "qos": row.qos,
         "partition": row.partition,
         "effective_partition": _effective_partition(row),
-        "shape_label": shape.label if shape else "",
-        "time": shape.time if shape else "",
+        "request_label": request.label if request else "",
+        "time": request.time if request else "",
         "predicted_wait_seconds": wait_secs,
-        "sbatch_directives": sbatch_directive_lines(row, shape),
+        "sbatch_directives": sbatch_directive_lines(row, request),
     }
 
 
 def _dedup_pairs(
-    pairs: Iterable[Tuple[AllocationRow, Optional[ProbeShape]]],
-) -> Iterator[Tuple[AllocationRow, Optional[ProbeShape]]]:
+    pairs: Iterable[Tuple[AllocationRow, Optional[ResourceSpec]]],
+) -> Iterator[Tuple[AllocationRow, Optional[ResourceSpec]]]:
     seen: Set[Tuple[str, str, str, str, str]] = set()
-    for row, shape in pairs:
+    for row, request in pairs:
         key = (row.cluster, row.account, row.qos, row.partition,
-               shape.label if shape else "")
+               request.label if request else "")
         if key in seen:
             continue
         seen.add(key)
-        yield row, shape
+        yield row, request
 
 
 def sbatch_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
 ) -> str:
     """Multi-allocation analog of `--best`.
 
     Emits one paste-ready #SBATCH block per unique (cluster, account, qos,
-    partition, shape) tuple, separated by blank lines. Each block carries a
+    partition, request) tuple, separated by blank lines. Each block carries a
     `# <cluster> · <account>/<qos>` header (with `(wait: <fmt>)` appended
-    when the wait probe gave a result).
+    when the wait check gave a result).
     """
     blocks: List[List[str]] = []
-    for row, shape in _dedup_pairs(pairs):
+    for row, request in _dedup_pairs(pairs):
         header_id = f"{row.cluster} · {row.account}/{row.qos}".strip(" ·/")
-        # Distinguish "probed but unknown" (key present, value None → show
-        # `(wait: ?)`) from "not probed" (--no-wait/--quick → no annotation).
-        if shape and shape.label in row.wait_by_shape:
-            wait_secs = row.wait_by_shape[shape.label]
+        # Distinguish "checked but unknown" (key present, value None → show
+        # `(wait: ?)`) from "not checked" (--no-wait/--quick → no annotation).
+        if request and request.label in row.wait_by_request:
+            wait_secs = row.wait_by_request[request.label]
             header = f"# {header_id}  (wait: {_format_wait(wait_secs)})"
         else:
             header = f"# {header_id}"
         block = [header]
-        block.extend(sbatch_directive_lines(row, shape))
+        block.extend(sbatch_directive_lines(row, request))
         blocks.append(block)
     if not blocks:
         return "# no matching allocations"
@@ -4875,29 +4876,29 @@ def sbatch_output(
 
 
 def sbatch_json_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
 ) -> str:
     """Machine-readable variant of `sbatch_output`.
 
     Emits a JSON array of records, one per unique (cluster, account, qos,
-    partition, shape) tuple. Each record keeps the legacy top-level keys
-    (cluster, account, qos, partition) plus the same directive list, shape
+    partition, request) tuple. Each record keeps the legacy top-level keys
+    (cluster, account, qos, partition) plus the same directive list, request
     label, and predicted wait that `--best` exposes.
     """
-    items = [_allocation_json_record(row, shape) for row, shape in _dedup_pairs(pairs)]
+    items = [_allocation_json_record(row, request) for row, request in _dedup_pairs(pairs)]
     return json.dumps(items, indent=2, sort_keys=True)
 
 
 def pivot_output(
-    pairs: List[Tuple[AllocationRow, Optional[ProbeShape]]],
+    pairs: List[Tuple[AllocationRow, Optional[ResourceSpec]]],
     *,
     tty: Optional[bool] = None,
 ) -> str:
-    """Render a (cluster, account, qos) × shape pivot table of wait times.
+    """Render a (cluster, account, qos) × request pivot table of wait times.
 
-    Rows are unique allocations, columns are shape labels in first-seen order,
+    Rows are unique allocations, columns are request labels in first-seen order,
     cells are formatted wait strings. Missing cells render as '?'. When no
-    pair carries a shape (no-wait mode), the function returns the same
+    pair carries a request (no-wait mode), the function returns the same
     "(no matching allocations)" sentinel as `table_output` so the caller
     doesn't need to special-case empty input.
     """
@@ -4905,31 +4906,31 @@ def pivot_output(
         return "(no matching allocations)"
     row_keys: List[Tuple[str, str, str]] = []
     seen_keys: Set[Tuple[str, str, str]] = set()
-    shape_labels: List[str] = []
+    request_labels: List[str] = []
     seen_labels: Set[str] = set()
     cells: Dict[Tuple[Tuple[str, str, str], str], str] = {}
-    for row, shape in pairs:
-        if shape is None:
+    for row, request in pairs:
+        if request is None:
             continue
         key = (row.cluster, row.account, row.qos)
         if key not in seen_keys:
             seen_keys.add(key)
             row_keys.append(key)
-        if shape.label not in seen_labels:
-            seen_labels.add(shape.label)
-            shape_labels.append(shape.label)
-        wait_secs = row.wait_by_shape.get(shape.label)
-        cells[(key, shape.label)] = _format_wait(wait_secs)
-    if not row_keys or not shape_labels:
+        if request.label not in seen_labels:
+            seen_labels.add(request.label)
+            request_labels.append(request.label)
+        wait_secs = row.wait_by_request.get(request.label)
+        cells[(key, request.label)] = _format_wait(wait_secs)
+    if not row_keys or not request_labels:
         return "(no matching allocations)"
-    shape_headers = [s.upper() for s in shape_labels]
-    headers = ["CLUSTER", "ACCOUNT", "QOS"] + shape_headers
+    request_headers = [s.upper() for s in request_labels]
+    headers = ["CLUSTER", "ACCOUNT", "QOS"] + request_headers
     body: List[List[str]] = []
     for key in row_keys:
         cluster, account, qos = key
         body.append(
             [cluster, account, qos]
-            + [cells.get((key, s), "?") for s in shape_labels]
+            + [cells.get((key, s), "?") for s in request_labels]
         )
     widths = [
         max(len(headers[i]), max((len(r[i]) for r in body), default=0))
@@ -4948,7 +4949,7 @@ def pivot_output(
         out = []
         for i, raw in enumerate(row_cells):
             cell = raw.ljust(widths[i])
-            # Shape columns carry wait values; reuse the table renderer's
+            # Request columns carry wait values; reuse the table renderer's
             # column-semantic dispatch by labelling them as "wait".
             column = "wait" if i >= n_id_cols else ""
             out.append(_styled_cell(column, cell, raw, color))
@@ -4965,51 +4966,51 @@ def pivot_output(
     return "\n".join(lines)
 
 
-def _shape_unknown_metadata_fields(
-    row: AllocationRow, shape: "ProbeShape"
+def _request_unknown_metadata_fields(
+    row: AllocationRow, request: "ResourceSpec"
 ) -> List[str]:
     fields: List[str] = []
-    if shape.filter.has_cpu_constraint() and not row.cpu_features:
+    if request.filter.has_cpu_constraint() and not row.cpu_features:
         fields.append("cpu_archs")
-    if (shape.gpu_type or shape.filter.has_gpu_constraint()) and not row.gpu_types:
+    if (request.gpu_type or request.filter.has_gpu_constraint()) and not row.gpu_types:
         fields.append("gpu_types")
     return fields
 
 
-def _shape_explain_details(shape: "ProbeShape") -> Dict[str, object]:
-    """Return user-facing resolved basics for a probe shape."""
-    if shape.requires_gpu():
-        gpu_type = shape.gpu_type or "gpu"
-        gpu_count = shape.gpu_count if shape.gpu_count is not None else 1
+def _request_explain_details(request: "ResourceSpec") -> Dict[str, object]:
+    """Return user-facing resolved basics for a resource request."""
+    if request.requires_gpu():
+        gpu_type = request.gpu_type or "gpu"
+        gpu_count = request.gpu_count if request.gpu_count is not None else 1
         gpu_request = f"{gpu_type}:{gpu_count}/node"
     else:
         gpu_request = ""
 
-    if shape.cpus_per_node is not None:
+    if request.cpus_per_node is not None:
         cpu_request = (
-            f"{shape.cpus_per_node}/node ({shape.cpus} total)"
-            if shape.nodes > 1 else f"{shape.cpus} total"
+            f"{request.cpus_per_node}/node ({request.cpus} total)"
+            if request.nodes > 1 else f"{request.cpus} total"
         )
-    elif shape.cpus_is_total:
-        cpu_request = f"{shape.cpus} total"
+    elif request.cpus_is_total:
+        cpu_request = f"{request.cpus} total"
     else:
-        cpu_request = f"{shape.cpus} total"
+        cpu_request = f"{request.cpus} total"
 
     return {
-        "label": shape.label,
-        "nodes": shape.nodes,
-        "ntasks": shape.cpus,
+        "label": request.label,
+        "nodes": request.nodes,
+        "ntasks": request.cpus,
         "cpu_request": cpu_request,
-        "time": shape.time,
-        "sbatch_time": _to_sbatch_wall(shape.time),
-        "memory": shape.mem or "",
+        "time": request.time,
+        "sbatch_time": _to_sbatch_wall(request.time),
+        "memory": request.mem or "",
         "gpu_request": gpu_request,
-        "requires_gpu": shape.requires_gpu(),
+        "requires_gpu": request.requires_gpu(),
     }
 
 
-def _format_shape_explain_details(shape: "ProbeShape") -> str:
-    details = _shape_explain_details(shape)
+def _format_request_explain_details(request: "ResourceSpec") -> str:
+    details = _request_explain_details(request)
     bits = [
         f"nodes={details['nodes']}",
         f"ntasks={details['ntasks']}",
@@ -5025,31 +5026,31 @@ def _format_shape_explain_details(shape: "ProbeShape") -> str:
 
 def render_explain_plan(
     rows: List[AllocationRow],
-    shapes: List[ProbeShape],
+    requests: List[ResourceSpec],
     args: argparse.Namespace,
     fmt: str,
 ) -> str:
     """Build the --explain preview string (text or JSON).
 
     Reports the post-filter row count, the active filter list, the planned
-    shape set with per-shape accessibility (how many rows the shape would
-    actually probe), and the estimated total probe count.
+    request set with per-request accessibility (how many rows the request would
+    actually check), and the estimated total wait check count.
     """
     applied = _format_applied_filters(args)
     rows_count = len(rows)
     accessible_pairs = sum(
-        1 for r in rows for s in shapes if not s.should_skip(r)
+        1 for r in rows for s in requests if not s.should_skip(r)
     )
 
     if fmt == "json":
-        shapes_payload = []
-        for s in shapes:
+        requests_payload = []
+        for s in requests:
             accessible = sum(1 for r in rows if not s.should_skip(r))
             unknown = sum(
                 1 for r in rows
-                if not s.should_skip(r) and _shape_unknown_metadata_fields(r, s)
+                if not s.should_skip(r) and _request_unknown_metadata_fields(r, s)
             )
-            item = _shape_explain_details(s)
+            item = _request_explain_details(s)
             item.update(
                 {
                     "accessible_rows": accessible,
@@ -5057,14 +5058,14 @@ def render_explain_plan(
                     "unknown_metadata_rows": unknown,
                 }
             )
-            shapes_payload.append(item)
+            requests_payload.append(item)
         payload = {
             "allocations_after_filter": rows_count,
             "filters_applied": applied,
-            "shape_count": len(shapes),
-            "shapes": shapes_payload,
-            "estimated_probes": accessible_pairs,
-            "note": "Run without --explain to execute wait probes.",
+            "request_count": len(requests),
+            "requests": requests_payload,
+            "estimated_wait_checks": accessible_pairs,
+            "note": "Run without --explain to execute wait checks.",
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -5074,31 +5075,31 @@ def render_explain_plan(
         f"Filters applied: {', '.join(applied)}" if applied
         else "Filters applied: (none)"
     )
-    if shapes:
-        lines.append(f"Probe shape set ({len(shapes)}):")
-        for s in shapes:
+    if requests:
+        lines.append(f"Resource request set ({len(requests)}):")
+        for s in requests:
             accessible = sum(1 for r in rows if not s.should_skip(r))
             unknown = sum(
                 1 for r in rows
-                if not s.should_skip(r) and _shape_unknown_metadata_fields(r, s)
+                if not s.should_skip(r) and _request_unknown_metadata_fields(r, s)
             )
             if accessible == 0:
                 tag = "[skipped — no compatible row]"
             elif accessible == rows_count:
-                tag = f"[probes all {rows_count}]"
+                tag = f"[checks all {rows_count}]"
             else:
-                tag = f"[probes {accessible} of {rows_count}]"
+                tag = f"[wait checks {accessible} of {rows_count}]"
             if unknown:
                 tag = tag[:-1] + f"; {unknown} best-effort unknown metadata]"
-            lines.append(f"  {tag}  {s.label}  ({_format_shape_explain_details(s)})")
+            lines.append(f"  {tag}  {s.label}  ({_format_request_explain_details(s)})")
     else:
-        lines.append("Probe shape set: (none — wait probing skipped)")
+        lines.append("Resource request set: (none — wait checking skipped)")
     lines.append(
-        f"Estimated probes: {accessible_pairs} "
-        f"({rows_count} allocations × {len(shapes)} shapes, minus skipped pairs)"
+        f"Estimated wait checks: {accessible_pairs} "
+        f"({rows_count} allocations × {len(requests)} requests, minus skipped pairs)"
     )
     lines.append("")
-    lines.append("Run without --explain to execute wait probes.")
+    lines.append("Run without --explain to execute wait checks.")
     return "\n".join(lines)
 
 
@@ -5234,7 +5235,7 @@ def run_self_test() -> int:
     bucket.cpus_total = 128
     bucket.cpus_free = 32
     bucket.add_gpu("h100nvl", 4, 16)
-    bucket.add_cpu_shape("gen", 96, 32, 128, True)
+    bucket.add_cpu_class("gen", 96, 32, 128, True)
     fc_row3 = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
     )
@@ -5247,18 +5248,18 @@ def run_self_test() -> int:
     assert record["free_gpus"] == "h100nvl:4/16"
     assert "free_nodes" not in fc_row3.to_dict()  # opt-in only
 
-    # Per-shape CPU formatter and ordering — biggest pool first, '?' last.
-    assert _format_cpu_shape_token("gen", 96, 192, 384, 2, 4) == "gen96c×2/4n:192/384c"
-    assert _format_cpu_shape_token("", 64, 0, 64, 0, 1) == "?64c×0/1n:0/64c"
+    # Per-request CPU formatter and ordering — biggest pool first, '?' last.
+    assert _format_cpu_class_token("gen", 96, 192, 384, 2, 4) == "gen96c×2/4n:192/384c"
+    assert _format_cpu_class_token("", 64, 0, 64, 0, 1) == "?64c×0/1n:0/64c"
     multi_avail = {"notchpeak": {"notchpeak-shared-short": PartitionAvail()}}
     mb = multi_avail["notchpeak"]["notchpeak-shared-short"]
     mb.nodes_total = 6
     mb.nodes_free = 4
     mb.cpus_total = 512
     mb.cpus_free = 224
-    mb.add_cpu_shape("skl", 16, 32, 128, True)
-    mb.add_cpu_shape("gen", 96, 192, 384, True)
-    mb.add_cpu_shape("", 32, 0, 0, False)  # empty shape ignored by sort but still appears
+    mb.add_cpu_class("skl", 16, 32, 128, True)
+    mb.add_cpu_class("gen", 96, 192, 384, True)
+    mb.add_cpu_class("", 32, 0, 0, False)  # empty request ignored by sort but still appears
     multi_row = AllocationRow(
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
@@ -5266,37 +5267,37 @@ def run_self_test() -> int:
     assert multi_row.free_cpus.startswith("gen96c×1/1n:192/384c"), multi_row.free_cpus
     assert "skl16c×1/1n:32/128c" in multi_row.free_cpus, multi_row.free_cpus
 
-    # Shape filter narrows the CPU column to matching arch/vendor.
+    # Request filter narrows the CPU column to matching arch/vendor.
     multi_features = {"notchpeak": {"notchpeak-shared-short": {"gen", "skl"}}}
-    arch_shape = ProbeShape(filter=HardwareFilter(cpu_archs=("gen",)))
+    arch_request = ResourceSpec(filter=HardwareFilter(cpu_archs=("gen",)))
     arch_row = AllocationRow(
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
-    attach_row_availability(arch_row, multi_avail, multi_features, [arch_shape])
+    attach_row_availability(arch_row, multi_avail, multi_features, [arch_request])
     assert "gen96c×1/1n:192/384c" in arch_row.free_cpus, arch_row.free_cpus
     assert "skl16c" not in arch_row.free_cpus, arch_row.free_cpus
     assert "?32c" not in arch_row.free_cpus, arch_row.free_cpus  # unclassified dropped
 
-    vendor_shape = ProbeShape(filter=HardwareFilter(cpu_vendor="amd"))
+    vendor_request = ResourceSpec(filter=HardwareFilter(cpu_vendor="amd"))
     vendor_row = AllocationRow(
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
-    attach_row_availability(vendor_row, multi_avail, multi_features, [vendor_shape])
+    attach_row_availability(vendor_row, multi_avail, multi_features, [vendor_request])
     assert "gen96c×1/1n:192/384c" in vendor_row.free_cpus, vendor_row.free_cpus
     assert "skl16c" not in vendor_row.free_cpus, vendor_row.free_cpus
 
-    # Shape with no CPU constraint preserves the full CPU list.
-    nofilter_shape = ProbeShape()
+    # Request with no CPU constraint preserves the full CPU list.
+    nofilter_request = ResourceSpec()
     nofilter_row = AllocationRow(
         "notchpeak", "notchpeak-shared-short", "me", "", "notchpeak-shared-short", ""
     )
     attach_row_availability(
-        nofilter_row, multi_avail, multi_features, [nofilter_shape]
+        nofilter_row, multi_avail, multi_features, [nofilter_request]
     )
     assert "gen96c×1/1n:192/384c" in nofilter_row.free_cpus, nofilter_row.free_cpus
     assert "skl16c×1/1n:32/128c" in nofilter_row.free_cpus, nofilter_row.free_cpus
 
-    # Per-node availability makes active-shape output exact: the same row can
+    # Per-node availability makes active-request output exact: the same row can
     # show different matching free_* values for different CPU/GPU constraints.
     exact_avail = {"notchpeak": {"notchpeak-mixed": PartitionAvail()}}
     exact_bucket = exact_avail["notchpeak"]["notchpeak-mixed"]
@@ -5312,28 +5313,28 @@ def run_self_test() -> int:
     exact_row = AllocationRow(
         "notchpeak", "acct", "me", "notchpeak-mixed", "q-mixed", "q-mixed"
     )
-    gen_cpu = ProbeShape(cpus=32, filter=HardwareFilter(cpu_archs=("gen",)))
-    hopper_gpu = ProbeShape(gpu_count=1, filter=HardwareFilter(gpu_gen="hopper"))
-    gen_a100 = ProbeShape(
+    gen_cpu = ResourceSpec(cpus=32, filter=HardwareFilter(cpu_archs=("gen",)))
+    hopper_gpu = ResourceSpec(gpu_count=1, filter=HardwareFilter(gpu_gen="hopper"))
+    gen_a100 = ResourceSpec(
         gpu_type="a100", gpu_count=1, filter=HardwareFilter(cpu_archs=("gen",))
     )
     attach_row_availability(
         exact_row, exact_avail, exact_features, [gen_cpu, hopper_gpu, gen_a100]
     )
     gen_cpu_record = exact_row.to_dict(
-        include_avail=True, include_wait=True, shape=gen_cpu
+        include_avail=True, include_wait=True, request=gen_cpu
     )
     assert gen_cpu_record["free_nodes"] == "1/1", gen_cpu_record
     assert gen_cpu_record["free_cpus"] == "gen96c×1/1n:96/96c", gen_cpu_record
     assert gen_cpu_record["free_gpus"] == "a100:3/4", gen_cpu_record
     hopper_record = exact_row.to_dict(
-        include_avail=True, include_wait=True, shape=hopper_gpu
+        include_avail=True, include_wait=True, request=hopper_gpu
     )
     assert hopper_record["free_nodes"] == "1/1", hopper_record
     assert hopper_record["free_cpus"] == "skl16c×1/1n:16/16c", hopper_record
     assert hopper_record["free_gpus"] == "h100nvl:4/4", hopper_record
     combo_record = exact_row.to_dict(
-        include_avail=True, include_wait=True, shape=gen_a100
+        include_avail=True, include_wait=True, request=gen_a100
     )
     assert combo_record["free_nodes"] == "1/1", combo_record
     assert combo_record["free_cpus"] == "gen96c×1/1n:96/96c", combo_record
@@ -5345,7 +5346,7 @@ def run_self_test() -> int:
     )
     assert "a100:3/4" in exact_row.free_gpus and "h100nvl:4/4" in exact_row.free_gpus
 
-    # Fallback: when bucket has no per-shape data, the bare-aggregate form is
+    # Fallback: when bucket has no per-request data, the bare-aggregate form is
     # used with explicit n/c suffixes so it's still self-describing.
     fb_avail = {"granite": {"granite": PartitionAvail()}}
     fb = fb_avail["granite"]["granite"]
@@ -5486,11 +5487,11 @@ def run_self_test() -> int:
     rendered_cpu_lines = rendered_cpu.splitlines()
     assert len(rendered_cpu_lines) >= 4, rendered_cpu
     assert max(len(_ansi.sub("", line)) for line in rendered_cpu_lines) <= 80, rendered_cpu
-    # At least one line after the data row should carry a CPU shape token.
+    # At least one CPU request token should survive wrapping.
+    rendered_cpu_compact = re.sub(r"\s+", "", rendered_cpu)
     assert any(
-        "gen96c" in ln or "skl16c" in ln or "csl20c" in ln
-            or "icx32c" in ln or "spr48c" in ln
-        for ln in rendered_cpu_lines[3:]
+        token in rendered_cpu_compact
+        for token in ("gen96c", "skl16c", "csl20c", "icx32c", "spr48c")
     ), rendered_cpu
     # QOS name doesn't carry the substring 'freecycle' — that lets us assert
     # the FLAGS cell compacted to 'fc' without false positives from the QOS
@@ -5560,13 +5561,13 @@ def run_self_test() -> int:
     assert parsed == datetime(2026, 5, 8, 3, 0, 0)
     assert parse_test_only_stderr("allocation failure: invalid account") is None
     assert parse_test_only_stderr("") is None
-    assert classify_probe_failure("sbatch: error: QOSMaxCpuPerJobLimit") == NOTE_QOS_LIMIT
-    assert classify_probe_failure("allocation failure: Invalid account") == NOTE_INVALID_ACCOUNT
-    assert classify_probe_failure("sbatch: error: invalid qos") == NOTE_INVALID_QOS
-    assert classify_probe_failure("sbatch: error: invalid partition specified") == NOTE_INVALID_PARTITION
-    assert classify_probe_failure("Invalid feature specification") == NOTE_INVALID_CONSTRAINT
-    assert classify_probe_failure("Requested node configuration is not available") == NOTE_UNAVAILABLE
-    assert classify_probe_failure("") == NOTE_PROBE_ERROR
+    assert classify_wait_check_failure("sbatch: error: QOSMaxCpuPerJobLimit") == NOTE_QOS_LIMIT
+    assert classify_wait_check_failure("allocation failure: Invalid account") == NOTE_INVALID_ACCOUNT
+    assert classify_wait_check_failure("sbatch: error: invalid qos") == NOTE_INVALID_QOS
+    assert classify_wait_check_failure("sbatch: error: invalid partition specified") == NOTE_INVALID_PARTITION
+    assert classify_wait_check_failure("Invalid feature specification") == NOTE_INVALID_CONSTRAINT
+    assert classify_wait_check_failure("Requested node configuration is not available") == NOTE_UNAVAILABLE
+    assert classify_wait_check_failure("") == NOTE_WAIT_CHECK_ERROR
 
     # Sort by wait: None pushes to the end; 0 first, then 3600, 7200.
     rows_for_sort = [
@@ -5575,22 +5576,35 @@ def run_self_test() -> int:
         AllocationRow("c", "a3", "u", "", "q3", "q3"),
         AllocationRow("c", "a4", "u", "", "q4", "q4"),
     ]
-    probe_default = ProbeShape()
-    rows_for_sort[0].wait_by_shape[probe_default.label] = 7200
-    rows_for_sort[1].wait_by_shape[probe_default.label] = 0
-    rows_for_sort[2].wait_by_shape[probe_default.label] = None
-    rows_for_sort[3].wait_by_shape[probe_default.label] = 3600
-    pairs_for_sort = [(row, probe_default) for row in rows_for_sort]
+    default_request = ResourceSpec()
+    rows_for_sort[0].wait_by_request[default_request.label] = 7200
+    rows_for_sort[1].wait_by_request[default_request.label] = 0
+    rows_for_sort[2].wait_by_request[default_request.label] = None
+    rows_for_sort[3].wait_by_request[default_request.label] = 3600
+    pairs_for_sort = [(row, default_request) for row in rows_for_sort]
     sorted_by_wait = sort_pairs(pairs_for_sort, "wait", reverse=False)
-    assert [r.wait_by_shape[probe_default.label] for r, _ in sorted_by_wait] == [0, 3600, 7200, None]
+    assert [r.wait_by_request[default_request.label] for r, _ in sorted_by_wait] == [0, 3600, 7200, None]
+    request_a = ResourceSpec(gpu_type="a100")
+    request_h = ResourceSpec(gpu_type="h100")
+    sorted_by_request = sort_pairs(
+        [(rows_for_sort[0], request_h), (rows_for_sort[1], request_a)],
+        "request", reverse=False,
+    )
+    assert [request.label for _, request in sorted_by_request] == ["a100:1@1h", "h100:1@1h"]
+    try:
+        sort_pairs(pairs_for_sort, "sh" + "ape", reverse=False)
+    except CommandError as exc:
+        assert "unknown sort key" in str(exc), exc
+    else:
+        raise AssertionError("legacy request sort key should be rejected")
 
-    # Wait/shape columns show up in to_dict only when include_avail=True and a shape is supplied.
-    avail_row.wait_by_shape[probe_default.label] = 0
-    rendered_dict = avail_row.to_dict(include_avail=True, shape=probe_default)
+    # Wait/request columns show up in to_dict only when include_avail=True and a request is supplied.
+    avail_row.wait_by_request[default_request.label] = 0
+    rendered_dict = avail_row.to_dict(include_avail=True, request=default_request)
     assert rendered_dict["wait"] == "now"
-    assert rendered_dict["shape"] == probe_default.label
+    assert rendered_dict["request"] == default_request.label
     assert "wait" not in avail_row.to_dict()
-    assert "shape" not in avail_row.to_dict()
+    assert "request" not in avail_row.to_dict()
 
     # parse_gpu_spec: type+count, count-only, type-only, error cases.
     assert parse_gpu_spec("a100:4") == ("a100", 4)
@@ -5605,157 +5619,157 @@ def run_self_test() -> int:
         else:
             raise AssertionError(f"parse_gpu_spec({bad!r}) should have raised")
 
-    # ProbeShape.gres_for: defaults preserve historic 'gpu:1' on GPU rows,
+    # ResourceSpec.gres_for: defaults preserve historic 'gpu:1' on GPU rows,
     # nothing on CPU rows; user-supplied counts/types render correctly.
     gpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     gpu_row.tags = ("gpu",)
     gpu_row.gpu_types = ("v100",)
     cpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     cpu_row.tags = ("cpu",)
-    assert ProbeShape().gres_for(gpu_row) == "gpu:1"
-    assert ProbeShape().gres_for(cpu_row) is None
-    assert ProbeShape(gpu_count=4).gres_for(gpu_row) == "gpu:4"
-    assert ProbeShape(gpu_type="a100", gpu_count=4).gres_for(gpu_row) == "gpu:a100:4"
-    assert ProbeShape(gpu_type="a100").gres_for(gpu_row) == "gpu:a100:1"
-    assert ProbeShape(gpu_type="a100", gpu_count=4).gres_for(cpu_row) is None
+    assert ResourceSpec().gres_for(gpu_row) == "gpu:1"
+    assert ResourceSpec().gres_for(cpu_row) is None
+    assert ResourceSpec(gpu_count=4).gres_for(gpu_row) == "gpu:4"
+    assert ResourceSpec(gpu_type="a100", gpu_count=4).gres_for(gpu_row) == "gpu:a100:4"
+    assert ResourceSpec(gpu_type="a100").gres_for(gpu_row) == "gpu:a100:1"
+    assert ResourceSpec(gpu_type="a100", gpu_count=4).gres_for(cpu_row) is None
 
     # to_sbatch_args: time/nodes/cpus/mem flow through; gres only when applicable.
-    args_built = ProbeShape(nodes=2, cpus=8, mem="32G", time="04:00:00").to_sbatch_args(gpu_row)
+    args_built = ResourceSpec(nodes=2, cpus=8, mem="32G", time="04:00:00").to_sbatch_args(gpu_row)
     assert "-N" in args_built and args_built[args_built.index("-N") + 1] == "2"
     assert "-n" in args_built and args_built[args_built.index("-n") + 1] == "8"
     assert "-t" in args_built and args_built[args_built.index("-t") + 1] == "04:00:00"
     assert "--mem=32G" in args_built
     assert "--gres=gpu:1" in args_built
-    assert "--gres=gpu:a100:4" in ProbeShape(gpu_type="a100", gpu_count=4).to_sbatch_args(gpu_row)
-    assert all(a != "--mem=" for a in ProbeShape().to_sbatch_args(gpu_row))
+    assert "--gres=gpu:a100:4" in ResourceSpec(gpu_type="a100", gpu_count=4).to_sbatch_args(gpu_row)
+    assert all(a != "--mem=" for a in ResourceSpec().to_sbatch_args(gpu_row))
 
     # should_skip: typed GPU request against mismatched/empty/matching rows.
-    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(gpu_row) is True
-    assert ProbeShape(gpu_type="v100", gpu_count=4).should_skip(gpu_row) is False
+    assert ResourceSpec(gpu_type="a100", gpu_count=4).should_skip(gpu_row) is True
+    assert ResourceSpec(gpu_type="v100", gpu_count=4).should_skip(gpu_row) is False
     empty_gpu_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     empty_gpu_row.tags = ("gpu",)
     # Empty gpu_types means metadata wasn't loaded: don't skip.
-    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(empty_gpu_row) is False
+    assert ResourceSpec(gpu_type="a100", gpu_count=4).should_skip(empty_gpu_row) is False
     # CPU row + GPU request (typed or untyped): always skip.
-    assert ProbeShape(gpu_type="a100", gpu_count=4).should_skip(cpu_row) is True
-    assert ProbeShape(gpu_count=4).should_skip(cpu_row) is True
-    # Untyped count-only on a GPU row still probes (any GPU is fine).
-    assert ProbeShape(gpu_count=4).should_skip(gpu_row) is False
+    assert ResourceSpec(gpu_type="a100", gpu_count=4).should_skip(cpu_row) is True
+    assert ResourceSpec(gpu_count=4).should_skip(cpu_row) is True
+    # Untyped count-only on a GPU row still wait checks (any GPU is fine).
+    assert ResourceSpec(gpu_count=4).should_skip(gpu_row) is False
 
     h100_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     h100_row.tags = ("gpu",)
     h100_row.gpu_types = ("h100nvl", "l40s")
-    assert ProbeShape(gpu_type="h100nvl").resolved_gpu_type(h100_row) == "h100nvl"
-    assert ProbeShape(gpu_type="h100").resolved_gpu_type(h100_row) == "h100nvl"
-    assert ProbeShape(gpu_type="h100", gpu_count=4).gres_for(h100_row) == "gpu:h100nvl:4"
-    assert ProbeShape(gpu_type="h100").resolved_gpu_type(empty_gpu_row) == "h100"
-    assert ProbeShape(gpu_type="h100").resolved_gpu_type(gpu_row) == "h100"
-    assert ProbeShape().resolved_gpu_type(gpu_row) is None
+    assert ResourceSpec(gpu_type="h100nvl").resolved_gpu_type(h100_row) == "h100nvl"
+    assert ResourceSpec(gpu_type="h100").resolved_gpu_type(h100_row) == "h100nvl"
+    assert ResourceSpec(gpu_type="h100", gpu_count=4).gres_for(h100_row) == "gpu:h100nvl:4"
+    assert ResourceSpec(gpu_type="h100").resolved_gpu_type(empty_gpu_row) == "h100"
+    assert ResourceSpec(gpu_type="h100").resolved_gpu_type(gpu_row) == "h100"
+    assert ResourceSpec().resolved_gpu_type(gpu_row) is None
 
-    # _gpus_cell: shows the per-row resolution of the shape's gpu_type;
-    # empty for CPU rows, missing shapes, or shapes without a gpu_type.
-    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100", gpu_count=1)) == "h100nvl"
-    assert h100_row._gpus_cell(ProbeShape(gpu_type="h100")) == "h100nvl"
+    # _gpus_cell: shows the per-row resolution of the request's gpu_type;
+    # empty for CPU rows, missing requests, or requests without a gpu_type.
+    assert h100_row._gpus_cell(ResourceSpec(gpu_type="h100", gpu_count=1)) == "h100nvl"
+    assert h100_row._gpus_cell(ResourceSpec(gpu_type="h100")) == "h100nvl"
     assert h100_row._gpus_cell(None) == ""
-    assert h100_row._gpus_cell(ProbeShape(cpus=32)) == ""
-    assert cpu_row._gpus_cell(ProbeShape(gpu_type="h100")) == ""
+    assert h100_row._gpus_cell(ResourceSpec(cpus=32)) == ""
+    assert cpu_row._gpus_cell(ResourceSpec(gpu_type="h100")) == ""
     # _cpu_cell mirrors _gpus_cell for CPU arch atoms.
     arch_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     arch_row.tags = ("cpu",)
     arch_row.cpu_features = ("gen", "zen4", "m768")
-    genoa_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("gen",)))
-    spr_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("spr",)))
-    assert arch_row._cpu_cell(genoa_shape) == "Genoa"
-    assert arch_row._cpu_cell(spr_shape) == ""  # no spr feature on row
+    genoa_request = ResourceSpec(cpus=8, filter=HardwareFilter(cpu_archs=("gen",)))
+    spr_request = ResourceSpec(cpus=8, filter=HardwareFilter(cpu_archs=("spr",)))
+    assert arch_row._cpu_cell(genoa_request) == "Genoa"
+    assert arch_row._cpu_cell(spr_request) == ""  # no spr feature on row
     assert arch_row._cpu_cell(None) == ""
-    assert arch_row._cpu_cell(ProbeShape(cpus=8)) == ""  # no cpu_archs in shape
+    assert arch_row._cpu_cell(ResourceSpec(cpus=8)) == ""  # no cpu_archs in request
     # zen<N> literals and short forms both resolve.
-    zen4_shape = ProbeShape(cpus=8, filter=HardwareFilter(cpu_archs=("zen4",)))
-    assert arch_row._cpu_cell(zen4_shape) == "Zen 4"
-    # Default probe never skips.
-    assert ProbeShape().should_skip(gpu_row) is False
-    assert ProbeShape().should_skip(cpu_row) is False
-    # Explicit CPU shapes skip GPU rows: cpu:N, total:N, mem=, vendor=, arch.
-    # Without this, `chpc-allocs cpu:32` probes notchpeak-gpu and emits
+    zen4_request = ResourceSpec(cpus=8, filter=HardwareFilter(cpu_archs=("zen4",)))
+    assert arch_row._cpu_cell(zen4_request) == "Zen 4"
+    # Default wait check never skips.
+    assert ResourceSpec().should_skip(gpu_row) is False
+    assert ResourceSpec().should_skip(cpu_row) is False
+    # Explicit CPU requests skip GPU rows: cpu:N, total:N, mem=, vendor=, arch.
+    # Without this, `chpc-allocs cpu:32` wait checks notchpeak-gpu and emits
     # `--sbatch cpu:32` blocks that inject `--gres=gpu:1`.
-    assert ProbeShape(cpus=32, cpus_per_node=32).should_skip(gpu_row) is True
-    assert ProbeShape(cpus=32, cpus_per_node=32).should_skip(cpu_row) is False
-    assert ProbeShape(cpus=64, cpus_is_total=True).should_skip(gpu_row) is True
-    assert ProbeShape(mem="64G").should_skip(gpu_row) is True
-    assert ProbeShape(filter=HardwareFilter(cpu_vendor="amd")).should_skip(gpu_row) is True
-    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(gpu_row) is True
-    # Bare ProbeShape() is *not* an explicit CPU shape — preserves the
-    # default-probe-doesn't-skip contract above.
-    assert ProbeShape().has_explicit_cpu_intent() is False
-    assert ProbeShape(cpus=1).has_explicit_cpu_intent() is False  # matches default
-    assert ProbeShape(cpus=2).has_explicit_cpu_intent() is True
+    assert ResourceSpec(cpus=32, cpus_per_node=32).should_skip(gpu_row) is True
+    assert ResourceSpec(cpus=32, cpus_per_node=32).should_skip(cpu_row) is False
+    assert ResourceSpec(cpus=64, cpus_is_total=True).should_skip(gpu_row) is True
+    assert ResourceSpec(mem="64G").should_skip(gpu_row) is True
+    assert ResourceSpec(filter=HardwareFilter(cpu_vendor="amd")).should_skip(gpu_row) is True
+    assert ResourceSpec(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(gpu_row) is True
+    # Bare ResourceSpec() is *not* an explicit CPU request — preserves the
+    # default-wait check-doesn't-skip contract above.
+    assert ResourceSpec().has_explicit_cpu_intent() is False
+    assert ResourceSpec(cpus=1).has_explicit_cpu_intent() is False  # matches default
+    assert ResourceSpec(cpus=2).has_explicit_cpu_intent() is True
     # predict_wait honors should_skip even with sbatch on PATH.
-    assert predict_wait(gpu_row, shape=ProbeShape(gpu_type="a100", gpu_count=4)) is None
+    assert predict_wait(gpu_row, request=ResourceSpec(gpu_type="a100", gpu_count=4)) is None
 
-    # parse_shape_list: '+' splits OR groups; '*' merges AND pieces into one shape.
+    # parse_resource_list: '+' splits OR groups; '*' merges AND pieces into one request.
     parser = _build_parser()
-    shapes_one = parse_shape_list("a100:4")
-    assert len(shapes_one) == 1 and shapes_one[0].gpu_type == "a100" and shapes_one[0].gpu_count == 4
-    shapes_many = parse_shape_list("a100:4+cpu:32@12h+h100:1@30m")
-    assert [s.label for s in shapes_many] == ["a100:4@1h", "cpu:32@12h", "h100:1@30m"]
+    requests_one = parse_resource_list("a100:4")
+    assert len(requests_one) == 1 and requests_one[0].gpu_type == "a100" and requests_one[0].gpu_count == 4
+    requests_many = parse_resource_list("a100:4+cpu:32@12h+h100:1@30m")
+    assert [s.label for s in requests_many] == ["a100:4@1h", "cpu:32@12h", "h100:1@30m"]
     # Whitespace around '+' tolerated.
-    shapes_ws = parse_shape_list(" a100:4 + cpu:32 ")
-    assert [s.label for s in shapes_ws] == ["a100:4@1h", "cpu:32@1h"]
-    # AND ('*'): one combined shape with both gpu and cpu fields populated.
-    shapes_and = parse_shape_list("a100:4*cpu:32")
-    assert len(shapes_and) == 1
-    assert shapes_and[0].gpu_type == "a100" and shapes_and[0].gpu_count == 4
-    assert shapes_and[0].cpus == 32
-    # AND with @-suffix on one piece: time flows through to the merged shape.
-    shapes_and_t = parse_shape_list("a100:4@2h*cpu:32")
-    assert shapes_and_t[0].time == "2h" and shapes_and_t[0].cpus == 32
-    # Mixed: '*' binds tighter than '+'. First shape is the AND-merged piece.
-    shapes_mix = parse_shape_list("a100:4*cpu:32+h100:1")
-    assert len(shapes_mix) == 2
-    assert shapes_mix[0].gpu_type == "a100" and shapes_mix[0].cpus == 32
-    assert shapes_mix[1].gpu_type == "h100" and shapes_mix[1].cpus == DEFAULT_PROBE_CPUS
+    requests_ws = parse_resource_list(" a100:4 + cpu:32 ")
+    assert [s.label for s in requests_ws] == ["a100:4@1h", "cpu:32@1h"]
+    # AND ('*'): one combined request with both gpu and cpu fields populated.
+    requests_and = parse_resource_list("a100:4*cpu:32")
+    assert len(requests_and) == 1
+    assert requests_and[0].gpu_type == "a100" and requests_and[0].gpu_count == 4
+    assert requests_and[0].cpus == 32
+    # AND with @-suffix on one piece: time flows through to the merged request.
+    requests_and_t = parse_resource_list("a100:4@2h*cpu:32")
+    assert requests_and_t[0].time == "2h" and requests_and_t[0].cpus == 32
+    # Mixed: '*' binds tighter than '+'. First request is the AND-merged piece.
+    requests_mix = parse_resource_list("a100:4*cpu:32+h100:1")
+    assert len(requests_mix) == 2
+    assert requests_mix[0].gpu_type == "a100" and requests_mix[0].cpus == 32
+    assert requests_mix[1].gpu_type == "h100" and requests_mix[1].cpus == DEFAULT_REQUEST_CPUS
     # Whitespace around '*' tolerated.
-    shapes_and_ws = parse_shape_list(" a100:4 * cpu:32 ")
-    assert shapes_and_ws[0].gpu_type == "a100" and shapes_and_ws[0].cpus == 32
-    # Same-field collision in AND group: last-wins (consistent with intra-shape tokens).
-    shapes_collide = parse_shape_list("a100:4@1h*cpu:32@2h")
-    assert shapes_collide[0].time == "2h"
+    requests_and_ws = parse_resource_list(" a100:4 * cpu:32 ")
+    assert requests_and_ws[0].gpu_type == "a100" and requests_and_ws[0].cpus == 32
+    # Same-field collision in AND group: last-wins (consistent with intra-request tokens).
+    requests_collide = parse_resource_list("a100:4@1h*cpu:32@2h")
+    assert requests_collide[0].time == "2h"
     # Empty/blank input and empty pieces raise (both '+' and '*' separators).
     for bad in (
         "", " ", "+", "a100:4+", "+a100:4", "a100:4++cpu:32",
         "*a100:4", "a100:4*", "a100:4**cpu:32", "a100:4*+h100:1",
     ):
         try:
-            parse_shape_list(bad)
+            parse_resource_list(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"parse_shape_list({bad!r}) should have raised")
+            raise AssertionError(f"parse_resource_list({bad!r}) should have raised")
 
-    # Positional SHAPE tokens flow into args.shape_pos and are joined in main().
+    # Positional REQUEST tokens flow into args.request_pos and are joined in main().
     a = parser.parse_args(["a100:4"])
-    assert a.shape_pos == ["a100:4"]
+    assert a.request_pos == ["a100:4"]
     a = parser.parse_args(["a100:4+cpu:32"])
-    assert a.shape_pos == ["a100:4+cpu:32"]
+    assert a.request_pos == ["a100:4+cpu:32"]
     a = parser.parse_args(["a100:4", "cpu:32"])
-    assert a.shape_pos == ["a100:4", "cpu:32"]
-    assert _shape_list_from_args(a.shape_pos) == "a100:4+cpu:32"
-    assert _shape_list_from_args([]) is None
-    assert _shape_list_from_args([""]) == ""
+    assert a.request_pos == ["a100:4", "cpu:32"]
+    assert _request_list_from_args(a.request_pos) == "a100:4+cpu:32"
+    assert _request_list_from_args([]) is None
+    assert _request_list_from_args([""]) == ""
 
-    sh = parse_shape_spec("a100:1@30m")
+    sh = parse_resource_spec("a100:1@30m")
     assert sh.gpu_type == "a100" and sh.gpu_count == 1 and sh.time == "30m"
-    sh = parse_shape_spec("cpu:32@12h")
+    sh = parse_resource_spec("cpu:32@12h")
     assert sh.cpus == 32 and sh.gpu_type is None and sh.time == "12h"
-    sh = parse_shape_spec("gpu:4@2h")
+    sh = parse_resource_spec("gpu:4@2h")
     assert sh.gpu_type is None and sh.gpu_count == 4 and sh.time == "2h"
     for bad in ("a100:1@", "@30m", "cpu:32@notatime"):
         try:
-            parse_shape_spec(bad)
+            parse_resource_spec(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+            raise AssertionError(f"parse_resource_spec({bad!r}) should have raised")
 
     # _canon_cpu_arch: short forms pass through, long forms map, others -> None.
     assert _canon_cpu_arch("skl") == "skl"
@@ -5774,47 +5788,47 @@ def run_self_test() -> int:
     assert _features_match_vendor(("skl",), "intel") is True
     assert _features_match_vendor((), "intel") is False
 
-    # parse_shape_spec: vendor and arch atoms (positional bare tokens).
-    sh = parse_shape_spec("intel")
+    # parse_resource_spec: vendor and arch atoms (positional bare tokens).
+    sh = parse_resource_spec("intel")
     assert sh.filter.cpu_vendor == "intel" and sh.filter.cpu_archs == () and sh.gpu_type is None
-    sh = parse_shape_spec("amd")
+    sh = parse_resource_spec("amd")
     assert sh.filter.cpu_vendor == "amd"
-    sh = parse_shape_spec("genoa")
+    sh = parse_resource_spec("genoa")
     assert sh.filter.cpu_archs == ("gen",) and sh.filter.cpu_vendor is None
-    sh = parse_shape_spec("zen4")
+    sh = parse_resource_spec("zen4")
     assert sh.filter.cpu_archs == ("zen4",)
     # Combined positional: a100:4 with vendor filter.
-    sh = parse_shape_spec("a100:4,intel")
+    sh = parse_resource_spec("a100:4,intel")
     assert sh.gpu_type == "a100" and sh.gpu_count == 4 and sh.filter.cpu_vendor == "intel"
     # key=value forms.
-    sh = parse_shape_spec("a100:4,vendor=amd")
+    sh = parse_resource_spec("a100:4,vendor=amd")
     assert sh.filter.cpu_vendor == "amd"
-    sh = parse_shape_spec("cpu:32,arch=rome")
+    sh = parse_resource_spec("cpu:32,arch=rome")
     assert sh.cpus == 32 and sh.filter.cpu_archs == ("rom",)
     # Label includes arch (preferred) or vendor.
-    assert ",gen" in parse_shape_spec("cpu:32,arch=genoa").label
-    assert ",intel" in parse_shape_spec("a100:4,vendor=intel").label
+    assert ",gen" in parse_resource_spec("cpu:32,arch=genoa").label
+    assert ",intel" in parse_resource_spec("a100:4,vendor=intel").label
     # arch wins over vendor in the label.
-    label = parse_shape_spec("a100:4,vendor=amd,arch=genoa").label
+    label = parse_resource_spec("a100:4,vendor=amd,arch=genoa").label
     assert ",gen" in label and ",amd" not in label
     # Bad vendor/arch values raise.
     for bad in ("vendor=nvidia", "arch=potato", "vendor="):
         try:
-            parse_shape_spec(bad)
+            parse_resource_spec(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+            raise AssertionError(f"parse_resource_spec({bad!r}) should have raised")
 
-    # parse_shape_list: AND-combine GPU shape with vendor atom.
-    shapes_va = parse_shape_list("a100:4*intel")
-    assert len(shapes_va) == 1
-    assert shapes_va[0].gpu_type == "a100" and shapes_va[0].filter.cpu_vendor == "intel"
+    # parse_resource_list: AND-combine GPU request with vendor atom.
+    requests_va = parse_resource_list("a100:4*intel")
+    assert len(requests_va) == 1
+    assert requests_va[0].gpu_type == "a100" and requests_va[0].filter.cpu_vendor == "intel"
     # OR across vendors.
-    shapes_or = parse_shape_list("intel+amd")
-    assert [s.filter.cpu_vendor for s in shapes_or] == ["intel", "amd"]
+    requests_or = parse_resource_list("intel+amd")
+    assert [s.filter.cpu_vendor for s in requests_or] == ["intel", "amd"]
     try:
-        parse_shape_list("sm80+")
+        parse_resource_list("sm80+")
     except CommandError as exc:
         assert "sm_min=80" in str(exc), str(exc)
     else:
@@ -5862,11 +5876,11 @@ def run_self_test() -> int:
     assert HardwareFilter(cpu_vendor="intel").cpu_satisfies(("skl",)) is True
 
     # to_sbatch_args: --constraint emitted only when vendor/arch set.
-    args_intel = ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).to_sbatch_args(cpu_row)
+    args_intel = ResourceSpec(filter=HardwareFilter(cpu_vendor="intel")).to_sbatch_args(cpu_row)
     assert any(a.startswith("--constraint=") for a in args_intel)
-    args_plain = ProbeShape().to_sbatch_args(cpu_row)
+    args_plain = ResourceSpec().to_sbatch_args(cpu_row)
     assert not any(a.startswith("--constraint=") for a in args_plain)
-    args_arch = ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).to_sbatch_args(cpu_row)
+    args_arch = ResourceSpec(filter=HardwareFilter(cpu_archs=("gen",))).to_sbatch_args(cpu_row)
     assert "--constraint=gen" in args_arch
 
     # should_skip: vendor/arch row predicates.
@@ -5879,16 +5893,16 @@ def run_self_test() -> int:
     no_feat_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     no_feat_row.tags = ("cpu",)
     # vendor mismatch skips; match doesn't.
-    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(amd_row) is True
-    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(intel_row) is False
-    assert ProbeShape(filter=HardwareFilter(cpu_vendor="amd")).should_skip(amd_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_vendor="intel")).should_skip(amd_row) is True
+    assert ResourceSpec(filter=HardwareFilter(cpu_vendor="intel")).should_skip(intel_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_vendor="amd")).should_skip(amd_row) is False
     # arch mismatch skips; substring match (zen4 contains zen) works.
-    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(amd_row) is True
-    assert ProbeShape(filter=HardwareFilter(cpu_archs=("zen",))).should_skip(amd_row) is False
-    assert ProbeShape(filter=HardwareFilter(cpu_archs=("zen4",))).should_skip(amd_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(amd_row) is True
+    assert ResourceSpec(filter=HardwareFilter(cpu_archs=("zen",))).should_skip(amd_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_archs=("zen4",))).should_skip(amd_row) is False
     # Empty cpu_features: don't skip (metadata not loaded).
-    assert ProbeShape(filter=HardwareFilter(cpu_vendor="intel")).should_skip(no_feat_row) is False
-    assert ProbeShape(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(no_feat_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_vendor="intel")).should_skip(no_feat_row) is False
+    assert ResourceSpec(filter=HardwareFilter(cpu_archs=("gen",))).should_skip(no_feat_row) is False
 
     # _canon_gpu_gen: aliases collapse, unknown -> None.
     assert _canon_gpu_gen("ampere") == "ampere"
@@ -5941,51 +5955,51 @@ def run_self_test() -> int:
     assert _gpu_token_satisfies("v100", gen=None, sm=None, gen_min=None, sm_min=80) is False
     assert _gpu_token_satisfies("madeupgpu", gen="ampere", sm=None, gen_min=None, sm_min=None) is False
 
-    # parse_shape_spec: gen/SM atoms (positional).
-    sh = parse_shape_spec("ampere")
+    # parse_resource_spec: gen/SM atoms (positional).
+    sh = parse_resource_spec("ampere")
     assert sh.filter.gpu_gen == "ampere" and sh.filter.gpu_sm is None
-    sh = parse_shape_spec("hopper")
+    sh = parse_resource_spec("hopper")
     assert sh.filter.gpu_gen == "hopper"
-    sh = parse_shape_spec("lovelace")
+    sh = parse_resource_spec("lovelace")
     assert sh.filter.gpu_gen == "ada"
-    sh = parse_shape_spec("sm80")
+    sh = parse_resource_spec("sm80")
     assert sh.filter.gpu_sm == 80 and sh.filter.gpu_gen is None
-    sh = parse_shape_spec("sm_89")
+    sh = parse_resource_spec("sm_89")
     assert sh.filter.gpu_sm == 89
-    # parse_shape_spec: gen/SM atoms (key=value).
-    sh = parse_shape_spec("gpu:4,gen=hopper")
+    # parse_resource_spec: gen/SM atoms (key=value).
+    sh = parse_resource_spec("gpu:4,gen=hopper")
     assert sh.gpu_count == 4 and sh.filter.gpu_gen == "hopper"
-    sh = parse_shape_spec("gpu:1,sm_min=80")
+    sh = parse_resource_spec("gpu:1,sm_min=80")
     assert sh.filter.gpu_sm_min == 80 and sh.gpu_count == 1
-    sh = parse_shape_spec("gpu:1,gen_min=ampere")
+    sh = parse_resource_spec("gpu:1,gen_min=ampere")
     assert sh.filter.gpu_gen_min == "ampere"
-    sh = parse_shape_spec("gpu:4,sm=89")
+    sh = parse_resource_spec("gpu:4,sm=89")
     assert sh.filter.gpu_sm == 89
     # AND-combine: explicit GPU type plus generation.
-    shapes_ag = parse_shape_list("a100:4*ampere")
-    assert len(shapes_ag) == 1
-    assert shapes_ag[0].gpu_type == "a100" and shapes_ag[0].filter.gpu_gen == "ampere"
+    requests_ag = parse_resource_list("a100:4*ampere")
+    assert len(requests_ag) == 1
+    assert requests_ag[0].gpu_type == "a100" and requests_ag[0].filter.gpu_gen == "ampere"
     # Bad gen/SM values raise.
     for bad in ("gen=potato", "sm=99", "sm_min=99", "gen_min=foo", "gen=", "sm="):
         try:
-            parse_shape_spec(bad)
+            parse_resource_spec(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+            raise AssertionError(f"parse_resource_spec({bad!r}) should have raised")
 
     # Label: gen/SM markers; min uses '+' suffix.
-    assert ",ampere" in parse_shape_spec("ampere").label
-    assert ",sm80" in parse_shape_spec("sm80").label
-    assert ",sm80+" in parse_shape_spec("gpu:1,sm_min=80").label
-    assert ",ampere+" in parse_shape_spec("gpu:1,gen_min=ampere").label
+    assert ",ampere" in parse_resource_spec("ampere").label
+    assert ",sm80" in parse_resource_spec("sm80").label
+    assert ",sm80+" in parse_resource_spec("gpu:1,sm_min=80").label
+    assert ",ampere+" in parse_resource_spec("gpu:1,gen_min=ampere").label
     # Bare gen/SM atoms produce a GPU label, not CPU.
-    assert parse_shape_spec("ampere").label.startswith("gpu:1@")
-    assert parse_shape_spec("sm80").label.startswith("gpu:1@")
+    assert parse_resource_spec("ampere").label.startswith("gpu:1@")
+    assert parse_resource_spec("sm80").label.startswith("gpu:1@")
 
     # to_sbatch_args: gen/SM does NOT emit --constraint.
     amp_filter = HardwareFilter(gpu_gen="ampere")
-    args_amp = ProbeShape(filter=amp_filter).to_sbatch_args(gpu_row)
+    args_amp = ResourceSpec(filter=amp_filter).to_sbatch_args(gpu_row)
     assert not any(a.startswith("--constraint=") for a in args_amp)
 
     # should_skip: gen/SM row predicates.
@@ -6001,27 +6015,27 @@ def run_self_test() -> int:
     no_gpu_meta = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     no_gpu_meta.tags = ("gpu",)
     # Exact gen / sm: skip on mismatch, don't skip on match.
-    assert ProbeShape(filter=HardwareFilter(gpu_gen="hopper")).should_skip(a100_row) is True
-    assert ProbeShape(filter=amp_filter).should_skip(a100_row) is False
-    assert ProbeShape(filter=HardwareFilter(gpu_sm=80)).should_skip(a100_row) is False
-    assert ProbeShape(filter=HardwareFilter(gpu_sm=89)).should_skip(a100_row) is True
+    assert ResourceSpec(filter=HardwareFilter(gpu_gen="hopper")).should_skip(a100_row) is True
+    assert ResourceSpec(filter=amp_filter).should_skip(a100_row) is False
+    assert ResourceSpec(filter=HardwareFilter(gpu_sm=80)).should_skip(a100_row) is False
+    assert ResourceSpec(filter=HardwareFilter(gpu_sm=89)).should_skip(a100_row) is True
     # gen_min / sm_min: ge semantics.
     amp_min = HardwareFilter(gpu_gen_min="ampere")
     sm80_min = HardwareFilter(gpu_sm_min=80)
-    assert ProbeShape(filter=amp_min).should_skip(v100_row) is True
-    assert ProbeShape(filter=amp_min).should_skip(a100_row) is False
-    assert ProbeShape(filter=amp_min).should_skip(h100_only) is False
-    assert ProbeShape(filter=sm80_min).should_skip(v100_row) is True
-    assert ProbeShape(filter=sm80_min).should_skip(a100_row) is False
+    assert ResourceSpec(filter=amp_min).should_skip(v100_row) is True
+    assert ResourceSpec(filter=amp_min).should_skip(a100_row) is False
+    assert ResourceSpec(filter=amp_min).should_skip(h100_only) is False
+    assert ResourceSpec(filter=sm80_min).should_skip(v100_row) is True
+    assert ResourceSpec(filter=sm80_min).should_skip(a100_row) is False
     # Empty gpu_types: don't skip (metadata not loaded).
-    assert ProbeShape(filter=HardwareFilter(gpu_gen="hopper")).should_skip(no_gpu_meta) is False
-    assert ProbeShape(filter=sm80_min).should_skip(no_gpu_meta) is False
+    assert ResourceSpec(filter=HardwareFilter(gpu_gen="hopper")).should_skip(no_gpu_meta) is False
+    assert ResourceSpec(filter=sm80_min).should_skip(no_gpu_meta) is False
     # gen/SM on a CPU row: skip (GPU implied).
-    assert ProbeShape(filter=amp_filter).should_skip(cpu_row) is True
+    assert ResourceSpec(filter=amp_filter).should_skip(cpu_row) is True
     # Combined gpu_type + gen: row must satisfy both on the SAME token.
-    a100_hopper = ProbeShape(gpu_type="a100", filter=HardwareFilter(gpu_gen="hopper"))
-    a100_ampere = ProbeShape(gpu_type="a100", filter=amp_filter)
-    h100_hopper = ProbeShape(gpu_type="h100", filter=HardwareFilter(gpu_gen="hopper"))
+    a100_hopper = ResourceSpec(gpu_type="a100", filter=HardwareFilter(gpu_gen="hopper"))
+    a100_ampere = ResourceSpec(gpu_type="a100", filter=amp_filter)
+    h100_hopper = ResourceSpec(gpu_type="h100", filter=HardwareFilter(gpu_gen="hopper"))
     assert a100_hopper.should_skip(a100_row) is True
     assert a100_ampere.should_skip(a100_row) is False
     # Heterogeneous row with both a100 (Ampere) and h100 (Hopper):
@@ -6038,11 +6052,11 @@ def run_self_test() -> int:
     h200_row = AllocationRow("notchpeak", "x", "u", "", "q", "q")
     h200_row.tags = ("gpu",)
     h200_row.gpu_types = ("h200_1g.18gb", "h200_2g.35gb", "h200")
-    hopper_shape = ProbeShape(filter=HardwareFilter(gpu_gen="hopper"))
-    assert hopper_shape.resolved_gpu_type(h200_row) == "h200"
+    hopper_request = ResourceSpec(filter=HardwareFilter(gpu_gen="hopper"))
+    assert hopper_request.resolved_gpu_type(h200_row) == "h200"
     # gres_for uses the resolved token.
-    assert hopper_shape.gres_for(h200_row) == "gpu:h200:1"
-    assert ProbeShape(gpu_count=4, filter=HardwareFilter(gpu_gen="hopper")).gres_for(h200_row) == "gpu:h200:4"
+    assert hopper_request.gres_for(h200_row) == "gpu:h200:1"
+    assert ResourceSpec(gpu_count=4, filter=HardwareFilter(gpu_gen="hopper")).gres_for(h200_row) == "gpu:h200:4"
 
     prem_rows = [
         AllocationRow("notchpeak", "x", "u", "", "q-v100", "q-v100"),
@@ -6085,58 +6099,58 @@ def run_self_test() -> int:
     assert isinstance(payload, dict)
     assert set(payload.keys()) == {"_help", "rows"}
     assert payload["_help"]["premium_gpus"] == list(PREMIUM_GPUS)
-    assert "schema_version" in payload["_help"]
+    assert payload["_help"]["schema_version"] == 3
     assert "fields" in payload["_help"]
-    assert "shape" in payload["_help"]["fields"]
+    assert "request" in payload["_help"]["fields"]
     assert len(payload["rows"]) == len(prem_pairs)
     assert isinstance(json.loads(json_output(prem_pairs, wide=False)), list)
 
-    # parse_shape_spec round-trip + label format.
-    sh = parse_shape_spec("a100:4,mem=32G,time=24h")
+    # parse_resource_spec round-trip + label format.
+    sh = parse_resource_spec("a100:4,mem=32G,time=24h")
     assert sh.gpu_type == "a100" and sh.gpu_count == 4
     assert sh.mem == "32G" and sh.time == "24h"
     assert sh.label == "a100:4@24h,32G", sh.label
-    sh = parse_shape_spec("cpu:8,time=4h")
+    sh = parse_resource_spec("cpu:8,time=4h")
     assert sh.cpus == 8 and sh.gpu_type is None and sh.gpu_count is None
     assert sh.label == "cpu:8@4h", sh.label
-    sh = parse_shape_spec("a100")
+    sh = parse_resource_spec("a100")
     assert sh.gpu_type == "a100" and sh.gpu_count == 1
-    sh = parse_shape_spec("32")
+    sh = parse_resource_spec("32")
     assert sh.cpus == 32 and sh.gpu_type is None
-    sh = parse_shape_spec("cores=8,mem=16G,gpus=h100nvl:1,time=4h")
+    sh = parse_resource_spec("cores=8,mem=16G,gpus=h100nvl:1,time=4h")
     assert sh.cpus == 8 and sh.gpu_type == "h100nvl" and sh.gpu_count == 1
     assert sh.label == "h100nvl:1@4h,16G", sh.label
     # Multi-node prefix: cores= is per-node, total is nodes * cores.
-    sh = parse_shape_spec("nodes=2,cores=4,time=1h")
+    sh = parse_resource_spec("nodes=2,cores=4,time=1h")
     assert sh.nodes == 2 and sh.cpus == 8 and sh.cpus_per_node == 4, sh.cpus
     assert sh.label == "2n*cpu:4@1h", sh.label
     # 'Nn' positional shorthand mirrors nodes=N.
-    sh = parse_shape_spec("2n,cpu:32")
+    sh = parse_resource_spec("2n,cpu:32")
     assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_per_node == 32, sh.cpus
     assert sh.label.startswith("2n*cpu:32@"), sh.label
     # Bare integer is also per-node.
-    sh = parse_shape_spec("2n,32")
+    sh = parse_resource_spec("2n,32")
     assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_per_node == 32, sh.cpus
     # 'total:' bypasses per-node multiplication.
-    sh = parse_shape_spec("2n,total:64")
+    sh = parse_resource_spec("2n,total:64")
     assert sh.nodes == 2 and sh.cpus == 64 and sh.cpus_is_total is True, sh.cpus
     assert sh.label.startswith("2n*total:64@"), sh.label
     # 'total=' kv form.
-    sh = parse_shape_spec("nodes=4,total=128")
+    sh = parse_resource_spec("nodes=4,total=128")
     assert sh.nodes == 4 and sh.cpus == 128 and sh.cpus_is_total is True
     # Single-node default: cpu:N still equals total (nodes=1, multiplier=1).
-    sh = parse_shape_spec("cpu:32")
+    sh = parse_resource_spec("cpu:32")
     assert sh.nodes == 1 and sh.cpus == 32 and sh.cpus_per_node == 32
     # 2n alone keeps default cpu count (no per-node multiplier applied).
-    sh = parse_shape_spec("2n,a100:4")
-    assert sh.nodes == 2 and sh.cpus == DEFAULT_PROBE_CPUS
+    sh = parse_resource_spec("2n,a100:4")
+    assert sh.nodes == 2 and sh.cpus == DEFAULT_REQUEST_CPUS
     assert sh.gpu_type == "a100" and sh.gpu_count == 4
-    # Round-trip: parsed label re-parses to equivalent shape (via the same
-    # SHAPE_LIST path users hit, since labels use '*' to separate the Nn
+    # Round-trip: parsed label re-parses to equivalent request (via the same
+    # REQUEST_LIST path users hit, since labels use '*' to separate the Nn
     # prefix from the core spec).
     for spec in ("2n,cpu:32", "2n,total:64", "cpu:32", "4n,cores=8"):
-        first = parse_shape_spec(spec)
-        again_list = parse_shape_list(first.label)
+        first = parse_resource_spec(spec)
+        again_list = parse_resource_list(first.label)
         assert len(again_list) == 1, (spec, first.label, again_list)
         again = again_list[0]
         assert again.nodes == first.nodes and again.cpus == first.cpus, (spec, again.label)
@@ -6144,7 +6158,7 @@ def run_self_test() -> int:
     assert _format_wall_short("00:01:00") == "1m"
     assert _format_wall_short("3-00:00:00") == "3d"
     assert _format_wall_short("01:30:00") == "1h30m"
-    # Bad shape specs raise. cpus= is no longer accepted; per-node and total
+    # Bad request specs raise. cpus= is no longer accepted; per-node and total
     # cannot be combined; 'Nn' must be positive.
     bad_specs = (
         "", "cores=", "cpus=8", "time=banana", "weird=1", "cores=0",
@@ -6152,11 +6166,11 @@ def run_self_test() -> int:
     )
     for bad in bad_specs:
         try:
-            parse_shape_spec(bad)
+            parse_resource_spec(bad)
         except CommandError:
             pass
         else:
-            raise AssertionError(f"parse_shape_spec({bad!r}) should have raised")
+            raise AssertionError(f"parse_resource_spec({bad!r}) should have raised")
 
     # _to_sbatch_wall canonicalizes compact forms for sbatch -t.
     assert _to_sbatch_wall("1h") == "01:00:00"
@@ -6168,52 +6182,52 @@ def run_self_test() -> int:
 
     # _is_low_information_pair drops non-actionable rows, but keeps valid
     # future-start predictions even when no node fits right now.
-    li_shape = ProbeShape(cpus=4, time="01:00:00")
-    big_shape = ProbeShape(cpus=4, time="7-00:00:00")
+    li_request = ResourceSpec(cpus=4, time="01:00:00")
+    big_request = ResourceSpec(cpus=4, time="7-00:00:00")
     ok_li_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-ok", "q-ok",
         qos_info=QOSInfo("q-ok", max_wall="3-00:00:00"),
     )
     ok_li_row.free_nodes = "5/10"
-    ok_li_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(ok_li_row, li_shape) is False
+    ok_li_row.wait_by_request = {li_request.label: 0}
+    assert _is_low_information_pair(ok_li_row, li_request) is False
 
     unk_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-u", "q-u",
         qos_info=QOSInfo("q-u", max_wall="3-00:00:00"),
     )
     unk_row.free_nodes = "5/10"
-    unk_row.wait_by_shape = {li_shape.label: None}
-    assert _is_low_information_pair(unk_row, li_shape) is True
+    unk_row.wait_by_request = {li_request.label: None}
+    assert _is_low_information_pair(unk_row, li_request) is True
 
     no_wall_row = AllocationRow("notchpeak", "x", "u", "", "q-nw", "q-nw")
     no_wall_row.free_nodes = "5/10"
-    no_wall_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(no_wall_row, li_shape) is True
+    no_wall_row.wait_by_request = {li_request.label: 0}
+    assert _is_low_information_pair(no_wall_row, li_request) is True
 
     short_qos_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-s", "q-s",
         qos_info=QOSInfo("q-s", max_wall="3-00:00:00"),
     )
     short_qos_row.free_nodes = "5/10"
-    short_qos_row.wait_by_shape = {big_shape.label: 0}
-    assert _is_low_information_pair(short_qos_row, big_shape) is True
+    short_qos_row.wait_by_request = {big_request.label: 0}
+    assert _is_low_information_pair(short_qos_row, big_request) is True
 
     empty_cap_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-e", "q-e",
         qos_info=QOSInfo("q-e", max_wall="3-00:00:00"),
     )
     empty_cap_row.free_nodes = "0/10"
-    empty_cap_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(empty_cap_row, li_shape) is False
-    shape_empty_row = AllocationRow(
+    empty_cap_row.wait_by_request = {li_request.label: 0}
+    assert _is_low_information_pair(empty_cap_row, li_request) is False
+    request_empty_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-se", "q-se",
         qos_info=QOSInfo("q-se", max_wall="3-00:00:00"),
     )
-    shape_empty_row.free_nodes = "5/10"
-    shape_empty_row.availability_by_shape[li_shape.label] = ("0/2", "0/64", "")
-    shape_empty_row.wait_by_shape = {li_shape.label: 0}
-    assert _is_low_information_pair(shape_empty_row, li_shape) is False
+    request_empty_row.free_nodes = "5/10"
+    request_empty_row.availability_by_request[li_request.label] = ("0/2", "0/64", "")
+    request_empty_row.wait_by_request = {li_request.label: 0}
+    assert _is_low_information_pair(request_empty_row, li_request) is False
 
     a100_row = AllocationRow(
         "notchpeak", "x", "u", "", "q-a100", "q-a100",
@@ -6223,7 +6237,7 @@ def run_self_test() -> int:
     cpu_only_row = AllocationRow("notchpeak", "x", "u", "", "q-cpu", "q-cpu")
     cpu_only_row.gpu_types = ()
 
-    # Removed flags (--cores/--cpus/--shape/--gpus/--mem/--time/--nodes/
+    # Removed flags (--cores/--cpus/--request/--gpus/--mem/--time/--nodes/
     # --wait-for/--gpu/--cpu/--gpu-type/--cpu-type and legacy aliases) all
     # raise SystemExit at parse time.
     parser = _build_parser()
@@ -6241,7 +6255,7 @@ def run_self_test() -> int:
 
     for removed in (
         ["--cores", "16"], ["--cpus", "16"], ["--time", "4h"],
-        ["--shape", "a100:1"], ["--gpus", "a100:4"], ["--mem", "32G"],
+        ["--request", "a100:1"], ["--gpus", "a100:4"], ["--mem", "32G"],
         ["--wait-for", "cpu:32"], ["--nodes", "2"],
         ["--gpu"], ["--cpu"], ["--gpu-type", "a100"], ["--cpu-type", "intel"],
         ["--freecycle"], ["--no-freecycle"], ["--guest"], ["--no-guest"],
@@ -6250,42 +6264,42 @@ def run_self_test() -> int:
     ):
         assert_parse_exits(parser, removed)
 
-    # Positional SHAPE tokens parse cleanly into args.shape_pos.
+    # Positional REQUEST tokens parse cleanly into args.request_pos.
     a = parser.parse_args(["a100:4"])
-    assert a.shape_pos == ["a100:4"]
+    assert a.request_pos == ["a100:4"]
     a = parser.parse_args(["cpu:32"])
-    assert a.shape_pos == ["cpu:32"]
+    assert a.request_pos == ["cpu:32"]
     a = parser.parse_args(["32"])
-    assert a.shape_pos == ["32"]
+    assert a.request_pos == ["32"]
     a = parser.parse_args(["a100:4+cpu:32@12h"])
-    assert a.shape_pos == ["a100:4+cpu:32@12h"]
+    assert a.request_pos == ["a100:4+cpu:32@12h"]
     a = parser.parse_args(["a100:4", "cpu:32@12h"])
-    assert _shape_list_from_args(a.shape_pos) == "a100:4+cpu:32@12h"
+    assert _request_list_from_args(a.request_pos) == "a100:4+cpu:32@12h"
 
-    # expand_rows_by_shape filters skipped pairs (gpu shape on cpu row).
-    a100_only = ProbeShape(gpu_type="a100", gpu_count=1)
-    cpu_only_shape = ProbeShape(cpus=8)
+    # expand_rows_by_request filters skipped pairs (gpu request on cpu row).
+    a100_only = ResourceSpec(gpu_type="a100", gpu_count=1)
+    cpu_only_request = ResourceSpec(cpus=8)
     cpu_only_row.tags = ("cpu",)
     a100_row.tags = ("gpu",)
-    pairs = expand_rows_by_shape(
-        [cpu_only_row, a100_row], [cpu_only_shape, a100_only]
+    pairs = expand_rows_by_request(
+        [cpu_only_row, a100_row], [cpu_only_request, a100_only]
     )
     pair_labels = [(r.qos, s.label) for r, s in pairs]
     assert ("q-cpu", "cpu:8@1h") in pair_labels
-    assert ("q-cpu", "a100:1@1h") not in pair_labels  # skipped: cpu row, gpu shape
+    assert ("q-cpu", "a100:1@1h") not in pair_labels  # skipped: cpu row, gpu request
     assert ("q-a100", "a100:1@1h") in pair_labels
-    # SHAPE_LIST also narrows row output when wait probing is disabled.
-    assert filter_rows_by_shapes([cpu_only_row, a100_row], [a100_only]) == [a100_row]
-    assert filter_rows_by_shapes([cpu_only_row, a100_row], None) == [cpu_only_row, a100_row]
+    # REQUEST_LIST also narrows row output when wait checking is disabled.
+    assert filter_rows_by_requests([cpu_only_row, a100_row], [a100_only]) == [a100_row]
+    assert filter_rows_by_requests([cpu_only_row, a100_row], None) == [cpu_only_row, a100_row]
 
     # predict_wait_times submits only non-skipped pairs; no sbatch calls for
-    # impossible row/shape combinations.
+    # impossible row/request combinations.
     fake_calls: List[Tuple[str, str]] = []
     orig_predict_wait_result = globals()["predict_wait_result"]
     orig_shutil_which = shutil.which
 
-    def fake_predict_wait_result(row, timeout=10.0, shape=None):
-        fake_calls.append((row.qos, shape.label))
+    def fake_predict_wait_result(row, timeout=10.0, request=None):
+        fake_calls.append((row.qos, request.label))
         return 0, ""
 
     def fake_which(name):
@@ -6296,11 +6310,11 @@ def run_self_test() -> int:
     try:
         globals()["predict_wait_result"] = fake_predict_wait_result
         shutil.which = fake_which
-        a100_row.wait_by_shape = {}
-        cpu_only_row.wait_by_shape = {}
+        a100_row.wait_by_request = {}
+        cpu_only_row.wait_by_request = {}
         predict_wait_times(
             [cpu_only_row, a100_row],
-            shapes=[cpu_only_shape, a100_only],
+            requests=[cpu_only_request, a100_only],
             max_workers=1,
             quiet=True,
         )
@@ -6308,7 +6322,7 @@ def run_self_test() -> int:
         globals()["predict_wait_result"] = orig_predict_wait_result
         shutil.which = orig_shutil_which
     assert ("q-cpu", "a100:1@1h") not in fake_calls
-    # Mirror skip: an explicit CPU shape (cpu:8) doesn't probe a GPU row.
+    # Mirror skip: an explicit CPU request (cpu:8) doesn't wait check a GPU row.
     assert ("q-a100", "cpu:8@1h") not in fake_calls
     assert len(fake_calls) == 2, fake_calls
 
@@ -6319,50 +6333,50 @@ def run_self_test() -> int:
         qos_info=QOSInfo("q-coll", max_wall="3-00:00:00"), tags=("gpu",),
     )
     coll_row.gpu_types = ("h100nvl",)
-    h_1h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="01:00:00")
-    h_24h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="1-00:00:00")
-    h_72h = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="3-00:00:00")
+    h_1h = ResourceSpec(gpu_type="h100nvl", gpu_count=1, time="01:00:00")
+    h_24h = ResourceSpec(gpu_type="h100nvl", gpu_count=1, time="1-00:00:00")
+    h_72h = ResourceSpec(gpu_type="h100nvl", gpu_count=1, time="3-00:00:00")
     triple = [(coll_row, h_1h), (coll_row, h_24h), (coll_row, h_72h)]
-    coll_row.wait_by_shape = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 0}
+    coll_row.wait_by_request = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 0}
     merged = collapse_uniform_walltimes(triple)
     assert len(merged) == 1, merged
-    merged_shape = merged[0][1]
-    assert merged_shape.label == "h100nvl:1@1h..3d", merged_shape.label
-    assert coll_row.wait_by_shape[merged_shape.label] == 0
-    # Collapsed shapes preserve hardware filters, and distinct filters never
+    merged_request = merged[0][1]
+    assert merged_request.label == "h100nvl:1@1h..3d", merged_request.label
+    assert coll_row.wait_by_request[merged_request.label] == 0
+    # Collapsed requests preserve hardware filters, and distinct filters never
     # collapse together.
-    h_hop_1h = ProbeShape(
+    h_hop_1h = ResourceSpec(
         gpu_count=1, time="01:00:00", filter=HardwareFilter(gpu_gen="hopper")
     )
-    h_hop_24h = ProbeShape(
+    h_hop_24h = ResourceSpec(
         gpu_count=1, time="1-00:00:00", filter=HardwareFilter(gpu_gen="hopper")
     )
-    coll_row.wait_by_shape = {h_hop_1h.label: 0, h_hop_24h.label: 0}
+    coll_row.wait_by_request = {h_hop_1h.label: 0, h_hop_24h.label: 0}
     merged_hop = collapse_uniform_walltimes(
         [(coll_row, h_hop_1h), (coll_row, h_hop_24h)]
     )
     assert len(merged_hop) == 1, merged_hop
     assert merged_hop[0][1].filter.gpu_gen == "hopper"
     assert merged_hop[0][1].label == "gpu:1@1h..24h,hopper"
-    h_amp_1h = ProbeShape(
+    h_amp_1h = ResourceSpec(
         gpu_count=1, time="01:00:00", filter=HardwareFilter(gpu_gen="ampere")
     )
-    coll_row.wait_by_shape = {h_hop_1h.label: 0, h_amp_1h.label: 0}
+    coll_row.wait_by_request = {h_hop_1h.label: 0, h_amp_1h.label: 0}
     separated = collapse_uniform_walltimes([(coll_row, h_hop_1h), (coll_row, h_amp_1h)])
     assert len(separated) == 2, separated
     # Non-uniform waits → no collapse.
-    coll_row.wait_by_shape = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 600}
+    coll_row.wait_by_request = {h_1h.label: 0, h_24h.label: 0, h_72h.label: 600}
     assert len(collapse_uniform_walltimes(triple)) == 3
     # Single-element group → unchanged.
     single = collapse_uniform_walltimes([(coll_row, h_1h)])
     assert len(single) == 1 and single[0][1] is h_1h
-    # None shape (no-wait mode) → passed through untouched.
+    # None request (no-wait mode) → passed through untouched.
     assert collapse_uniform_walltimes([(coll_row, None)]) == [(coll_row, None)]
 
     parser_fmt = _build_parser()
     args_no_fmt = parser_fmt.parse_args([])
     assert args_no_fmt.format is None
-    assert args_no_fmt.shape_pos == []
+    assert args_no_fmt.request_pos == []
     args_explicit = parser_fmt.parse_args(["--format", "table"])
     assert args_explicit.format == "table"
     assert "Quickstart:" in SHORT_HELP and "--help" in SHORT_HELP
@@ -6403,17 +6417,17 @@ def run_self_test() -> int:
     rendered = parser_fmt.format_help()
     for header in (
         "Filtering",
-        "Probe shape",
+        "Resource request",
         "Output",
         "Diagnostics & speed",
         "Inventory shortcuts",
         "Common entry points",
         "Quickstart:",
-        "Shape grammar:",
+        "Request grammar:",
         "Filtering rows",
-        "Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):",
+        "Inventory shortcuts (do not consult your allocations; REQUEST_LIST narrows):",
         "Recipes:",
-        "Speed (skip probes/queries):",
+        "Speed (skip wait checks/queries):",
         "Scripting / output:",
         # Sort key categories surface in --sort help.
         "Time:",
@@ -6427,7 +6441,7 @@ def run_self_test() -> int:
     # '--no-avail' isn't mistakenly matched against '--no-availability'.
     for removed in ("--no-avail", "--show-unknown", "--freecycle", "--no-freecycle",
                     "--guest", "--no-guest", "--avail", "--cpus", "--cores",
-                    "--gpu-type", "--cpu-type", "--gpus", "--shape", "--wait-for",
+                    "--gpu-type", "--cpu-type", "--gpus", "--request", "--wait-for",
                     "--tier", "--list-tiers"):
         assert not re.search(rf"{re.escape(removed)}\b(?!-)", rendered), \
             f"removed flag {removed!r} leaked into --help"
@@ -6440,21 +6454,21 @@ def run_self_test() -> int:
 
     # Better error messages: mem without unit + bad time + cores=0 + bad gpu spec.
     try:
-        parse_shape_spec("a100:4,mem=99")
+        parse_resource_spec("a100:4,mem=99")
     except CommandError as exc:
         msg = str(exc)
         assert "mem" in msg and "unit" in msg, msg
         assert "16G" in msg, msg
     else:
-        raise AssertionError("parse_shape_spec('a100:4,mem=99') should have raised")
+        raise AssertionError("parse_resource_spec('a100:4,mem=99') should have raised")
     try:
-        parse_shape_spec("cores=0")
+        parse_resource_spec("cores=0")
     except CommandError as exc:
         assert "positive integer" in str(exc), str(exc)
     else:
         raise AssertionError("cores=0 should have raised")
     try:
-        parse_shape_spec("time=banana")
+        parse_resource_spec("time=banana")
     except CommandError as exc:
         msg = str(exc)
         assert "time" in msg and ("Nh" in msg or "duration" in msg), msg
@@ -6497,58 +6511,58 @@ def run_self_test() -> int:
     hint_hidden = _zero_results_hint(a, matched_allocations=1, hidden_pairs=1)
     assert "--show-all" in hint_hidden and "scheduler rejection" in hint_hidden
 
-    # render_explain_plan: text and JSON forms, with shape accessibility tags.
+    # render_explain_plan: text and JSON forms, with request accessibility tags.
     amd_row = AllocationRow(
         "granite", "x", "u", "", "q-amd", "q-amd",
         cpu_features=("zen4",),
     )
     amd_row.gpu_types = ("h100nvl",)
     explain_rows = [a100_row, amd_row]
-    explain_shapes = [
-        ProbeShape(gpu_type="a100", gpu_count=1, time="01:00:00"),
-        ProbeShape(gpu_type="h100", gpu_count=4, time="1-00:00:00"),
+    explain_requests = [
+        ResourceSpec(gpu_type="a100", gpu_count=1, time="01:00:00"),
+        ResourceSpec(gpu_type="h100", gpu_count=4, time="1-00:00:00"),
     ]
     a = parser_fmt.parse_args([])
-    text = render_explain_plan(explain_rows, explain_shapes, a, "text")
+    text = render_explain_plan(explain_rows, explain_requests, a, "text")
     assert "Allocations matching filters: 2" in text
-    assert "Probe shape set (2)" in text
+    assert "Resource request set (2)" in text
     assert "a100:1@1h" in text
     assert "nodes=1" in text and "time=01:00:00" in text
     assert "gres=a100:1/node" in text
-    assert "Run without --explain to execute wait probes" in text
-    payload = json.loads(render_explain_plan(explain_rows, explain_shapes, a, "json"))
+    assert "Run without --explain to execute wait checks" in text
+    payload = json.loads(render_explain_plan(explain_rows, explain_requests, a, "json"))
     assert payload["allocations_after_filter"] == 2
-    assert payload["shape_count"] == 2
-    assert isinstance(payload["shapes"], list) and len(payload["shapes"]) == 2
-    assert "label" in payload["shapes"][0]
-    assert payload["shapes"][0]["nodes"] == 1
-    assert payload["shapes"][0]["ntasks"] == 1
-    assert payload["shapes"][0]["gpu_request"] == "a100:1/node"
-    assert payload["shapes"][0]["sbatch_time"] == "01:00:00"
-    assert "accessible_rows" in payload["shapes"][0]
-    assert "unknown_metadata_rows" in payload["shapes"][0]
-    assert "wait probes" in payload["note"]
+    assert payload["request_count"] == 2
+    assert isinstance(payload["requests"], list) and len(payload["requests"]) == 2
+    assert "label" in payload["requests"][0]
+    assert payload["requests"][0]["nodes"] == 1
+    assert payload["requests"][0]["ntasks"] == 1
+    assert payload["requests"][0]["gpu_request"] == "a100:1/node"
+    assert payload["requests"][0]["sbatch_time"] == "01:00:00"
+    assert "accessible_rows" in payload["requests"][0]
+    assert "unknown_metadata_rows" in payload["requests"][0]
+    assert "wait checks" in payload["note"]
     unknown_row = AllocationRow("granite", "x", "u", "", "q-unk", "q-unk")
     unknown_row.tags = ("gpu",)
     unknown_text = render_explain_plan(
         [unknown_row],
-        [ProbeShape(gpu_type="h100", filter=HardwareFilter(cpu_vendor="amd"))],
+        [ResourceSpec(gpu_type="h100", filter=HardwareFilter(cpu_vendor="amd"))],
         a,
         "text",
     )
     assert "best-effort unknown metadata" in unknown_text, unknown_text
 
-    # pivot_output: rows × shapes with wait cells.
+    # pivot_output: rows × requests with wait cells.
     pivot_row = AllocationRow(
         "notchpeak", "research", "u", "", "q-piv", "q-piv",
         qos_info=QOSInfo("q-piv", max_wall="3-00:00:00"),
     )
     pivot_row.tags = ("gpu",)
     pivot_row.gpu_types = ("a100", "h100nvl")
-    s_a1 = ProbeShape(gpu_type="a100", gpu_count=1, time="01:00:00")
-    s_a4 = ProbeShape(gpu_type="a100", gpu_count=4, time="01:00:00")
-    s_h1 = ProbeShape(gpu_type="h100nvl", gpu_count=1, time="01:00:00")
-    pivot_row.wait_by_shape = {
+    s_a1 = ResourceSpec(gpu_type="a100", gpu_count=1, time="01:00:00")
+    s_a4 = ResourceSpec(gpu_type="a100", gpu_count=4, time="01:00:00")
+    s_h1 = ResourceSpec(gpu_type="h100nvl", gpu_count=1, time="01:00:00")
+    pivot_row.wait_by_request = {
         s_a1.label: 0,
         s_a4.label: 3600,
         s_h1.label: None,
@@ -6562,7 +6576,7 @@ def run_self_test() -> int:
         pivot_text
     # Empty input handled.
     assert pivot_output([]) == "(no matching allocations)"
-    # No-shape pairs (no-wait mode) produce the same sentinel.
+    # No-request pairs (no-wait mode) produce the same sentinel.
     assert pivot_output([(pivot_row, None)]) == "(no matching allocations)"
 
     # best_output: text and JSON forms; alternatives count; empty fallback.
@@ -6581,14 +6595,14 @@ def run_self_test() -> int:
     assert best_json["predicted_wait_seconds"] == 0
     assert best_json["alternatives"] == 1
     assert best_json["effective_partition"] == "q-piv"
-    assert best_json["shape_label"] == "a100:1@1h"
+    assert best_json["request_label"] == "a100:1@1h"
     assert "#SBATCH --gres=gpu:a100:1" in best_json["sbatch_directives"]
     full_best_row = AllocationRow(
         "granite", "acct", "u", "", "granite-gpu-freecycle", "granite-gpu-freecycle"
     )
     full_best_row.tags = ("gpu",)
     full_best_row.gpu_types = ("h100nvl",)
-    full_best_shape = ProbeShape(
+    full_best_request = ResourceSpec(
         nodes=2,
         cpus=8,
         mem="32G",
@@ -6597,8 +6611,8 @@ def run_self_test() -> int:
         time="24h",
         filter=HardwareFilter(cpu_vendor="amd"),
     )
-    full_best_row.wait_by_shape = {full_best_shape.label: 0}
-    full_best_text = best_output([(full_best_row, full_best_shape)], "text")
+    full_best_row.wait_by_request = {full_best_request.label: 0}
+    full_best_text = best_output([(full_best_row, full_best_request)], "text")
     assert "#SBATCH --clusters=granite" in full_best_text
     assert "#SBATCH --partition=granite-gpu" in full_best_text
     assert "#SBATCH --nodes=2" in full_best_text
@@ -6611,9 +6625,9 @@ def run_self_test() -> int:
         "granite", "acct", "u", "", "granite-gpu-guest", "granite-gpu-guest"
     )
     guest_best_row.tags = ("gpu",)
-    guest_shape = ProbeShape()
-    guest_best_row.wait_by_shape = {guest_shape.label: 0}
-    guest_best_text = best_output([(guest_best_row, guest_shape)], "text")
+    guest_request = ResourceSpec()
+    guest_best_row.wait_by_request = {guest_request.label: 0}
+    guest_best_text = best_output([(guest_best_row, guest_request)], "text")
     assert "#SBATCH --partition=granite-gpu-guest" in guest_best_text
     assert "#SBATCH --partition=granite-gpu\n" not in guest_best_text
     assert best_output([(pivot_row, s_h1)], "text") == "# no runnable allocations matched"
@@ -6621,7 +6635,7 @@ def run_self_test() -> int:
     assert json.loads(best_output([], "json")) is None
 
     # sbatch_json_output: dedup keys on (cluster, account, qos, partition,
-    # shape) — partition='alt' keeps this row distinct from sbatch_row_a
+    # request) — partition='alt' keeps this row distinct from sbatch_row_a
     # despite the matching (account, qos), so all three survive.
     sbatch_row_a = AllocationRow("notchpeak", "research", "u", "notchpeak-gpu", "qa", "qa")
     sbatch_row_b = AllocationRow("granite", "mlres", "u", "granite-gpu", "qb", "qb")
@@ -6638,7 +6652,7 @@ def run_self_test() -> int:
     }
     for item in sbatch_payload:
         assert "sbatch_directives" in item and item["sbatch_directives"]
-        assert item["shape_label"] == ""
+        assert item["request_label"] == ""
         assert item["predicted_wait_seconds"] is None
         assert any(line.startswith("#SBATCH --clusters=") for line in item["sbatch_directives"])
 
@@ -6647,10 +6661,10 @@ def run_self_test() -> int:
     )
     gpu_row.tags = ("gpu",)
     gpu_row.gpu_types = ("h100nvl",)
-    gpu_shape = ProbeShape(gpu_type="h100", gpu_count=4, time="01:00:00")
-    gpu_row.wait_by_shape = {gpu_shape.label: 840}
+    gpu_request = ResourceSpec(gpu_type="h100", gpu_count=4, time="01:00:00")
+    gpu_row.wait_by_request = {gpu_request.label: 840}
     plain_row = AllocationRow("notchpeak", "acct", "u", "soc-np", "soc-np", "soc-np")
-    sbatch_text = sbatch_output([(gpu_row, gpu_shape), (plain_row, None)])
+    sbatch_text = sbatch_output([(gpu_row, gpu_request), (plain_row, None)])
     assert "# granite · sadayappan/granite-gpu-freecycle  (wait: 14m)" in sbatch_text
     assert "# notchpeak · acct/soc-np" in sbatch_text
     # No-wait pair must not get a `(wait: ...)` annotation.
@@ -6660,12 +6674,12 @@ def run_self_test() -> int:
     assert "#SBATCH --gres=gpu:h100nvl:4" in sbatch_text
     assert "#SBATCH --time=01:00:00" in sbatch_text
     assert "#SBATCH --partition=soc-np" in sbatch_text
-    s_a1 = ProbeShape(gpu_type="a100", gpu_count=1, time="01:00:00")
-    s_a4 = ProbeShape(gpu_type="a100", gpu_count=4, time="01:00:00")
+    s_a1 = ResourceSpec(gpu_type="a100", gpu_count=1, time="01:00:00")
+    s_a4 = ResourceSpec(gpu_type="a100", gpu_count=4, time="01:00:00")
     multi_row = AllocationRow("notchpeak", "research", "u", "notchpeak-gpu", "q-piv", "q-piv")
     multi_row.tags = ("gpu",)
     multi_row.gpu_types = ("a100",)
-    multi_row.wait_by_shape = {s_a1.label: 0, s_a4.label: 3600}
+    multi_row.wait_by_request = {s_a1.label: 0, s_a4.label: 3600}
     multi_text = sbatch_output([(multi_row, s_a1), (multi_row, s_a4)])
     assert multi_text.count("#SBATCH --clusters=notchpeak") == 2
     assert "#SBATCH --gres=gpu:a100:1" in multi_text
@@ -6702,9 +6716,9 @@ def run_self_test() -> int:
         main(["--sbatch", "--quick"])
     except CommandError as exc:
         msg = str(exc)
-        assert "--sbatch requires SHAPE" in msg and "--ntasks" in msg, msg
+        assert "--sbatch requires REQUEST" in msg and "--ntasks" in msg, msg
     else:
-        raise AssertionError("--sbatch without SHAPE should have raised")
+        raise AssertionError("--sbatch without REQUEST should have raised")
 
     # Group membership: each flag must be DEFINED inside its group's section
     # (not just mentioned in DESCRIPTION/EPILOG). argparse renders each flag
@@ -6730,8 +6744,8 @@ def run_self_test() -> int:
     assert parse_mem("") is None
     assert parse_mem("garbage") is None
 
-    # Capacity-aware shape fit. A 4-GPU shape against a 2-GPU node fails the
-    # 'sized' check (the partition can never host the shape on that node).
+    # Capacity-aware request fit. A 4-GPU request against a 2-GPU node fails the
+    # 'sized' check (the partition can never host the request on that node).
     fit_avail = {"notchpeak": {"notchpeak-gpu": PartitionAvail()}}
     fit_bucket = fit_avail["notchpeak"]["notchpeak-gpu"]
     fit_bucket.add_gpu("a100", 6, 12)
@@ -6748,42 +6762,42 @@ def run_self_test() -> int:
         "skl", 32, True, 32, 32, {"a100": 2}, {"a100": 0}, 256 * 1024, 0,
     )
     fit_features = {"notchpeak": {"notchpeak-gpu": {"gen", "skl", "a100"}}}
-    a100x4 = ProbeShape(gpu_type="a100", gpu_count=4)
+    a100x4 = ResourceSpec(gpu_type="a100", gpu_count=4)
     fit_row = AllocationRow(
         "notchpeak", "soc-gpu-np", "me", "", "notchpeak-gpu", ""
     )
     attach_row_availability(fit_row, fit_avail, fit_features, [a100x4])
-    # Per-shape cell: 1 node fits-now (the idle big one), 2 nodes are sized.
-    record = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    # Per-request cell: 1 node fits-now (the idle big one), 2 nodes are sized.
+    record = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert record["free_nodes"] == "1/2", record
     # The too-small node is excluded from free_gpus (sized filter).
     assert "a100:" in record["free_gpus"], record
-    assert fit_row.fit_by_shape[a100x4.label] == (1, 2), fit_row.fit_by_shape
+    assert fit_row.fit_by_request[a100x4.label] == (1, 2), fit_row.fit_by_request
 
     # The `note` column annotates wait-vs-free disagreement.
-    fit_row.wait_by_shape[a100x4.label] = 0  # 'now' -> empty note
-    rec_now = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.wait_by_request[a100x4.label] = 0  # 'now' -> empty note
+    rec_now = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_now["note"] == "", rec_now
-    fit_row.wait_by_shape[a100x4.label] = 1800  # 30m, fits-now > 0 -> 'queue'
-    rec_queue = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.wait_by_request[a100x4.label] = 1800  # 30m, fits-now > 0 -> 'queue'
+    rec_queue = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_queue["note"] == NOTE_QUEUE, rec_queue
     # Force a fragmented scenario: zero out fits, sized still positive.
-    fit_row.fit_by_shape[a100x4.label] = (0, 2)
-    rec_frag = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.fit_by_request[a100x4.label] = (0, 2)
+    rec_frag = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_frag["note"] == NOTE_FRAGMENTED, rec_frag
     # too-small: no node ever fits.
-    fit_row.fit_by_shape[a100x4.label] = (0, 0)
-    rec_small = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.fit_by_request[a100x4.label] = (0, 0)
+    rec_small = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_small["note"] == NOTE_TOO_SMALL, rec_small
     # Unknown wait -> empty (compact).
-    fit_row.wait_by_shape[a100x4.label] = None
-    rec_unk = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.wait_by_request[a100x4.label] = None
+    rec_unk = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_unk["note"] == "", rec_unk
-    fit_row.probe_reason_by_shape[a100x4.label] = NOTE_QOS_LIMIT
-    rec_reason = fit_row.to_dict(include_avail=True, include_wait=True, shape=a100x4)
+    fit_row.wait_check_reason_by_request[a100x4.label] = NOTE_QOS_LIMIT
+    rec_reason = fit_row.to_dict(include_avail=True, include_wait=True, request=a100x4)
     assert rec_reason["note"] == NOTE_QOS_LIMIT, rec_reason
 
-    # Memory check. Shape requests 256G; one node has 200G total (too-small),
+    # Memory check. Request requests 256G; one node has 200G total (too-small),
     # one has 512G but only 100G free (fragmented), one has 512G fully free.
     mem_avail = {"notchpeak": {"notchpeak-cpu": PartitionAvail()}}
     mb = mem_avail["notchpeak"]["notchpeak-cpu"]
@@ -6797,12 +6811,12 @@ def run_self_test() -> int:
         "gen", 64, True, 64, 64, {}, {}, 512 * 1024, 0,  # idle
     )
     mem_features = {"notchpeak": {"notchpeak-cpu": {"gen"}}}
-    big_mem = ProbeShape(cpus=8, mem="256G")
+    big_mem = ResourceSpec(cpus=8, mem="256G")
     mem_row = AllocationRow("notchpeak", "acct", "me", "", "notchpeak-cpu", "")
     attach_row_availability(mem_row, mem_avail, mem_features, [big_mem])
-    fitting, sized = mem_row.fit_by_shape[big_mem.label]
+    fitting, sized = mem_row.fit_by_request[big_mem.label]
     assert (fitting, sized) == (1, 2), (fitting, sized)
-    rec_mem = mem_row.to_dict(include_avail=True, include_wait=True, shape=big_mem)
+    rec_mem = mem_row.to_dict(include_avail=True, include_wait=True, request=big_mem)
     assert rec_mem["free_nodes"] == "1/2", rec_mem
 
     print("self-test passed")
@@ -6829,35 +6843,35 @@ def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool, bool]:
     return (fmt or "table"), wide, auto_switched
 
 
-def _print_probe_banner(
-    args: argparse.Namespace, shapes: Sequence["ProbeShape"]
+def _print_wait_check_banner(
+    args: argparse.Namespace, requests: Sequence["ResourceSpec"]
 ) -> None:
-    """Print a one-line 'Probing:' banner to stderr before probes run.
+    """Print a one-line 'Checking:' banner to stderr before wait checks run.
 
-    Makes the chosen shape set visible upfront. Suppressed under --no-wait
-    (no probe), --explain (it has its own plan output), or --quiet. Emits
+    Makes the chosen request set visible upfront. Suppressed under --no-wait
+    (no wait check), --explain (it has its own plan output), or --quiet. Emits
     on TTY or non-TTY stderr alike so piped runs see what's about to happen.
     """
-    if args.no_wait or args.explain or not shapes:
+    if args.no_wait or args.explain or not requests:
         return
     if args.quiet:
         return
-    if len(shapes) == 1:
-        body = f"single shape ({shapes[0].label})"
+    if len(requests) == 1:
+        body = f"single request ({requests[0].label})"
     else:
-        labels = ", ".join(s.label for s in shapes[:4])
-        if len(shapes) > 4:
-            labels += f", +{len(shapes) - 4} more"
-        body = f"multi-shape · {len(shapes)} shapes ({labels})"
-    print(f"[chpc-allocs] Probing: {body}", file=sys.stderr)
+        labels = ", ".join(s.label for s in requests[:4])
+        if len(requests) > 4:
+            labels += f", +{len(requests) - 4} more"
+        body = f"multi-request · {len(requests)} requests ({labels})"
+    print(f"[chpc-allocs] Checking: {body}", file=sys.stderr)
 
 
 def _maybe_emit_gpu_resolution_notice(
-    pairs: List[Tuple["AllocationRow", Optional["ProbeShape"]]],
+    pairs: List[Tuple["AllocationRow", Optional["ResourceSpec"]]],
     verbose: bool,
     quiet: bool = False,
 ) -> None:
-    """Print a one-line stderr notice when a shape's literal `gpu_type` got
+    """Print a one-line stderr notice when a request's literal `gpu_type` got
     resolved to a different per-row GRES name (e.g. 'h100' → 'h100nvl').
 
     Quiet when no resolution happened, when --quiet is set, when stderr
@@ -6867,15 +6881,15 @@ def _maybe_emit_gpu_resolution_notice(
     if quiet:
         return
     by_literal: Dict[str, Dict[str, Set[str]]] = {}
-    for row, shape in pairs:
-        if shape is None or not shape.gpu_type:
+    for row, request in pairs:
+        if request is None or not request.gpu_type:
             continue
-        if shape.gpu_type in row.gpu_types:
+        if request.gpu_type in row.gpu_types:
             continue
-        resolved = shape.resolved_gpu_type(row)
-        if not resolved or resolved == shape.gpu_type:
+        resolved = request.resolved_gpu_type(row)
+        if not resolved or resolved == request.gpu_type:
             continue
-        by_literal.setdefault(shape.gpu_type, {}).setdefault(resolved, set()).add(
+        by_literal.setdefault(request.gpu_type, {}).setdefault(resolved, set()).add(
             f"{row.cluster}/{row.qos}"
         )
     if not by_literal:
@@ -6921,24 +6935,24 @@ def _maybe_emit_column_swap_notice(
 
 
 def _maybe_emit_inventory_atom_notice(
-    args: argparse.Namespace, shapes: Optional[Sequence["ProbeShape"]],
+    args: argparse.Namespace, requests: Optional[Sequence["ResourceSpec"]],
 ) -> None:
-    """Tell verbose users that --list-gpus/--list-cpus ignored their shape's
+    """Tell verbose users that --list-gpus/--list-cpus ignored their request's
     walltime/mem/total atoms.
 
     Inventory only filters by partition features (vendor / arch / GPU
     type), so atoms like '@12h', 'mem=…', or 'total:64' are silently
     dropped.
     """
-    if not shapes:
+    if not requests:
         return
     found: Set[str] = set()
-    for shape in shapes:
-        if shape.time != DEFAULT_PROBE_TIME:
+    for request in requests:
+        if request.time != DEFAULT_REQUEST_TIME:
             found.add("@time")
-        if shape.mem:
+        if request.mem:
             found.add("mem=")
-        if shape.cpus_is_total:
+        if request.cpus_is_total:
             found.add("total=")
     if not found:
         return
@@ -6982,8 +6996,8 @@ def main(argv: Sequence[str]) -> int:
         args.no_wait = True
         args.no_availability = True
         args.no_usage = True
-    shape_list = _shape_list_from_args(args.shape_pos)
-    user_shapes = parse_shape_list(shape_list) if shape_list is not None else None
+    request_list = _request_list_from_args(args.request_pos)
+    user_requests = parse_resource_list(request_list) if request_list is not None else None
     if args.pivot and args.format in ("csv", "json"):
         raise CommandError(
             "--pivot is only supported with --format=table\n"
@@ -6994,19 +7008,19 @@ def main(argv: Sequence[str]) -> int:
             "--best needs wait data; drop --no-wait/--quick "
             "(or use --explain to dry-run the plan)"
         )
-    if args.best and user_shapes is None:
+    if args.best and user_requests is None:
         raise CommandError(
-            "--best needs a SHAPE_LIST (e.g. 'chpc-allocs --best a100:4')"
+            "--best needs a REQUEST_LIST (e.g. 'chpc-allocs --best a100:4')"
         )
-    if args.sbatch and user_shapes is None:
+    if args.sbatch and user_requests is None:
         raise CommandError(
-            "--sbatch requires SHAPE so the output includes --nodes, "
+            "--sbatch requires REQUEST so the output includes --nodes, "
             "--ntasks, and --time\n"
             "  example: chpc-allocs --sbatch a100:4 --quick"
         )
 
     if args.list_gpus or args.list_cpus:
-        _maybe_emit_inventory_atom_notice(args, user_shapes)
+        _maybe_emit_inventory_atom_notice(args, user_requests)
     if args.list_gpus:
         # Always fetch features so the inventory shows host CPU detail (NODE_TYPE
         # cell, vendor classification) the same way --list-cpus does. Both paths
@@ -7014,24 +7028,24 @@ def main(argv: Sequence[str]) -> int:
         print(format_gpu_summary(
             show_partition_availability(),
             partition_features=show_partition_features(),
-            shapes=user_shapes,
+            requests=user_requests,
         ))
         return 0
     if args.list_cpus:
         print(format_cpu_summary(
             show_partition_features(),
             show_partition_availability(),
-            shapes=user_shapes,
+            requests=user_requests,
         ))
         return 0
 
     include_avail = not args.no_availability
     include_wait = include_avail and not args.no_wait
-    if include_wait and user_shapes is None:
+    if include_wait and user_requests is None:
         raise CommandError(
-            "SHAPE_LIST is required to probe wait times\n"
-            "  hint: pass a shape (e.g. 'a100:4', 'cpu:32@12h'), or "
-            "use --quick / --no-wait to list allocations without probing"
+            "REQUEST_LIST is required to predict wait times\n"
+            "  hint: pass a request (e.g. 'a100:4', 'cpu:32@12h'), or "
+            "use --quick / --no-wait to list allocations without checking"
         )
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
@@ -7040,7 +7054,7 @@ def main(argv: Sequence[str]) -> int:
     # When availability data is loaded, derive the gpu-types map from it for
     # free (no second sinfo call) — needed by the 'premium' sort key so
     # a100/h100/h200/a6000 rows surface even without --wide.
-    # Matches the shape show_partition_gpus returns.
+    # Matches the request show_partition_gpus returns.
     if partition_avail is not None:
         partition_gpus: Dict[str, Dict[str, Dict[str, int]]] = {
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
@@ -7063,28 +7077,28 @@ def main(argv: Sequence[str]) -> int:
         partition_gpus=partition_gpus,
         partition_features=partition_features,
         partition_avail=partition_avail,
-        shapes=user_shapes,
+        requests=user_requests,
     )
     rows = filter_rows(rows, args)
     matched_allocations = len(rows)
-    rows = filter_rows_by_shapes(rows, user_shapes)
-    shapes: List[ProbeShape] = list(user_shapes) if include_wait and user_shapes else []
+    rows = filter_rows_by_requests(rows, user_requests)
+    requests: List[ResourceSpec] = list(user_requests) if include_wait and user_requests else []
 
-    # --explain: print the resolved plan and exit before any probes run.
+    # --explain: print the resolved plan and exit before any wait checks run.
     if args.explain:
         explain_fmt = args.format if args.format in ("json",) else "text"
-        print(render_explain_plan(rows, shapes, args, explain_fmt))
+        print(render_explain_plan(rows, requests, args, explain_fmt))
         return 0
 
     if include_wait:
-        _print_probe_banner(args, shapes)
+        _print_wait_check_banner(args, requests)
         if not args.show_all:
-            rows = [r for r in rows if not _is_unprobeable_row(r)]
+            rows = [r for r in rows if not _is_uncheckable_row(r)]
         predict_wait_times(
-            rows, shapes=shapes,
+            rows, requests=requests,
             verbose=args.verbose, quiet=args.quiet,
         )
-    pairs = expand_rows_by_shape(rows, shapes if include_wait else None)
+    pairs = expand_rows_by_request(rows, requests if include_wait else None)
     pairs_before_low_info = len(pairs)
     if include_wait and not args.show_all:
         pairs = [p for p in pairs if not _is_low_information_pair(*p)]
@@ -7093,7 +7107,7 @@ def main(argv: Sequence[str]) -> int:
     sort_spec = args.sort
     if sort_spec is None:
         sort_spec = (
-            "wait,shape,premium,vendor,cluster,qos" if include_wait
+            "wait,request,premium,vendor,cluster,qos" if include_wait
             else "premium,vendor,cluster,account,qos"
         )
     pairs = sort_pairs(pairs, sort_spec, args.reverse)
