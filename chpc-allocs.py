@@ -11,6 +11,7 @@ import argparse
 import csv
 import difflib
 import fnmatch
+import functools
 import json
 import os
 import re
@@ -2764,6 +2765,30 @@ def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
 _QOS_SUFFIXES = ("-freecycle", "-guest", "-res")
 
 
+@functools.lru_cache(maxsize=None)
+def _candidate_partitions_raw(partition: str, qos: str) -> Tuple[str, ...]:
+    """Compute the unfiltered candidate list for a (partition, qos) pair.
+
+    Pure function of two strings, so memoisable: `attach_row_availability`
+    and `resolve_row_*` get called once per row but most rows share the same
+    (partition, qos) — caching collapses them to one entry per distinct pair.
+    """
+    candidates: List[str] = []
+
+    def add(candidate: str) -> None:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    if partition:
+        add(partition)
+    if qos:
+        add(qos)
+        for suffix in _QOS_SUFFIXES:
+            if qos.endswith(suffix):
+                add(qos[: -len(suffix)])
+    return tuple(candidates)
+
+
 def _candidate_partitions(
     row: "AllocationRow",
     known_partitions: Optional[Dict[str, Set[str]]] = None,
@@ -2776,24 +2801,11 @@ def _candidate_partitions(
     stripped (e.g. QOS `granite-gpu-freecycle` runs on partition `granite-gpu`).
     Wait checks try each candidate in order and stop at the first one SLURM accepts.
     """
-    candidates: List[str] = []
-
-    def add(candidate: str) -> None:
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-
-    if row.partition:
-        add(row.partition)
-    if row.qos:
-        add(row.qos)
-        for suffix in _QOS_SUFFIXES:
-            if row.qos.endswith(suffix):
-                stripped = row.qos[: -len(suffix)]
-                add(stripped)
+    candidates = list(_candidate_partitions_raw(row.partition, row.qos))
     if known_partitions:
         known = known_partitions.get(row.cluster)
         if known:
-            filtered = [candidate for candidate in candidates if candidate in known]
+            filtered = [c for c in candidates if c in known]
             if filtered:
                 return filtered
     return candidates
@@ -3137,9 +3149,13 @@ def attach_metadata(
     partition_features: Optional[Dict[str, Dict[str, Set[str]]]] = None,
     partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]] = None,
     requests: Optional[Sequence["ResourceSpec"]] = None,
+    qos_info: Optional[Dict[str, "QOSInfo"]] = None,
+    share_info: Optional[Dict[str, "ShareInfo"]] = None,
 ) -> None:
-    qos_info = show_qos(row.qos for row in rows)
-    share_info = {} if include_usage is False else show_usage(user)
+    if qos_info is None:
+        qos_info = show_qos(row.qos for row in rows)
+    if share_info is None:
+        share_info = {} if include_usage is False else show_usage(user)
     partition_gpus = partition_gpus or {}
     partition_features = partition_features or {}
     for row in rows:
@@ -3449,11 +3465,18 @@ def _accumulate_bucket_for_requests(
                 record.cpus_idle if record.is_free else 0,
                 record.cpus_total, record.is_free,
             )
-            allowed_gpus: Dict[str, int] = {}
-            for s in sized:
-                for gtype, total in _node_gpu_items_for_request(record.gpu_total, s):
-                    allowed_gpus[gtype] = total
-            for gtype, total in sorted(allowed_gpus.items()):
+            # Walk the record's GPU dict once; a request without a GPU
+            # filter accepts every type, otherwise we union the per-request
+            # accepted types. Cheaper than calling _node_gpu_items_for_request
+            # (which sorts & re-iterates the dict) once per request.
+            any_gpu_unfiltered = any(not s.requires_gpu() for s in sized)
+            for gtype in sorted(record.gpu_total):
+                if not (
+                    any_gpu_unfiltered
+                    or any(s.accepts_gpu_token(gtype) for s in sized)
+                ):
+                    continue
+                total = record.gpu_total[gtype]
                 used = record.gpu_used.get(gtype, 0)
                 free = max(0, total - used) if record.is_free else 0
                 acc.add_gpu(gtype, free, total)
@@ -3465,10 +3488,7 @@ def _accumulate_bucket_for_requests(
     acc.nodes_free += bucket.nodes_free
     acc.nodes_total += bucket.nodes_total
     if any(not s.filter.has_cpu_constraint() for s in accepting):
-        cpu_items = [
-            ((arch, cps), (free, total, fn, tn))
-            for (arch, cps), (free, total, fn, tn) in bucket.cpus_by_class.items()
-        ]
+        cpu_items = list(bucket.cpus_by_class.items())
     else:
         seen_cpu: Dict[Tuple[str, int], Tuple[int, int, int, int]] = {}
         for s in accepting:
@@ -3483,9 +3503,17 @@ def _accumulate_bucket_for_requests(
     else:
         acc.cpus_free += bucket.cpus_free
         acc.cpus_total += bucket.cpus_total
+    # GPU dedup: walk bucket.gpus once. If any request has no GPU filter,
+    # every type passes; otherwise union the per-request accepted types.
+    any_gpu_unfiltered = any(
+        not s.gpu_type and not s.filter.has_gpu_constraint() for s in accepting
+    )
     allowed_gpus: Dict[str, Tuple[int, int]] = {}
-    for s in accepting:
-        for gtype, ft in _filtered_gpu_items(bucket, s):
+    for gtype, ft in bucket.gpus.items():
+        if (
+            any_gpu_unfiltered
+            or any(s.accepts_gpu_token(gtype) for s in accepting)
+        ):
             allowed_gpus[gtype] = ft
     for gtype, (free, total) in allowed_gpus.items():
         acc.add_gpu(gtype, free, total)
@@ -4546,20 +4574,31 @@ def _render_width_capped_table(
         for column in columns
     }
     wrap_set = set(wrap_columns)
-    configured_wrap_targets = [
+    # Compute item counts per (column, record) once: apply_wrap may run up
+    # to 4 times in the cascading width-fit attempts below, and each prior
+    # pass re-scanned cells per column.
+    nonempty_columns = [
         col for col in columns
         if col in wrap_set and any(record.get(col) for record in display_records)
     ]
+    cell_item_counts: Dict[str, List[int]] = {
+        col: [_table_cell_item_count(record.get(col, "")) for record in display_records]
+        for col in nonempty_columns
+    }
+    configured_wrap_targets = nonempty_columns
     multi_item_targets = [
         col for col in configured_wrap_targets
-        if any(_table_cell_item_count(record.get(col, "")) > 1
-               for record in display_records)
+        if any(c > 1 for c in cell_item_counts[col])
     ]
     secondary_targets = [
         col for col in configured_wrap_targets if col not in multi_item_targets
     ]
     wrap_targets: List[str] = []
     wrapped_cells: Dict[str, List[List[str]]] = {}
+    # Cache of wrapped cells across apply_wrap calls keyed by
+    # (col, raw_value, budget, force_break). The cascading retry path can
+    # call apply_wrap up to four times with overlapping (col, budget) pairs.
+    wrap_cache: Dict[Tuple[str, str, int, bool], List[str]] = {}
 
     def apply_wrap(
         targets: Sequence[str],
@@ -4573,15 +4612,16 @@ def _render_width_capped_table(
         )
         for col in targets:
             budget = max(1, budgets[col])
-            wrapped_cells[col] = [
-                _wrap_table_cell(
-                    col,
-                    record.get(col, ""),
-                    budget,
-                    force_break=force_break,
-                )
-                for record in display_records
-            ]
+            cells: List[List[str]] = []
+            for record in display_records:
+                raw = record.get(col, "")
+                key = (col, raw, budget, force_break)
+                wrapped = wrap_cache.get(key)
+                if wrapped is None:
+                    wrapped = _wrap_table_cell(col, raw, budget, force_break=force_break)
+                    wrap_cache[key] = wrapped
+                cells.append(wrapped)
+            wrapped_cells[col] = cells
         next_widths = dict(base_widths)
         for col in targets:
             next_widths[col] = _wrapped_column_width(labels[col], wrapped_cells[col])
@@ -7365,8 +7405,26 @@ def main(argv: Sequence[str]) -> int:
     sort_spec = args.sort or _default_sort_spec(include_wait)
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
-    rows = show_associations(user=user, all_visible=args.all_visible)
-    partition_avail = show_partition_availability() if include_avail else None
+    include_usage = _needs_usage_lookup(args, fmt, sort_spec)
+    # Fan out independent SLURM CLI subprocesses in parallel: sinfo (slowest),
+    # sacctmgr show association, sshare. show_qos depends on the rows, so it
+    # is submitted only after show_associations completes.
+    fetch_features_fallback = (
+        not include_avail
+        and not (args.no_availability and not machine_details)
+    )
+    fetch_partition_gpus_fallback = not include_avail and machine_details
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_assoc = pool.submit(show_associations, user, args.all_visible)
+        f_avail = pool.submit(show_partition_availability) if include_avail else None
+        f_usage = pool.submit(show_usage, user) if include_usage else None
+        f_features = pool.submit(show_partition_features) if fetch_features_fallback else None
+        f_pgpus = pool.submit(show_partition_gpus) if fetch_partition_gpus_fallback else None
+        rows = f_assoc.result()
+        f_qos = pool.submit(show_qos, [row.qos for row in rows])
+        partition_avail = f_avail.result() if f_avail is not None else None
+        qos_info = f_qos.result()
+        share_info = f_usage.result() if f_usage is not None else {}
     # When availability data is loaded, derive the gpu-types map from it for
     # free (no second sinfo call) — needed by the 'premium' sort key so
     # a100/h100/h200/a6000 rows surface in compact table output.
@@ -7376,26 +7434,28 @@ def main(argv: Sequence[str]) -> int:
             c: {p: {g: tot for g, (_free, tot) in bucket.gpus.items()} for p, bucket in parts.items()}
             for c, parts in partition_avail.items()
         }
-    elif machine_details:
-        partition_gpus = show_partition_gpus()
+    elif f_pgpus is not None:
+        partition_gpus = f_pgpus.result()
     else:
         partition_gpus = {}
     # cpu_vendor classification feeds the 'vendor' sort key; CSV/JSON also use
     # the full CPU feature set as part of the machine-readable schema.
     if partition_avail is not None:
         partition_features = partition_features_from_availability(partition_avail)
-    elif args.no_availability and not machine_details:
-        partition_features = {}
+    elif f_features is not None:
+        partition_features = f_features.result()
     else:
-        partition_features = show_partition_features()
+        partition_features = {}
     attach_metadata(
         rows,
-        include_usage=_needs_usage_lookup(args, fmt, sort_spec),
+        include_usage=include_usage,
         user=user,
         partition_gpus=partition_gpus,
         partition_features=partition_features,
         partition_avail=partition_avail,
         requests=user_requests,
+        qos_info=qos_info,
+        share_info=share_info,
     )
     rows = filter_rows(rows, args)
     matched_allocations = len(rows)
