@@ -1429,18 +1429,29 @@ class HardwareFilter:
     def has_any(self) -> bool:
         return self.has_cpu_constraint() or self.has_gpu_constraint()
 
-    def cpu_constraint_expr(self) -> Optional[str]:
+    def cpu_constraint_expr(
+        self, available_features: Optional[Iterable[str]] = None,
+    ) -> Optional[str]:
         """SLURM `--constraint` expression for CPU atoms, or None.
 
         arch wins over vendor (a specific arch already implies its vendor).
-        Multiple archs AND with `&`; vendor expands to an OR over the
-        vendor's feature table.
+        Multiple archs AND with `&`. Vendor expands to an OR over the
+        vendor's feature table — intersected with `available_features` when
+        given, so SLURM doesn't see archs that aren't registered as features
+        on the target cluster (otherwise sbatch rejects the OR-list with
+        "Invalid feature specification").
         """
         if self.cpu_archs:
             return "&".join(self.cpu_archs) if len(self.cpu_archs) > 1 else self.cpu_archs[0]
-        if self.cpu_vendor:
-            return VENDOR_CONSTRAINT_EXPR.get(self.cpu_vendor)
-        return None
+        if not self.cpu_vendor:
+            return None
+        table = INTEL_CPU_FEATURES if self.cpu_vendor == "intel" else AMD_CPU_FEATURES
+        if available_features:
+            lowered = [f.lower() for f in available_features]
+            matched = sorted({f for f in lowered if any(p in f for p in table)})
+            if matched:
+                return "|".join(matched)
+        return VENDOR_CONSTRAINT_EXPR.get(self.cpu_vendor)
 
     def cpu_satisfies(self, features) -> bool:
         """True iff `features` satisfy every set CPU constraint.
@@ -1595,7 +1606,7 @@ class ProbeShape:
         gres = self.gres_for(row)
         if gres:
             args.append(f"--gres={gres}")
-        constraint = self.filter.cpu_constraint_expr()
+        constraint = self.filter.cpu_constraint_expr(row.cpu_features)
         if constraint:
             args.append(f"--constraint={constraint}")
         return args
@@ -4363,6 +4374,20 @@ def run_self_test() -> int:
     assert amd_expr and "zen" in amd_expr and "gen" in amd_expr
     # arch takes precedence over vendor when both set.
     assert HardwareFilter(cpu_vendor="intel", cpu_archs=("gen",)).cpu_constraint_expr() == "gen"
+
+    # Vendor expansion intersected with row features → only valid SLURM names.
+    intel_filter = HardwareFilter(cpu_vendor="intel")
+    assert intel_filter.cpu_constraint_expr(("csl", "emr", "skl")) == "csl|emr|skl"
+    amd_filter = HardwareFilter(cpu_vendor="amd")
+    assert amd_filter.cpu_constraint_expr(("gen",)) == "gen"
+    # Substring match still folds zen<N> into the zen table entry.
+    assert amd_filter.cpu_constraint_expr(("zen4",)) == "zen4"
+    # Non-vendor features in the row are filtered out.
+    assert amd_filter.cpu_constraint_expr(("chpc", "gen", "c96")) == "gen"
+    # Empty available_features falls back to the full vendor table (legacy).
+    assert amd_filter.cpu_constraint_expr(()) == "|".join(AMD_CPU_FEATURES)
+    # arch wins over vendor regardless of available_features.
+    assert HardwareFilter(cpu_archs=("gen",)).cpu_constraint_expr(("csl",)) == "gen"
 
     # HardwareFilter helpers: has_*, label_markers, satisfies.
     assert HardwareFilter().has_any() is False
