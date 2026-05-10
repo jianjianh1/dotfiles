@@ -464,6 +464,7 @@ class QOSInfo:
         self.grp_tres = grp_tres
         self.grp_tres_mins = grp_tres_mins
         self.flags = flags
+        self.max_wall_seconds = parse_wall_seconds(max_wall)
 
 
 class ShareInfo:
@@ -1396,6 +1397,7 @@ class PartitionAvail:
         # nodes_free, nodes_total]
         self.cpus_by_class: Dict[Tuple[str, int], List[int]] = {}
         self.node_records: List[NodeRecord] = []
+        self.features: Set[str] = set()
 
     def add_gpu(self, gtype: str, free: int, total: int) -> None:
         slot = self.gpus.setdefault(gtype, [0, 0])
@@ -1439,6 +1441,12 @@ class PartitionAvail:
 def _strip_partition_marker(name: str) -> str:
     """Sinfo marks a cluster's default partition with a trailing '*'."""
     return name[:-1] if name.endswith("*") else name
+
+
+def _feature_set_from_blob(feats: str) -> Set[str]:
+    if not feats or feats == "(null)":
+        return set()
+    return {t.strip().lower() for t in feats.split(",") if t.strip()}
 
 
 def _node_arch_short(features_blob: str) -> str:
@@ -1534,6 +1542,7 @@ def show_partition_availability() -> Dict[str, Dict[str, PartitionAvail]]:
         except ValueError:
             alloc_mem_mb = 0
         arch_short = _node_arch_short(features_blob)
+        bucket.features |= _feature_set_from_blob(features_blob)
         bucket.add_node_type((arch_short, cps, sockets, mem_mb // 1024))
         bucket.add_cpu_class(
             arch_short,
@@ -1808,6 +1817,7 @@ class ResourceSpec:
             if self.requires_gpu() else 0
         )
         self.min_mem_per_node: Optional[int] = parse_mem(self.mem) if self.mem else None
+        self.wall_seconds: Optional[int] = parse_wall_seconds(self.time)
 
     def _compute_label(self, time_label: Optional[str] = None) -> str:
         wall = time_label if time_label is not None else _format_wall_short(self.time)
@@ -2538,6 +2548,7 @@ def predict_wait_result(
     row: "AllocationRow",
     timeout: float = 10.0,
     request: Optional[ResourceSpec] = None,
+    known_partitions: Optional[Dict[str, Set[str]]] = None,
 ) -> Tuple[Optional[int], str]:
     """Return (seconds-until-start, failure-reason) for a resource-request wait check.
 
@@ -2554,7 +2565,7 @@ def predict_wait_result(
         return None, "missing-sbatch"
     if not row.account or not row.qos:
         return None, "missing-account-or-qos"
-    candidates = [c for c in _candidate_partitions(row) if c]
+    candidates = [c for c in _candidate_partitions(row, known_partitions) if c]
     if not candidates:
         return None, "missing-partition"
     failure_reason = ""
@@ -2614,11 +2625,22 @@ _PROGRESS_NOTICE_THRESHOLD = 24
 _PROGRESS_CLEAR_WIDTH = 60
 
 
+def _request_exceeds_qos_max(row: "AllocationRow", request: ResourceSpec) -> bool:
+    qos_max = getattr(row.qos_info, "max_wall_seconds", None)
+    request_secs = getattr(request, "wall_seconds", None)
+    return (
+        qos_max is not None
+        and request_secs is not None
+        and request_secs > qos_max
+    )
+
+
 def predict_wait_times(
     rows: List["AllocationRow"],
     requests: Optional[List[ResourceSpec]] = None,
     max_workers: int = 8,
     wait_check_timeout: float = 10.0,
+    known_partitions: Optional[Dict[str, Set[str]]] = None,
     *,
     verbose: bool = False,
     quiet: bool = False,
@@ -2637,12 +2659,16 @@ def predict_wait_times(
         return
     if not requests:
         requests = [ResourceSpec()]
-    wait_check_pairs = [
-        (row, request)
-        for row in rows
-        for request in requests
-        if not request.should_skip(row)
-    ]
+    wait_check_pairs = []
+    for row in rows:
+        for request in requests:
+            if request.should_skip(row):
+                continue
+            if _request_exceeds_qos_max(row, request):
+                row.wait_by_request[request.label] = None
+                row.wait_check_reason_by_request[request.label] = NOTE_QOS_LIMIT
+                continue
+            wait_check_pairs.append((row, request))
     pair_count = len(wait_check_pairs)
     if pair_count == 0:
         return
@@ -2662,14 +2688,22 @@ def predict_wait_times(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for row, request in wait_check_pairs:
-            futures[
-                pool.submit(
+            if known_partitions is None:
+                future = pool.submit(
                     predict_wait_result,
                     row,
                     timeout=wait_check_timeout,
                     request=request,
                 )
-            ] = (row, request)
+            else:
+                future = pool.submit(
+                    predict_wait_result,
+                    row,
+                    timeout=wait_check_timeout,
+                    request=request,
+                    known_partitions=known_partitions,
+                )
+            futures[future] = (row, request)
         completed = 0
         for future in as_completed(futures):
             row, request = futures[future]
@@ -2730,7 +2764,10 @@ def show_partition_gpus() -> Dict[str, Dict[str, Dict[str, int]]]:
 _QOS_SUFFIXES = ("-freecycle", "-guest", "-res")
 
 
-def _candidate_partitions(row: "AllocationRow") -> List[str]:
+def _candidate_partitions(
+    row: "AllocationRow",
+    known_partitions: Optional[Dict[str, Set[str]]] = None,
+) -> List[str]:
     """Return partition names to try for a given row, most-specific first.
 
     `sacctmgr show association` doesn't always pin a partition (Partition is
@@ -2740,15 +2777,25 @@ def _candidate_partitions(row: "AllocationRow") -> List[str]:
     Wait checks try each candidate in order and stop at the first one SLURM accepts.
     """
     candidates: List[str] = []
+
+    def add(candidate: str) -> None:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
     if row.partition:
-        candidates.append(row.partition)
+        add(row.partition)
     if row.qos:
-        candidates.append(row.qos)
+        add(row.qos)
         for suffix in _QOS_SUFFIXES:
             if row.qos.endswith(suffix):
                 stripped = row.qos[: -len(suffix)]
-                if stripped and stripped not in candidates:
-                    candidates.append(stripped)
+                add(stripped)
+    if known_partitions:
+        known = known_partitions.get(row.cluster)
+        if known:
+            filtered = [candidate for candidate in candidates if candidate in known]
+            if filtered:
+                return filtered
     return candidates
 
 
@@ -2897,9 +2944,32 @@ def parse_features_line(line: str) -> Tuple[str, str, Set[str]]:
     if len(fields) < 3:
         return "", "", set()
     cluster, partition, feats = (f.strip() for f in fields)
-    if not cluster or not partition or not feats or feats == "(null)":
+    if not cluster or not partition:
         return cluster, partition, set()
-    return cluster, partition, {t.strip().lower() for t in feats.split(",") if t.strip()}
+    return cluster, partition, _feature_set_from_blob(feats)
+
+
+def partition_features_from_availability(
+    partition_avail: Dict[str, Dict[str, PartitionAvail]],
+) -> Dict[str, Dict[str, Set[str]]]:
+    result: Dict[str, Dict[str, Set[str]]] = {}
+    for cluster, parts in partition_avail.items():
+        for partition, bucket in parts.items():
+            if bucket.features:
+                result.setdefault(cluster, {})[partition] = set(bucket.features)
+    return result
+
+
+def known_partitions_from_availability(
+    partition_avail: Optional[Dict[str, Dict[str, PartitionAvail]]],
+) -> Optional[Dict[str, Set[str]]]:
+    if partition_avail is None:
+        return None
+    return {
+        cluster: set(parts.keys())
+        for cluster, parts in partition_avail.items()
+        if parts
+    }
 
 
 def show_partition_features() -> Dict[str, Dict[str, Set[str]]]:
@@ -3633,7 +3703,7 @@ def filter_rows(rows: List[AllocationRow], args: argparse.Namespace) -> List[All
             _drop(row, "--reservation (no reservation tag)")
             continue
         if min_wall is not None:
-            wall = parse_wall_seconds(row.qos_info.max_wall)
+            wall = row.qos_info.max_wall_seconds
             if wall is None or wall < min_wall:
                 _drop(row, f"--min-wall (max_wall={row.qos_info.max_wall or '?'})")
                 continue
@@ -3767,9 +3837,7 @@ def _is_low_information_pair(
         return True
     if not row.qos_info.max_wall:
         return True
-    qos_max = parse_wall_seconds(row.qos_info.max_wall)
-    request_secs = parse_wall_seconds(request.time)
-    if qos_max is not None and request_secs is not None and request_secs > qos_max:
+    if _request_exceeds_qos_max(row, request):
         return True
     return False
 
@@ -3870,7 +3938,7 @@ def collapse_uniform_walltimes(
         waits = [row.wait_by_request.get(request.label) for row, request in members]
         if any(w is None for w in waits) or len(set(waits)) != 1:
             continue
-        members_sorted = sorted(members, key=lambda p: parse_wall_seconds(p[1].time) or 0)
+        members_sorted = sorted(members, key=lambda p: p[1].wall_seconds or 0)
         first_row, first_request = members_sorted[0]
         last_request = members_sorted[-1][1]
         time_label = (
@@ -3968,7 +4036,7 @@ def sort_pairs(
             elif key == "vendor":
                 values.append({"intel": 0, "amd": 1, "mixed": 2}.get(row.cpu_vendor, 3))
             elif key == "wall":
-                values.append(parse_wall_seconds(row.qos_info.max_wall) or -1)
+                values.append(row.qos_info.max_wall_seconds or -1)
             elif key in {"priority", "fairshare", "usage"}:
                 values.append(parse_float(data.get(key, "")) if parse_float(data.get(key, "")) is not None else -1.0)
             elif key == "default":
@@ -5265,6 +5333,9 @@ def run_self_test() -> int:
     )
     cands = _candidate_partitions(fc_row)
     assert "granite-gpu-freecycle" in cands and "granite-gpu" in cands
+    assert _candidate_partitions(
+        fc_row, {"granite": {"granite-gpu"}}
+    ) == ["granite-gpu"]
     fake_pgpus = {"granite": {"granite-gpu": {"h100nvl": 8}}}
     assert resolve_row_gpu_types(fc_row, fake_pgpus) == ("h100nvl",)
     # Verify table_output handles empty results without crashing.
@@ -5303,6 +5374,11 @@ def run_self_test() -> int:
     assert "gen" in feats and "a100" in feats
     _, _, empty = parse_features_line("granite|granite|(null)")
     assert empty == set()
+    feature_avail = {"granite": {"granite-gpu": PartitionAvail()}}
+    feature_avail["granite"]["granite-gpu"].features = {"gen", "h100nvl"}
+    assert partition_features_from_availability(feature_avail) == {
+        "granite": {"granite-gpu": {"gen", "h100nvl"}}
+    }
     fc_row2 = AllocationRow(
         "granite", "sadayappan", "me", "", "granite-gpu-freecycle", ""
     )
@@ -6491,6 +6567,33 @@ def run_self_test() -> int:
     assert ("q-a100", "cpu:8@1h") not in fake_calls
     assert len(fake_calls) == 2, fake_calls
 
+    # Over-MaxWall requests are annotated locally and never submitted to sbatch.
+    too_long_row = AllocationRow(
+        "notchpeak", "x", "u", "", "q-short", "q-short",
+        qos_info=QOSInfo("q-short", max_wall="01:00:00"),
+        tags=("cpu",),
+    )
+    too_long_request = ResourceSpec(cpus=8, time="2:00:00")
+    fake_calls = []
+    try:
+        globals()["predict_wait_result"] = fake_predict_wait_result
+        shutil.which = fake_which
+        predict_wait_times(
+            [too_long_row],
+            requests=[too_long_request],
+            max_workers=1,
+            quiet=True,
+        )
+    finally:
+        globals()["predict_wait_result"] = orig_predict_wait_result
+        shutil.which = orig_shutil_which
+    assert fake_calls == [], fake_calls
+    assert too_long_row.wait_by_request[too_long_request.label] is None
+    assert (
+        too_long_row.wait_check_reason_by_request[too_long_request.label]
+        == NOTE_QOS_LIMIT
+    )
+
     # collapse_uniform_walltimes: uniform-wait groups merge to one row,
     # non-uniform groups pass through unchanged.
     coll_row = AllocationRow(
@@ -6544,6 +6647,15 @@ def run_self_test() -> int:
     assert args_no_fmt.request_pos == []
     args_explicit = parser_fmt.parse_args(["--format", "table"])
     assert args_explicit.format == "table"
+    assert _needs_usage_lookup(
+        args_explicit, "table", _default_sort_spec(include_wait=False)
+    ) is False
+    args_sort_usage = parser_fmt.parse_args(["--sort", "usage"])
+    assert _needs_usage_lookup(args_sort_usage, "table", "usage") is True
+    args_json = parser_fmt.parse_args(["--format", "json"])
+    assert _needs_usage_lookup(
+        args_json, "json", _default_sort_spec(include_wait=False)
+    ) is True
     assert "Quickstart:" in SHORT_HELP and "--help" in SHORT_HELP
 
     # Surviving flags expose their dests.
@@ -7015,6 +7127,31 @@ def _resolve_output_format(args: argparse.Namespace) -> Tuple[str, bool]:
     return (fmt or "table"), auto_switched
 
 
+def _default_sort_spec(include_wait: bool) -> str:
+    return (
+        "wait,request,premium,vendor,cluster,qos" if include_wait
+        else "premium,vendor,cluster,account,qos"
+    )
+
+
+def _sort_spec_keys(sort_spec: str) -> Set[str]:
+    return {
+        ("premium" if key.strip().lower() == "gpu-tier" else key.strip().lower())
+        for key in sort_spec.split(",")
+        if key.strip()
+    }
+
+
+def _needs_usage_lookup(args: argparse.Namespace, fmt: str, sort_spec: str) -> bool:
+    if args.no_usage or args.all_visible:
+        return False
+    if args.fairshare_min is not None or args.usage_max is not None:
+        return True
+    if _sort_spec_keys(sort_spec).intersection({"fairshare", "usage"}):
+        return True
+    return fmt in ("csv", "json") and not (args.best or args.sbatch or args.pivot)
+
+
 def _print_wait_check_banner(
     args: argparse.Namespace, requests: Sequence["ResourceSpec"]
 ) -> None:
@@ -7200,17 +7337,19 @@ def main(argv: Sequence[str]) -> int:
     if args.list_gpus:
         # Always fetch features so the inventory shows host CPU detail (HOSTS
         # cell, vendor classification) the same way --list-cpus does. Both paths
-        # pay the same two sinfo calls.
+        # share the feature data already present in the per-node sinfo query.
+        partition_avail = show_partition_availability()
         print(format_gpu_summary(
-            show_partition_availability(),
-            partition_features=show_partition_features(),
+            partition_avail,
+            partition_features=partition_features_from_availability(partition_avail),
             requests=user_requests,
         ))
         return 0
     if args.list_cpus:
+        partition_avail = show_partition_availability()
         print(format_cpu_summary(
-            show_partition_features(),
-            show_partition_availability(),
+            partition_features_from_availability(partition_avail),
+            partition_avail,
             requests=user_requests,
         ))
         return 0
@@ -7223,6 +7362,7 @@ def main(argv: Sequence[str]) -> int:
             "  hint: pass a request (e.g. 'a100:4', 'cpu:32@12h'), or "
             "use --quick / --no-wait to list allocations without checking"
         )
+    sort_spec = args.sort or _default_sort_spec(include_wait)
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
     rows = show_associations(user=user, all_visible=args.all_visible)
@@ -7242,13 +7382,15 @@ def main(argv: Sequence[str]) -> int:
         partition_gpus = {}
     # cpu_vendor classification feeds the 'vendor' sort key; CSV/JSON also use
     # the full CPU feature set as part of the machine-readable schema.
-    partition_features = (
-        {} if args.no_availability and not machine_details
-        else show_partition_features()
-    )
+    if partition_avail is not None:
+        partition_features = partition_features_from_availability(partition_avail)
+    elif args.no_availability and not machine_details:
+        partition_features = {}
+    else:
+        partition_features = show_partition_features()
     attach_metadata(
         rows,
-        include_usage=(not args.no_usage and not args.all_visible),
+        include_usage=_needs_usage_lookup(args, fmt, sort_spec),
         user=user,
         partition_gpus=partition_gpus,
         partition_features=partition_features,
@@ -7272,6 +7414,7 @@ def main(argv: Sequence[str]) -> int:
             rows = [r for r in rows if not _is_uncheckable_row(r)]
         predict_wait_times(
             rows, requests=requests,
+            known_partitions=known_partitions_from_availability(partition_avail),
             verbose=args.verbose, quiet=args.quiet,
         )
     pairs = expand_rows_by_request(rows, requests if include_wait else None)
@@ -7280,12 +7423,6 @@ def main(argv: Sequence[str]) -> int:
         pairs = [p for p in pairs if not _is_low_information_pair(*p)]
         if not args.full:
             pairs = collapse_uniform_walltimes(pairs)
-    sort_spec = args.sort
-    if sort_spec is None:
-        sort_spec = (
-            "wait,request,premium,vendor,cluster,qos" if include_wait
-            else "premium,vendor,cluster,account,qos"
-        )
     pairs = sort_pairs(pairs, sort_spec, args.reverse)
 
     # If filtering left no rows, surface a hint so the user can self-debug.
