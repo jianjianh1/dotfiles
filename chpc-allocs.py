@@ -577,12 +577,13 @@ Common entry points:
   chpc-allocs a100:4+cpu:32         two alternatives ('+' = OR, no quoting)
   chpc-allocs 'a100:4*cpu:32'       one combined job ('*' = AND, quote in shells that glob '*')
   chpc-allocs 'a100:4*intel'        constrain to Intel hosts (vendor atom)
-  chpc-allocs 'cpu:32*genoa'        constrain to a microarchitecture
   chpc-allocs 'gpu:4*ampere'        any 4 Ampere GPUs (gen atom)
   chpc-allocs 'gpu:1,sm_min=80'     any GPU with compute capability >= 8.0
+  chpc-allocs --best a100:4         lowest-wait runnable triple as paste-ready #SBATCH
   chpc-allocs --quick               list allocations, no probes
   chpc-allocs --explain a100:4      preview the probe plan, run nothing
   chpc-allocs --list-gpus           cluster GPU inventory (no allocations needed)
+  chpc-allocs --list-gpus a100:1    inventory narrowed to partitions exposing a100
 """
 
 EPILOG = """\
@@ -593,18 +594,17 @@ Quickstart:
   chpc-allocs cpu:32                          # ... or a 32-core CPU job
   chpc-allocs a100:4+cpu:32@12h               # two alternatives ('+' = OR)
   chpc-allocs 'a100:4*cpu:32@12h'             # one combined job ('*' = AND)
-  chpc-allocs 'a100:4*cpu:32+h100:1'          # AND inside, OR across (precedence: '*' before '+')
-  chpc-allocs a100:1+a100:4 --pivot           # compare shapes side-by-side
+  chpc-allocs 'a100:4*cpu:32+h100:1'          # AND inside, OR across ('*' binds tighter)
   chpc-allocs --explain a100:4                # preview the plan, run nothing
 
-Common queries:
-  chpc-allocs --cluster notchpeak             # rows on notchpeak only
-  chpc-allocs a100:1                          # narrows to rows that expose a100
-  chpc-allocs h100:1                          # 'h100' resolves to row's actual GRES (e.g. h100nvl)
+Shape grammar:
+  chpc-allocs h100:1                          # 'h100' resolves to actual GRES (e.g. h100nvl)
   chpc-allocs 'a100:4*intel'                  # a100x4 only on Intel hosts
   chpc-allocs 'cpu:32*genoa'                  # 32-core CPU on Genoa nodes (alias 'gen')
-  chpc-allocs intel+amd --pivot               # compare Intel vs AMD side-by-side
   chpc-allocs zen4                            # 1 cpu on any Zen 4 host
+  chpc-allocs 'gpu:4*ampere'                  # any 4 Ampere GPUs (gen atom)
+  chpc-allocs 'gpu:1,sm_min=80'               # 1 GPU with compute capability >= 8.0
+  chpc-allocs 'a100:4@12h,vendor=intel'       # walltime + vendor key=value
   Vendors: intel, amd. Microarchitectures (short or long form):
     Intel: skl/skylake, csl/cascadelake, icx/icelake, spr/sapphirerapids,
            emr/emeraldrapids, cpx/cooperlake, bro/broadwell, hsw/haswell,
@@ -619,15 +619,54 @@ Common queries:
     Note: '+' suffix (e.g. 'sm80+') is NOT supported — '+' is the
           shape-list OR separator. Use 'sm_min=80' instead.
 
+Filtering rows (repeatable, OR-matched, case-insensitive substrings):
+  chpc-allocs --cluster notchpeak                       # one cluster only
+  chpc-allocs --cluster notchpeak --cluster granite     # union of two clusters
+  chpc-allocs --account sadayappan a100:4               # narrow by account
+  chpc-allocs --qos notchpeak-gpu --quick               # narrow by QOS
+  chpc-allocs --cluster notchpeak --account sadayappan a100:4
+
+Freecycle / guest / reservation / walltime:
+  chpc-allocs --freecycle-only a100:4                   # preemptable only
+  chpc-allocs --exclude-guest cpu:32                    # hide guest rows
+  chpc-allocs --reservation --quick                     # only reservation-gated QOS
+  chpc-allocs --min-wall 24:00:00 --quick               # MaxWall >= 24h
+  chpc-allocs --min-wall 7d a100:4                      # MaxWall >= 7 days
+
+Sorting and trimming:
+  chpc-allocs --sort wait,premium a100:4                # cheapest premium GPU first
+  chpc-allocs --sort cluster,qos --reverse --quick      # group by cluster/qos, reversed
+  chpc-allocs --full 'a100:1+a100:4'                    # don't collapse uniform-wait rows
+  chpc-allocs --show-all a100:4                         # keep '?' / over-MaxWall rows
+
+Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):
+  chpc-allocs --list-gpus                               # full GPU inventory
+  chpc-allocs --list-gpus a100:1                        # only partitions exposing a100
+  chpc-allocs --list-gpus 'a100:4*intel'                # ... and only Intel hosts
+  chpc-allocs --list-cpus                               # full CPU inventory
+  chpc-allocs --list-cpus 'cpu:32*genoa'                # only Genoa nodes with >=32 cores
+
+Recipes:
+  chpc-allocs --best a100:4                             # paste-ready #SBATCH for fastest triple
+  chpc-allocs --best a100:4 --format json | jq .        # same, machine-readable
+  chpc-allocs --sbatch --quick                          # all my allocations as #SBATCH blocks
+  chpc-allocs --sbatch a100:4 --format json             # JSON array of {cluster,account,qos,partition}
+  chpc-allocs --pivot 'a100:1+a100:4+h100:1'            # shapes side-by-side, table only
+  chpc-allocs intel+amd --pivot                         # compare Intel vs AMD
+
+Speed (skip probes/queries):
+  chpc-allocs --quick                                   # = --no-wait --no-availability --no-usage
+  chpc-allocs --no-wait a100:4                          # keep capacity/usage, skip wait probe
+  chpc-allocs --no-availability --no-usage cpu:32       # probe only, no sinfo/sshare
+
 Scripting / output:
-  chpc-allocs a100:1 --format json | jq '.rows[]'   # JSON with _help legend
-  chpc-allocs a100:1 --sbatch --format json          # machine-readable triples
-  chpc-allocs --quick --format json                  # fast list, no probes/sinfo
-  chpc-allocs --quick --wide --format csv > allocs.csv
+  chpc-allocs a100:1 --format json | jq '.rows[]'       # JSON with _help legend
+  chpc-allocs --quick --wide --format csv > allocs.csv  # wide CSV dump
 
 Diagnostics:
   chpc-allocs -v a100:1                       # narrate dropped rows + progress
   chpc-allocs --show-all a100:1               # don't hide marginal rows
+  chpc-allocs --explain 'a100:4*intel+h100:1' # show resolved probe plan, run nothing
 """
 
 
@@ -686,54 +725,62 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     filt.add_argument(
         "--account", action="append", metavar="NAME",
-        help="Account name. Repeatable.",
+        help="Account name. Repeatable. e.g. --account sadayappan",
     )
     filt.add_argument(
         "--qos", action="append", metavar="NAME",
-        help="QOS name. Repeatable.",
+        help="QOS name. Repeatable. e.g. --qos notchpeak-gpu",
     )
     filt.add_argument(
         "--default-only", action="store_true",
-        help="Only the default QOS for each association.",
+        help="Only the default QOS for each association. "
+        "e.g. --default-only --quick",
     )
     fc_group = filt.add_mutually_exclusive_group()
     fc_group.add_argument(
         "--freecycle-only", dest="freecycle_only", action="store_true",
-        help="Only freecycle (preemptable, no fairshare cost) rows.",
+        help="Only freecycle (preemptable, no fairshare cost) rows. "
+        "e.g. --freecycle-only a100:4",
     )
     fc_group.add_argument(
         "--exclude-freecycle", dest="exclude_freecycle", action="store_true",
-        help="Hide freecycle rows.",
+        help="Hide freecycle rows. e.g. --exclude-freecycle a100:4",
     )
     g_group = filt.add_mutually_exclusive_group()
     g_group.add_argument(
         "--guest-only", dest="guest_only", action="store_true",
-        help="Only guest (preemptable on idle owner nodes) rows.",
+        help="Only guest (preemptable on idle owner nodes) rows. "
+        "e.g. --guest-only h100:1",
     )
     g_group.add_argument(
         "--exclude-guest", dest="exclude_guest", action="store_true",
-        help="Hide guest rows.",
+        help="Hide guest rows. e.g. --exclude-guest cpu:32",
     )
     filt.add_argument(
         "--reservation", action="store_true",
-        help="Only QOS that require a reservation.",
+        help="Only QOS that require a reservation. "
+        "e.g. --reservation --quick",
     )
     filt.add_argument(
         "--min-wall", metavar="DURATION",
-        help="Minimum MaxWall. e.g. 12:00:00, 3-00:00:00, 14d, 7d, 'unlimited'.",
+        help="Minimum MaxWall. e.g. 12:00:00, 3-00:00:00, 14d, 7d, "
+        "'unlimited'. Usage: --min-wall 24:00:00",
     )
     filt.add_argument(
         "--fairshare-min", type=float, metavar="FLOAT",
-        help="Drop rows below this FairShare (requires sshare data).",
+        help="Drop rows below this FairShare (requires sshare data). "
+        "e.g. --fairshare-min 0.1",
     )
     filt.add_argument(
         "--usage-max", type=float, metavar="FLOAT",
-        help="Drop rows above this RawUsage (requires sshare data).",
+        help="Drop rows above this RawUsage (requires sshare data). "
+        "e.g. --usage-max 0.5",
     )
     filt.add_argument(
         "--all-visible", action="store_true",
         help="Search every association you can read (omits user names; "
-        "may be slow; disables sshare enrichment).",
+        "may be slow; disables sshare enrichment). "
+        "e.g. --all-visible --quick",
     )
 
     # ----- Output ----------------------------------------------------------
@@ -748,18 +795,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--format", type=_lower_choice, choices=("table", "csv", "json"),
         default=None, metavar="{table,csv,json}",
         help="Output format (case-insensitive). Default: table on a TTY, "
-        "json (wide, with _help legend) when piped.",
+        "json (wide, with _help legend) when piped. "
+        "e.g. --format json | jq '.rows[]'",
     )
     out.add_argument(
         "--wide", action="store_true",
         help="Show extra columns: partition, gpu_types, cpu_features, "
-        "default_qos, TRES limits, QOS flags, full sshare detail.",
+        "default_qos, TRES limits, QOS flags, full sshare detail. "
+        "e.g. --wide --quick --format csv",
     )
     out.add_argument(
         "--pivot", action="store_true",
         help="Pivot layout: rows = (cluster, account, qos), columns = shape "
         "labels, cells = wait times. Table format only; useful with a "
-        "multi-shape SHAPE_LIST.",
+        "multi-shape SHAPE_LIST. e.g. 'a100:1+a100:4' --pivot",
     )
     out.add_argument(
         "--sort", default=None, metavar="KEYS",
@@ -770,39 +819,42 @@ def _build_parser() -> argparse.ArgumentParser:
         "Identity: cluster, account, qos. "
         "Score: priority, fairshare, usage. "
         "Default with wait: wait,shape,premium,vendor,cluster,qos. "
-        "Default no-wait: premium,vendor,cluster,account,qos.",
+        "Default no-wait: premium,vendor,cluster,account,qos. "
+        "e.g. --sort wait,premium,cluster",
     )
     out.add_argument(
         "--reverse", action="store_true",
-        help="Reverse the sort order.",
+        help="Reverse the sort order. e.g. --sort wait --reverse a100:4",
     )
     out.add_argument(
         "--sbatch", action="store_true",
         help="Emit '#SBATCH --account=... --qos=...' blocks instead of a "
         "table. With --format=json, emits a JSON array of "
-        "{cluster, account, qos, partition}.",
+        "{cluster, account, qos, partition}. e.g. --sbatch a100:4 --quick",
     )
     out.add_argument(
         "--best", action="store_true",
         help="Print only the lowest-wait runnable triple as a ready-to-paste "
         "#SBATCH block plus a one-line summary. Requires wait data (incompatible "
         "with --no-wait/--quick); also incompatible with --sbatch/--pivot. "
-        "With --format=json, emits a single object.",
+        "With --format=json, emits a single object. e.g. --best a100:4",
     )
     out.add_argument(
         "--no-json-help", action="store_true",
         help="In JSON output, drop the top-level _help legend and emit a "
-        "bare array. No effect on table/csv.",
+        "bare array. No effect on table/csv. "
+        "e.g. --quick --format json --no-json-help",
     )
     out.add_argument(
         "--full", action="store_true",
         help="Skip the uniform-wait row collapse: keep every walltime row "
-        "even when a multi-shape SHAPE_LIST gave the same wait across them.",
+        "even when a multi-shape SHAPE_LIST gave the same wait across them. "
+        "e.g. --full 'a100:1+a100:4'",
     )
     out.add_argument(
         "--show-all", dest="show_all", action="store_true",
         help="Don't hide marginal rows: '?' waits, no-MaxWall QOS, "
-        "over-MaxWall shapes, zero-free.",
+        "over-MaxWall shapes, zero-free. e.g. --show-all a100:4",
     )
 
     # ----- Diagnostics & speed --------------------------------------------
@@ -816,31 +868,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     diag.add_argument(
         "--no-wait", action="store_true",
-        help="Skip the wait probe (no 'wait' column). Faster.",
+        help="Skip the wait probe (no 'wait' column). Faster. "
+        "e.g. --no-wait --format csv",
     )
     diag.add_argument(
         "--no-availability", dest="no_availability", action="store_true",
         help="Skip the live sinfo capacity query (no free_* columns). Faster. "
         "In table mode the free_* columns replace priority/fairshare/usage/"
-        "default/tags by default; --wide brings them back.",
+        "default/tags by default; --wide brings them back. "
+        "e.g. --no-availability cpu:32",
     )
     diag.add_argument(
         "--no-usage", action="store_true",
-        help="Skip the sshare lookup (no fairshare/usage columns). Faster.",
+        help="Skip the sshare lookup (no fairshare/usage columns). Faster. "
+        "e.g. --no-usage a100:4",
     )
     diag.add_argument(
         "--quick", action="store_true",
         help="Macro for --no-wait --no-availability --no-usage. Enumerate "
-        "allocations fast, no probes.",
+        "allocations fast, no probes. e.g. --quick --format csv > allocs.csv",
     )
     diag.add_argument(
         "--explain", action="store_true",
         help="Preview the probe plan and exit; runs no SLURM probes. "
-        "Honors --format=json.",
+        "Honors --format=json. e.g. --explain a100:4+cpu:32",
     )
     diag.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Narrate dropped rows + probe progress to stderr.",
+        help="Narrate dropped rows + probe progress to stderr. "
+        "e.g. -v a100:4",
     )
     diag.add_argument(
         "--self-test", action="store_true",
@@ -852,19 +908,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "Inventory shortcuts",
         description=(
             "Print cluster inventory without consulting your allocations. "
-            "Each exits after printing."
+            "Each exits after printing. If a SHAPE_LIST is supplied, the "
+            "inventory is narrowed to partitions that satisfy it (vendor / "
+            "microarch / GPU gen / SM atoms all apply)."
         ),
     )
     inv.add_argument(
         "--list-gpus", action="store_true",
-        help="Cluster/partition GPU type:count inventory from sinfo.",
+        help="Cluster/partition GPU type:count inventory from sinfo. "
+        "A SHAPE_LIST narrows the listing. "
+        "e.g. --list-gpus, --list-gpus a100:1, --list-gpus 'a100:4*intel'",
     )
     inv.add_argument(
         "--list-cpus", action="store_true",
         help=(
             "Cluster/partition CPU inventory from sinfo: vendor, "
             "architecture, and per-node layout (cores×sockets, memory). "
-            "SLURM does not expose specific CPU SKU strings on this cluster."
+            "SLURM does not expose specific CPU SKU strings on this cluster. "
+            "A SHAPE_LIST narrows the listing. "
+            "e.g. --list-cpus, --list-cpus 'cpu:32*genoa'"
         ),
     )
 
@@ -4427,7 +4489,11 @@ def run_self_test() -> int:
         "Inventory shortcuts",
         "Common entry points",
         "Quickstart:",
-        "Common queries:",
+        "Shape grammar:",
+        "Filtering rows",
+        "Inventory shortcuts (do not consult your allocations; SHAPE_LIST narrows):",
+        "Recipes:",
+        "Speed (skip probes/queries):",
         "Scripting / output:",
         # Sort key categories surface in --sort help.
         "Time:",
