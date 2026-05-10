@@ -20,14 +20,18 @@ reset_module_vars() {
 }
 
 reset_module_vars
-CLAUDE_MODULE_CANDIDATES=("claude-code" "claude")
-CODEX_MODULE_CANDIDATES=("codex" "openai-codex")
+# CHPC module names — verified against `module spider` on notchpeak2
+# (2026-05). Re-verify with: ./setup.sh --probe-modules
+CLAUDE_MODULE_CANDIDATES=("claude")
+CODEX_MODULE_CANDIDATES=("codex")
 GH_MODULE_CANDIDATES=("gh")
 NODE_MODULE_CANDIDATES=("nodejs")
 UV_MODULE_CANDIDATES=("uv")
 BTOP_MODULE_CANDIDATES=("btop")
 NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")
-TREE_SITTER_MODULE_CANDIDATES=("tree-sitter")
+# tree-sitter has no CHPC module today; install_tree_sitter falls back to
+# the prebuilt binary (then to cargo build-from-source if glibc is too old).
+TREE_SITTER_MODULE_CANDIDATES=()
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
@@ -265,6 +269,7 @@ ensure_module_command() {
 try_chpc_module_load() {
     local cmd="$1" display="$2" var_name="$3"
     shift 3
+    local tried=("$@")
 
     if ensure_module_command; then
         local mod
@@ -282,8 +287,53 @@ try_chpc_module_load() {
         return 0
     fi
     echo "  Warning: no $display module found on CHPC — skipping self-install"
+    if [ "${#tried[@]}" -gt 0 ]; then
+        echo "  Tried: ${tried[*]}"
+    fi
     echo "  Check available modules with: module spider $cmd"
     return 1
+}
+
+# Print which CHPC module candidates resolve and which don't, without
+# loading anything. Useful for re-verifying the candidate lists after
+# CHPC adds, removes, or renames modules.
+probe_chpc_modules() {
+    if ! ensure_module_command; then
+        echo "Error: 'module' command unavailable. Run this on a CHPC login/compute node."
+        return 1
+    fi
+    local group candidates_var name candidates resolved out
+    local groups=(
+        "Claude Code:CLAUDE_MODULE_CANDIDATES"
+        "Codex:CODEX_MODULE_CANDIDATES"
+        "GitHub CLI:GH_MODULE_CANDIDATES"
+        "Node.js:NODE_MODULE_CANDIDATES"
+        "uv:UV_MODULE_CANDIDATES"
+        "btop:BTOP_MODULE_CANDIDATES"
+        "Neovim:NVIM_MODULE_CANDIDATES"
+        "tree-sitter:TREE_SITTER_MODULE_CANDIDATES"
+    )
+    printf '%-14s %-12s %s\n' "TOOL" "STATUS" "CANDIDATE"
+    printf '%-14s %-12s %s\n' "----" "------" "---------"
+    for group in "${groups[@]}"; do
+        name="${group%%:*}"
+        candidates_var="${group##*:}"
+        local -n arr="$candidates_var"
+        candidates=("${arr[@]:-}")
+        if [ "${#arr[@]}" -eq 0 ]; then
+            printf '%-14s %-12s %s\n' "$name" "(none)" "no candidates configured"
+            continue
+        fi
+        for cand in "${arr[@]}"; do
+            out="$(module spider "$cand" 2>&1)"
+            if printf '%s' "$out" | grep -q 'Unable to find'; then
+                printf '%-14s %-12s %s\n' "$name" "MISSING" "$cand"
+            else
+                resolved="$(printf '%s' "$out" | awk -F'[: ]+' '/^  [a-zA-Z]/ && NR<=4 {print $3; exit}')"
+                printf '%-14s %-12s %s\n' "$name" "FOUND" "$cand${resolved:+ -> $resolved}"
+            fi
+        done
+    done
 }
 
 render_tmux_compat() {
@@ -378,27 +428,38 @@ fi
 SERVER_CONFIGS_BASH_COMPAT_LOADED=1
 EOF
 
-    # Persist module loads for any tool installed via module.
+    # Persist module loads for any tool installed via module. We only run
+    # them in interactive shells: SLURM job-step shells (srun --pty bash)
+    # inherit Lmod state from the job, and an unconditional `module load`
+    # here can swap MPI/compiler combos and break job startup.
     local mod_load mod_val _any_module=false
     for mod_load in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE; do
         mod_val="${!mod_load:-}"
         if [ -n "$mod_val" ]; then
             if ! "$_any_module"; then
                 _any_module=true
-                cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
+                cat >> "$GENERATED_DIR/bashrc_compat" <<'EOF'
 
-# Environment modules
+# Environment modules — interactive shells only.
+case $- in
+    *i*) ;;
+    *) return 0 ;;
+esac
 if ! command -v module &>/dev/null; then
     for init in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash; do
-        if [ -r "\$init" ]; then
-            . "\$init" >/dev/null 2>&1 && break
+        if [ -r "$init" ]; then
+            . "$init" >/dev/null 2>&1 && break
         fi
     done
 fi
+_server_configs_module_load() {
+    command -v module &>/dev/null || return 0
+    module load "$@"
+}
 EOF
             fi
             cat >> "$GENERATED_DIR/bashrc_compat" <<EOF
-command -v module &>/dev/null && module load ${mod_val} 2>/dev/null
+_server_configs_module_load ${mod_val}
 EOF
         fi
     done
@@ -540,16 +601,46 @@ render_compat_configs() {
     write_compat_report
 }
 
-# Get latest release version from GitHub (strips leading 'v')
+# Get latest release version from GitHub (strips leading 'v').
+# Prefers the JSON API (stable contract) over parsing the /releases/latest
+# HTML redirect (which has changed at least twice over the last few years).
+# Memoizes per-run to keep fresh setups from making ~12 round trips.
+declare -gA _GH_LATEST_CACHE 2>/dev/null || true
+
 gh_latest() {
-    local version
-    version="$(retry curl -sfI "https://github.com/$1/releases/latest" \
-        | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')"
+    local slug="$1" version=""
+
+    if [ -n "${_GH_LATEST_CACHE[$slug]:-}" ]; then
+        printf '%s\n' "${_GH_LATEST_CACHE[$slug]}"
+        return 0
+    fi
+
+    if command -v jq &>/dev/null; then
+        version="$(retry curl -sfL "https://api.github.com/repos/$slug/releases/latest" 2>/dev/null \
+            | jq -r '.tag_name // empty' 2>/dev/null \
+            | sed 's/^v//')"
+    elif command -v python3 &>/dev/null; then
+        version="$(retry curl -sfL "https://api.github.com/repos/$slug/releases/latest" 2>/dev/null \
+            | python3 -c "import json,sys
+try:
+    print(json.load(sys.stdin).get('tag_name','').lstrip('v'))
+except Exception:
+    pass" 2>/dev/null)"
+    fi
+
+    # Fallback to the redirect parse when neither JSON parser is available
+    # or the API call returned nothing (rate limit, DNS hiccup, etc.).
     if [ -z "$version" ]; then
-        echo "  Warning: could not determine latest version for $1" >&2
+        version="$(retry curl -sfI "https://github.com/$slug/releases/latest" \
+            | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')"
+    fi
+
+    if [ -z "$version" ]; then
+        echo "  Warning: could not determine latest version for $slug" >&2
         return 1
     fi
-    echo "$version"
+    _GH_LATEST_CACHE[$slug]="$version"
+    printf '%s\n' "$version"
 }
 
 # Install a binary from a GitHub release tarball
@@ -700,6 +791,31 @@ install_glow() {
     echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
 }
 
+install_jq() {
+    if is_macos; then
+        brew_install jq jq
+        return $?
+    fi
+    if command -v jq &>/dev/null && ! $FORCE; then
+        record_command_if_managed jq || true
+        echo "jq already installed: $(jq --version 2>&1)"
+        return 0
+    fi
+    echo "Installing jq..."
+    local ARCH DEB_ARCH V
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  DEB_ARCH="amd64" ;;
+        aarch64) DEB_ARCH="arm64" ;;
+        *)       echo "  Skipping jq (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    if ! V="$(gh_latest jqlang/jq)"; then
+        return 1
+    fi
+    install_gh_bare_binary jq \
+        "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}"
+}
+
 install_node() {
     local MIN_NODE_MAJOR=18
     if is_macos; then
@@ -821,8 +937,9 @@ nvim_glibc_version() {
     first_line="$(ldd --version 2>/dev/null | head -1 || true)"
     case "$first_line" in
         *GLIBC*|*GNU\ libc*)
-            printf '%s\n' "$first_line" |
-                sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9.]*\).*/\1/p'
+            # Last whitespace-separated token on the line is the version,
+            # e.g. "ldd (Ubuntu GLIBC 2.35-0ubuntu3.1) 2.35" -> "2.35".
+            printf '%s\n' "$first_line" | awk '{print $NF}'
             ;;
     esac
 }
@@ -982,13 +1099,25 @@ install_nvim() {
 }
 
 install_tree_sitter_cargo() {
+    # $1 (optional): version pin, e.g. "0.25.10". When set, cargo installs
+    # exactly that version instead of "latest". Pinning matches the prebuilt
+    # binary's version when available, so the cargo fallback can't drift
+    # away from the version that matches our locked nvim-treesitter.
+    local pin="${1:-}"
     if ! command -v cargo &>/dev/null; then
         return 1
     fi
-    echo "  Building tree-sitter from source via cargo (this may take a few minutes)..."
-    local TMP
+    if [ -n "$pin" ]; then
+        echo "  Building tree-sitter $pin from source via cargo (this may take a few minutes)..."
+    else
+        echo "  Building tree-sitter from source via cargo (this may take a few minutes)..."
+    fi
+    local TMP cargo_args=(--quiet --locked --root)
     TMP="$(mktemp -d)"
-    if ! cargo install --quiet --locked --root "$TMP" tree-sitter-cli 2>&1 | tail -3; then
+    cargo_args+=("$TMP")
+    [ -n "$pin" ] && cargo_args+=(--version "$pin")
+    cargo_args+=(tree-sitter-cli)
+    if ! cargo install "${cargo_args[@]}" 2>&1 | tail -3; then
         echo "  Warning: cargo install tree-sitter-cli failed"
         rm -rf "$TMP"
         return 1
@@ -1005,7 +1134,7 @@ install_tree_sitter_cargo() {
     fi
     rm -rf "$TMP"
     manifest_add_path "$BIN_DIR/tree-sitter"
-    echo "  tree-sitter (built from source) installed to $BIN_DIR/tree-sitter"
+    echo "  tree-sitter${pin:+ $pin} (built from source) installed to $BIN_DIR/tree-sitter"
 }
 
 install_tree_sitter() {
@@ -1013,10 +1142,13 @@ install_tree_sitter() {
         brew_install tree-sitter tree-sitter
         return $?
     fi
-    if is_chpc && $CHPC_USE_MODULES; then
-        try_chpc_module_load tree-sitter "tree-sitter CLI" \
-            TREE_SITTER_MODULE "${TREE_SITTER_MODULE_CANDIDATES[@]}"
-        return
+    # Only short-circuit on successful module load; if no module exists on
+    # this CHPC system, fall through to the binary/cargo install path.
+    if is_chpc && $CHPC_USE_MODULES && [ "${#TREE_SITTER_MODULE_CANDIDATES[@]}" -gt 0 ]; then
+        if try_chpc_module_load tree-sitter "tree-sitter CLI" \
+            TREE_SITTER_MODULE "${TREE_SITTER_MODULE_CANDIDATES[@]}"; then
+            return 0
+        fi
     fi
     if command -v tree-sitter &>/dev/null && ! $FORCE; then
         record_command_if_managed tree-sitter || true
@@ -1039,21 +1171,22 @@ install_tree_sitter() {
     if ! retry curl -sfL -o "$TMP/tree-sitter.gz" \
         "https://github.com/tree-sitter/tree-sitter/releases/download/v${TS_VERSION}/tree-sitter-linux-${TS_ARCH}.gz"; then
         echo "  Warning: failed to download tree-sitter"
-        install_tree_sitter_cargo
+        install_tree_sitter_cargo "$TS_VERSION"
         return $?
     fi
     if ! gunzip "$TMP/tree-sitter.gz"; then
         echo "  Warning: failed to gunzip tree-sitter"
-        install_tree_sitter_cargo
+        install_tree_sitter_cargo "$TS_VERSION"
         return $?
     fi
     chmod +x "$TMP/tree-sitter"
     # The prebuilt binary is dynamically linked against modern glibc; on hosts
     # with older glibc (e.g. CHPC RHEL 8 = glibc 2.28), it fails to run. Probe
-    # before installing, and fall back to building from source via cargo.
+    # before installing, and fall back to building from source via cargo at
+    # the same version so the binary and cargo paths stay deterministic.
     if ! "$TMP/tree-sitter" --version &>/dev/null; then
         echo "  Prebuilt tree-sitter incompatible with this host's glibc; falling back to cargo build."
-        install_tree_sitter_cargo
+        install_tree_sitter_cargo "$TS_VERSION"
         return $?
     fi
     if ! install_to "$TMP/tree-sitter" "$BIN_DIR/tree-sitter"; then
@@ -1065,8 +1198,10 @@ install_tree_sitter() {
 }
 
 install_gh_tools() {
+    # jq is installed earlier in setup_main so install_node and friends
+    # can use it; it is intentionally absent from this list.
     if [ "${DRY_RUN:-false}" = true ]; then
-        for tool in fzf ripgrep fd bat delta zoxide lazygit btop jq starship atuin; do
+        for tool in fzf ripgrep fd bat delta zoxide lazygit btop starship atuin; do
             run_step "$tool" true
         done
         return 0
@@ -1081,7 +1216,6 @@ install_gh_tools() {
         run_step "zoxide"   brew_install zoxide zoxide
         run_step "lazygit"  brew_install lazygit lazygit
         run_step "btop"     brew_install btop btop
-        run_step "jq"       brew_install jq jq
         run_step "starship" brew_install starship starship
         run_step "atuin"    brew_install atuin atuin
         return 0
@@ -1142,11 +1276,6 @@ install_gh_tools() {
         run_step "btop" install_gh_binary btop \
             "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
     else FAILURES+=("btop"); fi
-
-    if V="$(gh_latest jqlang/jq)"; then
-        run_step "jq" install_gh_bare_binary jq \
-            "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}"
-    else FAILURES+=("jq"); fi
 
     if V="$(gh_latest starship/starship)"; then
         run_step "starship" install_gh_binary starship \
@@ -1220,14 +1349,42 @@ install_codex() {
     local TMP
     TMP="$(mktemp -d)"
     trap 'rm -rf "${TMP:-}"' RETURN
-    if ! retry curl -sfL -o "$TMP/archive.tar.gz" \
-        "https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-${TARGET}.tar.gz"; then
-        echo "  Warning: failed to download Codex CLI"
+
+    # Resolve the asset URL from the release JSON when possible, so
+    # OpenAI changing the asset filename pattern doesn't silently break
+    # installs. Fall back to the historical pattern if jq is missing or
+    # the API lookup fails.
+    local CODEX_ASSET_URL=""
+    if command -v jq &>/dev/null; then
+        CODEX_ASSET_URL="$(retry curl -sfL "https://api.github.com/repos/openai/codex/releases/tags/${CODEX_TAG}" 2>/dev/null \
+            | jq -r --arg arch "$ARCH" --arg target "$TARGET" '
+                .assets[]
+                | select(.name | test("codex-" + $arch + "-" + $target + "\\.tar\\.gz$"))
+                | .browser_download_url' 2>/dev/null \
+            | head -1)"
+    fi
+    if [ -z "$CODEX_ASSET_URL" ]; then
+        CODEX_ASSET_URL="https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-${TARGET}.tar.gz"
+    fi
+
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "$CODEX_ASSET_URL"; then
+        echo "  Warning: failed to download Codex CLI from $CODEX_ASSET_URL"
         return 1
     fi
-    tar xz -C "$TMP" -f "$TMP/archive.tar.gz"
-    chmod +x "$TMP/codex-${ARCH}-${TARGET}"
-    if ! install_to "$TMP/codex-${ARCH}-${TARGET}" "$BIN_DIR/codex"; then
+    if ! tar xz -C "$TMP" -f "$TMP/archive.tar.gz"; then
+        echo "  Warning: failed to extract Codex archive"
+        return 1
+    fi
+    # Locate the codex binary in the extracted tree by name pattern, so
+    # we don't depend on the exact filename layout inside the tarball.
+    local codex_bin
+    codex_bin="$(find "$TMP" -maxdepth 2 -type f -name 'codex*' ! -name '*.tar.gz' | head -1)"
+    if [ -z "$codex_bin" ]; then
+        echo "  Warning: Codex archive did not contain a codex binary"
+        return 1
+    fi
+    chmod +x "$codex_bin"
+    if ! install_to "$codex_bin" "$BIN_DIR/codex"; then
         echo "  Warning: failed to install Codex CLI to $BIN_DIR/codex"
         return 1
     fi
@@ -1308,11 +1465,16 @@ setup_main() {
             --force|-f) FORCE=true ;;
             --dry-run|-n) DRY_RUN=true ;;
             --use-modules|-m) CHPC_USE_MODULES=true ;;
+            --probe-modules)
+                probe_chpc_modules
+                return $?
+                ;;
             -h|--help)
-                echo "Usage: setup.sh [--force|-f] [--dry-run|-n] [--use-modules|-m] [--help|-h]"
+                echo "Usage: setup.sh [--force|-f] [--dry-run|-n] [--use-modules|-m] [--probe-modules] [--help|-h]"
                 echo "  -f, --force        Reinstall CLI tools even if already present"
                 echo "  -n, --dry-run      Show setup steps without changing files"
                 echo "  -m, --use-modules  On CHPC, prefer module load over binary install"
+                echo "      --probe-modules  Report which CHPC module candidates resolve, then exit"
                 echo "  -h, --help         Show this help"
                 return 0
                 ;;
@@ -1330,6 +1492,14 @@ setup_main() {
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$GENERATED_DIR" || return 1
         chmod 700 "$GENERATED_DIR" 2>/dev/null || true
+        # Manifest contract: truncate-and-rebuild on every run. Each
+        # idempotent install function calls manifest_add_path /
+        # record_command_if_managed even on its early-return path, so a
+        # successful re-run (no install steps invoked) still produces a
+        # complete manifest. If a run dies mid-way, the next run rebuilds
+        # cleanly. Do NOT call uninstall.sh between a killed run and a
+        # subsequent re-run — the partial manifest will leak un-tracked
+        # files. Tested by test_manifest_controls_uninstall.
         : > "$INSTALL_MANIFEST"
 
         # Point this clone at the repo-local git hooks (idempotent; only when
@@ -1337,6 +1507,11 @@ setup_main() {
         if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
             git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
         fi
+
+        # Drop the shell-init cache so the next interactive bash regenerates
+        # `atuin init`, `zoxide init`, `fzf --bash` against any newly
+        # installed/upgraded binaries (matches I14 in the robustness plan).
+        rm -rf "$HOME/.cache/server-configs" 2>/dev/null || true
     fi
 
     echo "Linking config files..."
@@ -1359,8 +1534,12 @@ setup_main() {
         mkdir -p "$BIN_DIR"
     fi
 
-    # Install tools (each step continues on failure)
+    # Install tools (each step continues on failure).
+    # jq goes first so install_node (which parses the nodejs.org JSON index)
+    # can use it instead of falling back to python3 — and so any future
+    # caller can rely on jq being present.
     run_step "gh"           install_gh_cli
+    run_step "jq"           install_jq
     run_step "glow"         install_glow
     run_step "node"         install_node
     run_step "uv"           install_uv
