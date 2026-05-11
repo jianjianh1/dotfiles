@@ -310,7 +310,11 @@ remote_capture() {
         return 1
     fi
     local cmd="$1" quoted_cmd raw
-    local begin='__DEPLOY_CAPTURE_BEGIN__' end='__DEPLOY_CAPTURE_END__'
+    # Per-call nonce: a remote command that legitimately echoes a static
+    # marker can't misalign the extractor.
+    local nonce="$$_${RANDOM}_${RANDOM}"
+    local begin="__DEPLOY_CAPTURE_${nonce}_BEGIN__"
+    local end="__DEPLOY_CAPTURE_${nonce}_END__"
     quoted_cmd="$(quote_for_bash_lc "$cmd")"
     raw="$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "
         export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"
@@ -320,8 +324,9 @@ remote_capture() {
     " 2>/dev/null)" || return 1
     awk -v begin="$begin" -v end="$end" '
         $0 == begin { inside = 1; next }
-        $0 == end   { inside = 0; next }
+        $0 == end   { found_end = 1; inside = 0; next }
         inside      { print }
+        END         { exit (found_end ? 0 : 2) }
     ' <<<"$raw"
 }
 
@@ -861,10 +866,12 @@ step_gh_auth() {
     fi
 
     gh_token="$(gh auth token 2>/dev/null || true)"
-    # Reject tokens that don't match the expected shape so we never pipe
+    # Validate against GitHub's known token prefixes so we never pipe
     # arbitrary content (banners, error messages, accidentally-captured
     # whitespace) into `gh auth login --with-token` on the remote.
-    if [ -n "$gh_token" ] && ! [[ "$gh_token" =~ ^[A-Za-z0-9_]{20,}$ ]]; then
+    # ghp_ PAT classic, gho_ OAuth, ghu_ user-server, ghs_ server,
+    # github_pat_ fine-grained PAT.
+    if [ -n "$gh_token" ] && ! [[ "$gh_token" =~ ^(ghp_|gho_|ghu_|ghs_|github_pat_)[A-Za-z0-9_]+$ ]]; then
         warn "Local gh token failed shape validation; falling back to hosts.yml"
         gh_token=""
     fi
