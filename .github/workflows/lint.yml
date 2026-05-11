@@ -29,6 +29,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # `shell: bash` picks bash from PATH (Homebrew bash 5 on macOS),
+    # matching what `#!/usr/bin/env bash` shebangs in this repo
+    # resolve to at runtime. The default `/bin/bash` on macOS is 3.2
+    # and chokes on bash-4+ syntax (e.g. `local -`).
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install ShellCheck (pinned)
