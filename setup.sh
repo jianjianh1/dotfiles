@@ -38,7 +38,7 @@ CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
 FAILURES=()
 
 _setup_cleanup() {
-    :
+    [ -n "${_GH_LATEST_CACHE_FILE:-}" ] && rm -f "$_GH_LATEST_CACHE_FILE" 2>/dev/null
 }
 
 # --- Shared helpers (run_step, retry, backup_and_link, backup_and_copy) ---
@@ -329,7 +329,22 @@ probe_chpc_modules() {
             if printf '%s' "$out" | grep -q 'Unable to find'; then
                 printf '%-14s %-12s %s\n' "$name" "MISSING" "$cand"
             else
-                resolved="$(printf '%s' "$out" | awk -F'[: ]+' '/^  [a-zA-Z]/ && NR<=4 {print $3; exit}')"
+                # Prefer (D)-marked default, else last version Lmod prints.
+                resolved="$(printf '%s\n' "$out" | awk -v cand="$cand" '
+                    $0 ~ "^  " cand ": " cand "/" {
+                        if (match($0, cand "/[^[:space:]]+") > 0) {
+                            print substr($0, RSTART, RLENGTH); exit
+                        }
+                    }
+                    $0 ~ "^[ ]+" cand "/[0-9]" {
+                        if (match($0, cand "/[^[:space:](]+") > 0) {
+                            v = substr($0, RSTART, RLENGTH)
+                            if (index($0, "(D)") > 0) { print v; exit }
+                            last = v
+                        }
+                    }
+                    END { if (last != "") print last }
+                ')"
                 printf '%-14s %-12s %s\n' "$name" "FOUND" "$cand${resolved:+ -> $resolved}"
             fi
         done
@@ -601,45 +616,51 @@ render_compat_configs() {
     write_compat_report
 }
 
-# Get latest release version from GitHub (strips leading 'v').
-# Prefers the JSON API (stable contract) over parsing the /releases/latest
-# HTML redirect (which has changed at least twice over the last few years).
-# Memoizes per-run to keep fresh setups from making ~12 round trips.
-declare -gA _GH_LATEST_CACHE 2>/dev/null || true
+# Latest release version from GitHub (strips leading 'v'). API first;
+# falls back to the HTML redirect parse when no JSON parser is available.
+# File-based cache because every caller uses $(gh_latest …), and a
+# `declare -gA` in-shell cache wouldn't survive the subshell.
+_GH_LATEST_CACHE_FILE="${_GH_LATEST_CACHE_FILE:-${TMPDIR:-/tmp}/.gh-latest-cache.$$}"
 
 gh_latest() {
-    local slug="$1" version=""
-
-    if [ -n "${_GH_LATEST_CACHE[$slug]:-}" ]; then
-        printf '%s\n' "${_GH_LATEST_CACHE[$slug]}"
-        return 0
+    local slug="$1" version="" s v
+    if [ -f "$_GH_LATEST_CACHE_FILE" ]; then
+        while IFS=$'\t' read -r s v; do
+            if [ "$s" = "$slug" ]; then
+                printf '%s\n' "$v"
+                return 0
+            fi
+        done < "$_GH_LATEST_CACHE_FILE"
     fi
+
+    # Scoped pipefail so a curl-200-but-jq-fail (GitHub rate-limit HTML)
+    # surfaces as a failure instead of an empty $version slipping through.
+    local -
+    set -o pipefail
 
     if command -v jq &>/dev/null; then
         version="$(retry curl -sfL "https://api.github.com/repos/$slug/releases/latest" 2>/dev/null \
             | jq -r '.tag_name // empty' 2>/dev/null \
-            | sed 's/^v//')"
+            | sed 's/^v//')" || version=""
     elif command -v python3 &>/dev/null; then
         version="$(retry curl -sfL "https://api.github.com/repos/$slug/releases/latest" 2>/dev/null \
             | python3 -c "import json,sys
 try:
     print(json.load(sys.stdin).get('tag_name','').lstrip('v'))
 except Exception:
-    pass" 2>/dev/null)"
+    pass" 2>/dev/null)" || version=""
     fi
 
-    # Fallback to the redirect parse when neither JSON parser is available
-    # or the API call returned nothing (rate limit, DNS hiccup, etc.).
     if [ -z "$version" ]; then
         version="$(retry curl -sfI "https://github.com/$slug/releases/latest" \
-            | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')"
+            | grep -i '^location:' | sed 's|.*/v\?\([^/[:space:]]*\).*|\1|')" || version=""
     fi
 
     if [ -z "$version" ]; then
         echo "  Warning: could not determine latest version for $slug" >&2
         return 1
     fi
-    _GH_LATEST_CACHE[$slug]="$version"
+    printf '%s\t%s\n' "$slug" "$version" >> "$_GH_LATEST_CACHE_FILE" 2>/dev/null || true
     printf '%s\n' "$version"
 }
 
