@@ -53,6 +53,21 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+      - name: Install ruff (pinned)
+        # Pin like shellcheck so a new ruff release doesn't fail
+        # previously-passing code without a code change.
+        env:
+          RUFF_VERSION: 0.8.4
+        run: |
+          set -eu -o pipefail
+          python3 -m pip install --quiet --user "ruff==${RUFF_VERSION}"
+          "$HOME/.local/bin/ruff" --version
+      - name: Lint Python
+        run: |
+          # Stick to ruff's default rule set (pyflakes + pycodestyle E)
+          # so we catch real bugs without arguing over style. chpc-allocs
+          # is the only Python file in the tree today.
+          "$HOME/.local/bin/ruff" check chpc-allocs.py
       - name: Regression tests
         run: bash test_regressions.sh
       - name: Safe smoke checks

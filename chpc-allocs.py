@@ -2727,9 +2727,22 @@ def predict_wait_times(
                     wait_secs, reason = result, ""
                 row.wait_by_request[request.label] = wait_secs
                 row.wait_check_reason_by_request[request.label] = reason
-            except Exception:
+            except Exception as exc:
+                # Surface a one-liner so silent "wait: None" rows are
+                # diagnosable; full traceback only under --verbose.
                 row.wait_by_request[request.label] = None
                 row.wait_check_reason_by_request[request.label] = NOTE_WAIT_CHECK_ERROR
+                if not quiet:
+                    label = getattr(request, "label", "?")
+                    qos = getattr(row, "qos", "?")
+                    print(
+                        f"[chpc-allocs] wait-check raised for {qos}/{label}: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    if verbose:
+                        import traceback
+                        traceback.print_exc(file=sys.stderr)
             completed += 1
             if use_rolling:
                 sys.stderr.write(
