@@ -55,12 +55,28 @@ jobs:
           shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
       - name: Install ruff (pinned)
         # Pin like shellcheck so a new ruff release doesn't fail
-        # previously-passing code without a code change.
+        # previously-passing code without a code change. Use the
+        # prebuilt binary from the GitHub release instead of pip:
+        # macOS runners ship a PEP 668 externally-managed Homebrew
+        # Python that refuses `pip install --user`.
         env:
           RUFF_VERSION: 0.8.4
         run: |
           set -eu -o pipefail
-          python3 -m pip install --quiet --user "ruff==${RUFF_VERSION}"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            arch="$(uname -m)"
+            case "$arch" in
+              arm64) target="aarch64-apple-darwin" ;;
+              x86_64) target="x86_64-apple-darwin" ;;
+              *) echo "Unsupported macOS arch: $arch" >&2; exit 1 ;;
+            esac
+          else
+            target="x86_64-unknown-linux-gnu"
+          fi
+          url="https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-${target}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sfL "$url" | tar xz -C /tmp
+          install -m 0755 "/tmp/ruff-${target}/ruff" "$HOME/.local/bin/ruff"
           "$HOME/.local/bin/ruff" --version
       - name: Lint Python
         run: |
