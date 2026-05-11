@@ -161,7 +161,7 @@ EOF
     chmod +x "$tmp/bin/silentool"
 
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
-        . <(sed -n '/^_server_configs_load_cached_init/,/^}\$/p' '$DIR/bashrc_exports')
+        . <(sed -n '/^_server_configs_load_cached_init() {\$/,/^}\$/p' '$DIR/bashrc_exports')
         _server_configs_load_cached_init silentool 'silentool init bash'
         _server_configs_load_cached_init silentool 'silentool init bash'
         _server_configs_load_cached_init silentool 'silentool init bash'
@@ -188,7 +188,7 @@ EOF
     chmod +x "$tmp/bin/initool"
 
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
-        . <(sed -n '/^_server_configs_load_cached_init/,/^}\$/p' '$DIR/bashrc_exports')
+        . <(sed -n '/^_server_configs_load_cached_init() {\$/,/^}\$/p' '$DIR/bashrc_exports')
         _server_configs_load_cached_init initool 'initool init bash'
         [ \"\${INITOOL_READY:-}\" = 1 ]
     " || fail "cached init fallback did not eval generated init output"
