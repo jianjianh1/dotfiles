@@ -14,7 +14,7 @@ _server_configs_load_cached_init() {
     local cache_dir="$HOME/.cache/server-configs"
     local cache_file="$cache_dir/${name}.bash"
     local header_prefix='# server-configs cached '
-    local first_word bin first_line=""
+    local first_word bin first_line="" init_output
 
     first_word="${cmd%% *}"
     bin="$(command -v "$first_word" 2>/dev/null)" || return 1
@@ -39,7 +39,7 @@ _server_configs_load_cached_init() {
             printf '[server-configs] cache %s not writable; falling back to inline init\n' \
                 "$cache_dir" >&2
         fi
-        eval "$cmd"
+        init_output="$(eval "$cmd")" && eval "$init_output"
         return
     fi
     if {
@@ -51,7 +51,7 @@ _server_configs_load_cached_init() {
         source "$cache_file"
     else
         command rm -f "$cache_file.tmp"
-        eval "$cmd"
+        init_output="$(eval "$cmd")" && eval "$init_output"
     fi
 }
 

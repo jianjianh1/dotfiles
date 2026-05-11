@@ -45,12 +45,12 @@ done < <(git diff --cached --name-only --diff-filter=ACM)
 key_filename_pattern='(^|/)(id_rsa|id_ed25519|id_ecdsa|id_dsa)([._-].*)?$|\.(pem|key|p12|pfx|keystore|jks|asc)$'
 
 # Tightened patterns. Anchors cut down on false positives:
-# - OpenAI: sk- prefix + optional proj-/None- subprefix + 32+ alnum chars
+# - OpenAI: sk- prefix + optional proj-/None- subprefix + 32+ base64url chars
 # - Anthropic: sk-ant-... at least 40 chars
 # - GitHub: ghp_/gho_ are exactly 36 alnum; github_pat_ is alnum + underscore
 # - AWS: AKIA + 16 uppercase alnum
 # - Private-key armor headers
-secret_pattern='AKIA[0-9A-Z]{16}|sk-(proj-|None-)?[A-Za-z0-9]{32,}|sk-ant-[A-Za-z0-9_-]{40,}|ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+secret_pattern='AKIA[0-9A-Z]{16}|sk-(proj-|None-)?[A-Za-z0-9_-]{32,}|sk-ant-[A-Za-z0-9_-]{40,}|ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
 
 is_text_blob() {
     # Use git's own attribute machinery first; fall back to `file --mime`.

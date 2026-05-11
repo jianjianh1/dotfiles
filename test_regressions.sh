@@ -170,6 +170,27 @@ EOF
         fail "cached init re-ran on empty output: expected 1 invocation, got $invocations"
 )
 
+test_cached_init_evals_output_when_cache_unwritable() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    mkdir -p "$tmp/bin" "$tmp/home/.cache"
+    printf 'blocks mkdir -p\n' > "$tmp/home/.cache/server-configs"
+    cat > "$tmp/bin/initool" <<'EOF'
+#!/usr/bin/env bash
+[ "$*" = "init bash" ] || exit 2
+printf '%s\n' 'export INITOOL_READY=1'
+EOF
+    chmod +x "$tmp/bin/initool"
+
+    HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
+        . <(sed -n '/^_server_configs_load_cached_init/,/^}\$/p' '$DIR/bashrc_exports')
+        _server_configs_load_cached_init initool 'initool init bash'
+        [ \"\${INITOOL_READY:-}\" = 1 ]
+    " || fail "cached init fallback did not eval generated init output"
+)
+
 test_backup_rotation_preserves_edited_bak() (
     local tmp src dst rotated
     tmp="$(mktemp -d)"
@@ -639,7 +660,16 @@ test_pre_commit_blocks_secrets() (
     git reset -q HEAD -- leaky.env
     rm -f leaky.env
 
-    # 2) key-shaped filename must be blocked even when content looks innocuous
+    # 2) OpenAI project keys use the URL-safe alphabet, including _ and -
+    printf 'OPENAI_API_KEY=%s%s\n' 'sk-proj-' 'abc_DEF-0123456789abc_DEF-0123456789' > leaky.env
+    git add leaky.env
+    if "$hook" >/dev/null 2>&1; then
+        fail "pre-commit should block OpenAI project token with _ and -"
+    fi
+    git reset -q HEAD -- leaky.env
+    rm -f leaky.env
+
+    # 3) key-shaped filename must be blocked even when content looks innocuous
     printf 'not actually a key\n' > server.pem
     git add server.pem
     if "$hook" >/dev/null 2>&1; then
@@ -648,7 +678,7 @@ test_pre_commit_blocks_secrets() (
     git reset -q HEAD -- server.pem
     rm -f server.pem
 
-    # 3) benign content with sk- prefix but only 8 chars must NOT be blocked
+    # 4) benign content with sk- prefix but only 8 chars must NOT be blocked
     printf 'see anchor sk-foo123\n' > notes.md
     git add notes.md
     if ! "$hook" >/dev/null 2>&1; then
@@ -657,23 +687,17 @@ test_pre_commit_blocks_secrets() (
 )
 
 test_chpc_allocs_self_test() (
-    # The script's runtime guard requires Python 3.7+. On CHPC nodes where
-    # /usr/bin/python3 is still 3.6, skip cleanly rather than tripping the
-    # guard (which is the intended behavior, not a regression).
-    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null; then
-        printf 'SKIP: test_chpc_allocs_self_test (python3 < 3.7)\n'
-        return 0
-    fi
     python3 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
         fail "chpc-allocs.py --self-test failed"
 )
 
-test_chpc_allocs_python_guard_present() (
-    # String-presence check only — sys.version_info is read-only at the
-    # Python level, so there's no way to behaviorally exercise the guard
-    # without a real 3.6 interpreter. Don't "fix" by removing the grep.
-    grep -q 'sys.version_info < (3, 7)' "$DIR/chpc-allocs.py" ||
-        fail "Python version guard removed from chpc-allocs.py"
+test_chpc_allocs_python36_compatible() (
+    if ! command -v python3.6 >/dev/null 2>&1; then
+        printf 'SKIP: test_chpc_allocs_python36_compatible (python3.6 not found)\n'
+        return 0
+    fi
+    python3.6 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
+        fail "chpc-allocs.py --self-test failed under python3.6"
 )
 
 run_test() {
@@ -693,6 +717,7 @@ main() {
     run_test test_remote_capture_strips_banner
     run_test test_gh_latest_cache_memoizes
     run_test test_cached_init_handles_empty_output
+    run_test test_cached_init_evals_output_when_cache_unwritable
     run_test test_manifest_controls_uninstall
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
@@ -707,7 +732,7 @@ main() {
     run_test test_pre_commit_no_staged_files
     run_test test_pre_commit_blocks_secrets
     run_test test_chpc_allocs_self_test
-    run_test test_chpc_allocs_python_guard_present
+    run_test test_chpc_allocs_python36_compatible
     echo "All regression tests passed."
 }
 
