@@ -160,8 +160,13 @@ exit 0
 EOF
     chmod +x "$tmp/bin/silentool"
 
+    # Extract just the function definition to a real file: sourcing via
+    # `<(sed ...)` is flaky on macOS's bash 3.2 (the FIFO interacts badly
+    # with `source`'s seek attempts), so use a temp file instead.
+    sed -n '/^_server_configs_load_cached_init() {$/,/^}$/p' "$DIR/bashrc_exports" > "$tmp/cached_init.bash"
+
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
-        . <(sed -n '/^_server_configs_load_cached_init() {\$/,/^}\$/p' '$DIR/bashrc_exports')
+        . '$tmp/cached_init.bash'
         _server_configs_load_cached_init silentool 'silentool init bash'
         _server_configs_load_cached_init silentool 'silentool init bash'
         _server_configs_load_cached_init silentool 'silentool init bash'
@@ -187,8 +192,10 @@ printf '%s\n' 'export INITOOL_READY=1'
 EOF
     chmod +x "$tmp/bin/initool"
 
+    sed -n '/^_server_configs_load_cached_init() {$/,/^}$/p' "$DIR/bashrc_exports" > "$tmp/cached_init.bash"
+
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
-        . <(sed -n '/^_server_configs_load_cached_init() {\$/,/^}\$/p' '$DIR/bashrc_exports')
+        . '$tmp/cached_init.bash'
         _server_configs_load_cached_init initool 'initool init bash'
         [ \"\${INITOOL_READY:-}\" = 1 ]
     " || fail "cached init fallback did not eval generated init output"
