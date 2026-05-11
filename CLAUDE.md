@@ -132,3 +132,4 @@ Detailed configuration tables live in [`docs/`](docs/):
 - [tmux](docs/tmux.md) · [Git](docs/git.md)
 - [SSH, Readline, Dircolors](docs/misc-configs.md)
 - [AI Tools (Claude & Codex)](docs/ai-tools.md)
+- [`chpc-allocs` (SLURM allocations & wait predictions)](docs/chpc-allocs.md)

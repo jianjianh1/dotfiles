@@ -2,6 +2,8 @@
 
 Sources: [`claude_settings.json`](../claude_settings.json), [`codex_config.toml`](../codex_config.toml), [`install_claude_plugins.sh`](../install_claude_plugins.sh)
 
+> **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The "Denied Patterns" table below documents a **recommended hardening pattern**, not what the shipped JSON contains (the shipped `permissions.deny` array is empty). Before deploying these configs to a shared host, copy that table's patterns into `permissions.deny` and consider flipping `defaultMode` to `default`.
+
 ---
 
 ## Claude Code (`claude_settings.json`)
@@ -62,9 +64,9 @@ Copied to `~/.claude/settings.json` by `setup.sh` (via `backup_and_copy`, not sy
 
 ### Permissions
 
-#### Denied Patterns
+#### Denied Patterns (recommended — NOT shipped)
 
-These paths are blocked from `Read` operations:
+The shipped `claude_settings.json` has `permissions.deny = []` to match the permissive default mode noted at the top of this doc. The table below is the **recommended deny-list to copy in** when hardening for a shared host:
 
 | Pattern | Protects |
 |---------|----------|
