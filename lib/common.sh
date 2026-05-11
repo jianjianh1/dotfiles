@@ -188,7 +188,13 @@ _rotate_backup() {
         rm -f "$bak"
         return 0
     fi
-    ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || printf '%s' "$$")"
+    # Prefer nanosecond granularity (GNU date) so back-to-back rotations
+    # within the same second don't all collide and produce `.bak.<ts>~~~`
+    # chains. BSD date doesn't support %N; fall back to second granularity.
+    ts="$(date +%Y%m%d-%H%M%S.%N 2>/dev/null || true)"
+    case "$ts" in
+        *N*|"") ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || printf '%s' "$$")" ;;
+    esac
     rotated="${bak}.${ts}"
     while [ -e "$rotated" ]; do rotated="${rotated}~"; done
     if mv -f "$bak" "$rotated"; then
