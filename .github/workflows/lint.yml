@@ -2,9 +2,25 @@ name: Lint
 
 on:
   push:
-    paths: ['*.sh', 'lib/*.sh', '.githooks/*', 'bashrc_exports', 'bashrc_aliases', '.github/workflows/lint.yml']
+    paths:
+      - '**/*.sh'
+      - 'chpc-allocs.py'
+      - 'test_regressions.sh'
+      - '.githooks/**'
+      - 'bashrc_*'
+      - 'vimrc'
+      - 'nvim/**'
+      - '.github/workflows/lint.yml'
   pull_request:
-    paths: ['*.sh', 'lib/*.sh', '.githooks/*', 'bashrc_exports', 'bashrc_aliases', '.github/workflows/lint.yml']
+    paths:
+      - '**/*.sh'
+      - 'chpc-allocs.py'
+      - 'test_regressions.sh'
+      - '.githooks/**'
+      - 'bashrc_*'
+      - 'vimrc'
+      - 'nvim/**'
+      - '.github/workflows/lint.yml'
 
 jobs:
   lint:
@@ -15,12 +31,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install ShellCheck on Ubuntu
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Install ShellCheck on macOS
-        if: runner.os == 'macOS'
-        run: brew install shellcheck
+      - name: Install ShellCheck (pinned)
+        # Pin to a specific upstream release so a new shellcheck version
+        # doesn't make previously-passing code start failing in CI.
+        env:
+          SHELLCHECK_VERSION: v0.10.0
+        run: |
+          set -eu -o pipefail
+          if [ "$(uname -s)" = "Darwin" ]; then
+            arch="$(uname -m)"; [ "$arch" = "arm64" ] && arch="aarch64"
+            url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.darwin.${arch}.tar.xz"
+          else
+            url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          fi
+          curl -sfL "$url" | tar xJ -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
       - name: Syntax check
         run: |
           bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
@@ -34,3 +60,4 @@ jobs:
           ./deploy.sh --help
           ./uninstall.sh --help
           HOME="$(mktemp -d)" ./setup.sh --dry-run
+          ./setup.sh --probe-modules || true  # fails off-CHPC; just exercise the wiring

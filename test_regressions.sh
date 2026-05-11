@@ -67,6 +67,109 @@ test_backup_helpers_fail_loudly() (
     fi
 )
 
+test_backup_rotation_idempotent_when_identical() (
+    # Byte-identical short-circuit branch: existing .bak == dst -> delete
+    # in place, no timestamped sibling created.
+    local tmp dst
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    dst="$tmp/dst"
+    printf 'identical content\n' > "$dst"
+    printf 'identical content\n' > "${dst}.bak"
+
+    _rotate_backup "$dst"
+
+    [ -e "${dst}.bak" ] && fail "_rotate_backup left .bak in place when it matched dst"
+    local extras
+    extras="$(find "$tmp" -maxdepth 1 -name 'dst.bak.*' 2>/dev/null)"
+    [ -z "$extras" ] || fail "_rotate_backup created a timestamped backup unnecessarily: $extras"
+)
+
+test_remote_capture_strips_banner() (
+    local begin='__DEPLOY_CAPTURE_TEST_BEGIN__' end='__DEPLOY_CAPTURE_TEST_END__'
+    _extract() {
+        awk -v begin="$begin" -v end="$end" '
+            $0 == begin { inside = 1; next }
+            $0 == end   { found_end = 1; inside = 0; next }
+            inside      { print }
+            END         { exit (found_end ? 0 : 2) }
+        ' <<<"$1"
+    }
+
+    local raw extracted rc=0
+    raw="$(printf 'Welcome to FakeOS\nLast login: yesterday\n%s\nabc123def\nextra line\n%s\nfooter banner\n' "$begin" "$end")"
+    extracted="$(_extract "$raw")" || rc=$?
+    [ "$rc" -eq 0 ] || fail "extractor signaled truncation on complete input"
+    [ "$extracted" = "abc123def
+extra line" ] || fail "extractor returned wrong content: [$extracted]"
+
+    raw="$(printf '%s\nabc\n' "$begin")"
+    rc=0
+    _extract "$raw" >/dev/null || rc=$?
+    [ "$rc" -ne 0 ] || fail "extractor should signal truncation when end marker missing"
+)
+
+test_gh_latest_cache_memoizes() (
+    local tmp curl_log
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    mkdir -p "$tmp/bin"
+    curl_log="$tmp/curl.log"
+    cat > "$tmp/bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$curl_log"
+case "\$*" in
+    *-sfL*api.github.com*) printf '{"tag_name":"v9.9.9"}\n' ;;
+    *-sfI*github.com*)     printf 'HTTP/2 302\r\nlocation: https://github.com/x/y/releases/tag/v9.9.9\r\n' ;;
+esac
+EOF
+    chmod +x "$tmp/bin/curl"
+
+    # Scope the cache file to $tmp so it gets cleaned up with the test;
+    # without this override gh_latest leaks /tmp/.gh-latest-cache.<pid>.
+    PATH="$tmp/bin:$PATH" _GH_LATEST_CACHE_FILE="$tmp/gh-cache" bash -c "
+        . '$DIR/setup.sh'
+        v1=\"\$(gh_latest fake/repo)\"
+        v2=\"\$(gh_latest fake/repo)\"
+        [ \"\$v1\" = '9.9.9' ] || { echo \"v1=\$v1\" >&2; exit 1; }
+        [ \"\$v2\" = '9.9.9' ] || { echo \"v2=\$v2\" >&2; exit 1; }
+    " || fail "gh_latest did not return the expected version"
+
+    local invocations
+    invocations="$(wc -l < "$curl_log" 2>/dev/null || echo 0)"
+    [ "$invocations" = 1 ] ||
+        fail "gh_latest cache miss: expected 1 curl invocation, got $invocations"
+)
+
+test_cached_init_handles_empty_output() (
+    local tmp run_log
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    mkdir -p "$tmp/bin"
+    run_log="$tmp/run.log"
+    cat > "$tmp/bin/silentool" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$run_log"
+exit 0
+EOF
+    chmod +x "$tmp/bin/silentool"
+
+    HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
+        . <(sed -n '/^_server_configs_load_cached_init/,/^}\$/p' '$DIR/bashrc_exports')
+        _server_configs_load_cached_init silentool 'silentool init bash'
+        _server_configs_load_cached_init silentool 'silentool init bash'
+        _server_configs_load_cached_init silentool 'silentool init bash'
+    " || fail "cached init helper returned non-zero"
+
+    local invocations
+    invocations="$(wc -l < "$run_log" 2>/dev/null || echo 0)"
+    [ "$invocations" = 1 ] ||
+        fail "cached init re-ran on empty output: expected 1 invocation, got $invocations"
+)
+
 test_backup_rotation_preserves_edited_bak() (
     local tmp src dst rotated
     tmp="$(mktemp -d)"
@@ -566,10 +669,9 @@ test_chpc_allocs_self_test() (
 )
 
 test_chpc_allocs_python_guard_present() (
-    # Smoke-check that the Python version guard at the top of
-    # chpc-allocs.py is intact. Regression catch for accidental removal
-    # during refactors — the guard is the only thing that turns
-    # 3.7+-only features into a readable error on older interpreters.
+    # String-presence check only — sys.version_info is read-only at the
+    # Python level, so there's no way to behaviorally exercise the guard
+    # without a real 3.6 interpreter. Don't "fix" by removing the grep.
     grep -q 'sys.version_info < (3, 7)' "$DIR/chpc-allocs.py" ||
         fail "Python version guard removed from chpc-allocs.py"
 )
@@ -587,6 +689,10 @@ main() {
     run_test test_portable_helpers
     run_test test_backup_helpers_fail_loudly
     run_test test_backup_rotation_preserves_edited_bak
+    run_test test_backup_rotation_idempotent_when_identical
+    run_test test_remote_capture_strips_banner
+    run_test test_gh_latest_cache_memoizes
+    run_test test_cached_init_handles_empty_output
     run_test test_manifest_controls_uninstall
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
