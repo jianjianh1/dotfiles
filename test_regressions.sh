@@ -159,6 +159,12 @@ printf '%s\n' "\$*" >> "$run_log"
 exit 0
 EOF
     chmod +x "$tmp/bin/silentool"
+    # Age the fake binary so the cache file is unambiguously newer
+    # under second-precision `[ -nt ]` (macOS /bin/bash is bash 3.2,
+    # which doesn't compare sub-second mtimes). Without this the
+    # freshness check fails and the function rewrites the cache every
+    # call, breaking the memoization assertion.
+    touch -t 197001020000 "$tmp/bin/silentool"
 
     # Extract just the function definition to a real file: sourcing via
     # `<(sed ...)` is flaky on macOS's bash 3.2 (the FIFO interacts badly
@@ -191,6 +197,7 @@ test_cached_init_evals_output_when_cache_unwritable() (
 printf '%s\n' 'export INITOOL_READY=1'
 EOF
     chmod +x "$tmp/bin/initool"
+    touch -t 197001020000 "$tmp/bin/initool"
 
     sed -n '/^_server_configs_load_cached_init() {$/,/^}$/p' "$DIR/bashrc_exports" > "$tmp/cached_init.bash"
 
