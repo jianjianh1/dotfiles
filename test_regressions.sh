@@ -138,7 +138,10 @@ EOF
     " || fail "gh_latest did not return the expected version"
 
     local invocations
-    invocations="$(wc -l < "$curl_log" 2>/dev/null || echo 0)"
+    # BSD wc on macOS right-pads its line count with spaces even when
+    # reading from stdin -- strip them so the equality check works on
+    # both runners.
+    invocations="$(wc -l < "$curl_log" 2>/dev/null | tr -d '[:space:]' || echo 0)"
     [ "$invocations" = 1 ] ||
         fail "gh_latest cache miss: expected 1 curl invocation, got $invocations"
 )
@@ -165,7 +168,7 @@ EOF
     " || fail "cached init helper returned non-zero"
 
     local invocations
-    invocations="$(wc -l < "$run_log" 2>/dev/null || echo 0)"
+    invocations="$(wc -l < "$run_log" 2>/dev/null | tr -d '[:space:]' || echo 0)"
     [ "$invocations" = 1 ] ||
         fail "cached init re-ran on empty output: expected 1 invocation, got $invocations"
 )
