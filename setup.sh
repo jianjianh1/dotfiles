@@ -306,7 +306,7 @@ probe_chpc_modules() {
         echo "Error: 'module' command unavailable. Run this on a CHPC login/compute node."
         return 1
     fi
-    local group candidates_var name candidates resolved out
+    local group candidates_var name resolved out
     local groups=(
         "Claude Code:CLAUDE_MODULE_CANDIDATES"
         "Codex:CODEX_MODULE_CANDIDATES"
@@ -323,7 +323,6 @@ probe_chpc_modules() {
         name="${group%%:*}"
         candidates_var="${group##*:}"
         local -n arr="$candidates_var"
-        candidates=("${arr[@]:-}")
         if [ "${#arr[@]}" -eq 0 ]; then
             printf '%-14s %-12s %s\n' "$name" "(none)" "no candidates configured"
             continue

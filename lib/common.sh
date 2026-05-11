@@ -182,7 +182,8 @@ manifest_add_path() {
 # the same state and can be safely overwritten). Protects against
 # destroying a backup the user has edited by hand between setup runs.
 _rotate_backup() {
-    local dst="$1" bak="${dst}.bak" rotated ts
+    local dst="$1"
+    local bak="${dst}.bak" rotated ts
     [ -e "$bak" ] || return 0
     if [ -f "$bak" ] && [ -f "$dst" ] && cmp -s "$bak" "$dst" 2>/dev/null; then
         rm -f "$bak"
