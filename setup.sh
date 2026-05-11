@@ -123,14 +123,18 @@ record_node_manifest() {
 }
 
 record_nvim_manifest() {
-    local opt_dir target target_bin
+    local opt_dir target target_bin expected
 
     target_bin="$HOME/.local/bin/nvim"
     opt_dir="$HOME/.local/opt/nvim"
 
     if [ -L "$target_bin" ]; then
         target="$(portable_realpath "$target_bin" 2>/dev/null || true)"
-        [ "$target" = "$opt_dir/bin/nvim" ] || return 0
+        # Resolve the expected path the same way so parent-dir symlinks
+        # (e.g. macOS /var -> /private/var inside mktemp roots) don't
+        # cause a spurious mismatch.
+        expected="$(portable_realpath "$opt_dir/bin/nvim" 2>/dev/null || printf '%s' "$opt_dir/bin/nvim")"
+        [ "$target" = "$expected" ] || return 0
         manifest_add_path "$target_bin"
         [ -d "$opt_dir" ] && manifest_add_path "$opt_dir"
     fi
