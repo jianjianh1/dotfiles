@@ -1298,7 +1298,7 @@ install_gh_tools() {
         run_step "btop" try_chpc_module_load btop "btop" BTOP_MODULE "${BTOP_MODULE_CANDIDATES[@]}"
     elif V="$(gh_latest aristocratos/btop)"; then
         run_step "btop" install_gh_binary btop \
-            "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tbz" btop
+            "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tar.gz" btop
     else FAILURES+=("btop"); fi
 
     if V="$(gh_latest starship/starship)"; then
