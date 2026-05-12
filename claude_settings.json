@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '\\a' > /dev/tty"
+            "command": "if [ -w /dev/tty ]; then printf '\\a' > /dev/tty; fi"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '\\a' > /dev/tty"
+            "command": "if [ -w /dev/tty ]; then printf '\\a' > /dev/tty; fi"
           }
         ]
       }
