@@ -90,10 +90,27 @@ FAILURES=()
 # so existing call-sites read naturally.
 install_plugin() { run_step "$@"; }
 
+# `claude plugin enable` exits 1 with "already enabled" on re-runs.
+# Treat that one case as success so idempotent runs stay clean.
+enable_plugin_idempotent() {
+    local spec="$1"
+    local out
+    if out="$(claude_plugin_cmd enable "$spec" 2>&1)"; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    if printf '%s' "$out" | grep -qi "already enabled"; then
+        echo "Plugin \"$spec\" already enabled — skipping"
+        return 0
+    fi
+    printf '%s\n' "$out" >&2
+    return 1
+}
+
 install_and_enable_plugin() {
     local plugin="$1" market="${2:-claude-plugins-official}"
     install_plugin "$plugin" claude_plugin_cmd install "$plugin@$market"
-    install_plugin "$plugin-enable" claude_plugin_cmd enable "$plugin@$market"
+    install_plugin "$plugin-enable" enable_plugin_idempotent "$plugin@$market"
 }
 
 cleanup_stale_codex_plugin_state() {
