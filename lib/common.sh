@@ -249,3 +249,80 @@ backup_and_copy() {
     cp -f "$src" "$dst" || return 1
     echo "  Copied $src -> $dst"
 }
+
+# ----- Interactive (TUI) helpers ---------------------------------------------
+#
+# All helpers degrade to plain `read -rp` prompts when gum is unavailable,
+# NO_TUI=1 is set, or stdout is not a tty. AUTO_YES=true short-circuits
+# tui_confirm to "yes" and is otherwise the caller's responsibility.
+
+if [ -n "${NO_COLOR:-}" ]; then
+    export GUM_INPUT_PROMPT_FOREGROUND="" GUM_INPUT_CURSOR_FOREGROUND=""
+    export GUM_CHOOSE_CURSOR_FOREGROUND="" GUM_CHOOSE_SELECTED_FOREGROUND=""
+    export GUM_CHOOSE_HEADER_FOREGROUND=""
+    export GUM_CONFIRM_PROMPT_FOREGROUND="" GUM_CONFIRM_SELECTED_FOREGROUND=""
+fi
+
+tui_available() {
+    [ "${NO_TUI:-0}" != 1 ] && [ -t 1 ] && command -v gum >/dev/null 2>&1
+}
+
+# tui_input PROMPT [DEFAULT] [PLACEHOLDER] — writes the value to stdout.
+tui_input() {
+    local prompt="$1" default="${2:-}" placeholder="${3:-}"
+    if tui_available; then
+        gum input --prompt "$prompt: " --value "$default" --placeholder "$placeholder"
+    else
+        local hint="" answer
+        [ -n "$default" ] && hint=" [$default]"
+        read -rp "$prompt$hint: " answer
+        printf "%s" "${answer:-$default}"
+    fi
+}
+
+# tui_choose HEADER OPT1 OPT2 ... — writes the chosen option to stdout.
+tui_choose() {
+    local header="$1"; shift
+    if tui_available; then
+        gum choose --header "$header" "$@"
+    else
+        local i=1 opt answer
+        printf "%s\n" "$header" >&2
+        for opt in "$@"; do printf "  %d) %s\n" "$i" "$opt" >&2; i=$((i+1)); done
+        read -rp "  [1-$#]: " answer
+        if [[ "$answer" =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le $# ]; then
+            printf "%s" "${!answer}"
+        fi
+    fi
+}
+
+# tui_multi HEADER PRESELECTED_CSV OPT1 OPT2 ... — newline-separated picks to
+# stdout. Returns 127 when gum is unavailable so the caller can fall back to
+# its own multi-toggle UI (multi-select is too fiddly to fake with read).
+tui_multi() {
+    local header="$1" preselected="$2"; shift 2
+    if tui_available; then
+        gum choose --no-limit --header "$header" --selected "$preselected" "$@"
+    else
+        return 127
+    fi
+}
+
+# tui_confirm PROMPT [yes|no] — exit 0 = yes. Respects AUTO_YES=true.
+tui_confirm() {
+    local prompt="$1" default="${2:-yes}"
+    if [ "${AUTO_YES:-false}" = true ]; then return 0; fi
+    if tui_available; then
+        if [ "$default" = "no" ]; then
+            gum confirm --default=false "$prompt"
+        else
+            gum confirm "$prompt"
+        fi
+    else
+        local hint answer
+        [ "$default" = "yes" ] && hint="[Y/n]" || hint="[y/N]"
+        read -rp "  $prompt $hint: " answer
+        answer="${answer:-${default:0:1}}"
+        [[ "$answer" =~ ^[Yy] ]]
+    fi
+}

@@ -815,6 +815,46 @@ install_glow() {
     echo "  glow $GLOW_VERSION installed to $BIN_DIR/glow"
 }
 
+install_gum() {
+    if is_macos; then
+        brew_install gum gum
+        return $?
+    fi
+    if command -v gum &>/dev/null && ! $FORCE; then
+        record_command_if_managed gum || true
+        echo "gum already installed: $(gum --version)"
+        return 0
+    fi
+    echo "Installing gum..."
+    local GUM_VERSION
+    GUM_VERSION="$(gh_latest charmbracelet/gum)" || return 1
+    local ARCH GUM_ARCH
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  GUM_ARCH="x86_64" ;;
+        aarch64) GUM_ARCH="arm64"  ;;
+        *)       echo "  Skipping gum (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    # Default BIN_DIR so deploy.sh can source this file and call install_gum
+    # without going through setup_main (where BIN_DIR is normally chosen).
+    local dest_dir="${BIN_DIR:-$HOME/.local/bin}"
+    mkdir -p "$dest_dir" || return 1
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${GUM_ARCH}.tar.gz"; then
+        echo "  Warning: failed to download gum"
+        return 1
+    fi
+    tar xz -C "$TMP" --strip-components=1 -f "$TMP/archive.tar.gz"
+    if ! install_to "$TMP/gum" "$dest_dir/gum"; then
+        echo "  Warning: failed to install gum to $dest_dir/gum"
+        return 1
+    fi
+    manifest_add_path "$dest_dir/gum"
+    echo "  gum $GUM_VERSION installed to $dest_dir/gum"
+}
+
 install_jq() {
     if is_macos; then
         brew_install jq jq
@@ -1565,6 +1605,7 @@ setup_main() {
     run_step "gh"           install_gh_cli
     run_step "jq"           install_jq
     run_step "glow"         install_glow
+    run_step "gum"          install_gum
     run_step "node"         install_node
     run_step "uv"           install_uv
     install_gh_tools

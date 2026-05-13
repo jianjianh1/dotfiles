@@ -62,16 +62,6 @@ warn()    { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 error()   { printf "  ${RED}✗${RESET} %s\n" "$*"; }
 section() { printf "\n${BOLD}--- %s ---${RESET}\n" "$*"; }
 
-confirm() {
-    if [ "$AUTO_YES" = true ]; then return 0; fi
-    local prompt="$1" default="${2:-n}"
-    local hint
-    if [ "$default" = "y" ]; then hint="[Y/n]"; else hint="[y/N]"; fi
-    read -rp "  $prompt $hint: " answer
-    answer="${answer:-$default}"
-    [[ "$answer" =~ ^[Yy] ]]
-}
-
 # --- Error tracking ---
 FAILURES=()
 
@@ -433,8 +423,25 @@ trap cleanup EXIT
 
 printf "\n${BOLD}=== Remote Server Deploy ===${RESET}\n\n"
 
+# Offer to install gum (the TUI front-end) when missing and the session is
+# interactive; declining falls back to the same read -rp flow used today.
+if [ "$AUTO_YES" = false ] && [ -t 1 ] && [ "${NO_TUI:-0}" != 1 ] && ! command -v gum >/dev/null 2>&1; then
+    info "Install 'gum' for nicer interactive prompts?"
+    echo "  (charmbracelet/gum is a small static Go binary; falls back gracefully if you skip.)"
+    if tui_confirm "Install gum now?" "yes"; then
+        # shellcheck source=setup.sh disable=SC1091
+        if ( . "$DIR/setup.sh" && install_gum ); then
+            case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+            hash -r
+        else
+            warn "gum install failed; continuing with text prompts"
+        fi
+    fi
+    echo ""
+fi
+
 # --- Host ---
-read -rp "Remote host (user@hostname or SSH config alias): " REMOTE_HOST
+REMOTE_HOST="$(tui_input "Remote host" "" "user@hostname or SSH config alias")"
 if [ -z "$REMOTE_HOST" ]; then
     echo "Error: host is required"; exit 1
 fi
@@ -443,56 +450,55 @@ if [[ "$REMOTE_HOST" =~ [[:space:]] ]]; then
 fi
 
 # --- Auth method ---
+AUTH_LABELS=(
+    "Password (fresh server, no key yet)"
+    "SSH key (already authorized)"
+    "SSH key at custom path"
+    "Password + 2FA/DUO (university/HPC systems)"
+    "SSH config alias (Host entry in ~/.ssh/config)"
+)
 echo ""
-info "How do you connect to this server?"
-echo "  1) Password (fresh server, no key yet)"
-echo "  2) SSH key (already authorized)"
-echo "  3) SSH key at custom path"
-echo "  4) Password + 2FA/DUO (university/HPC systems)"
-echo "  5) SSH config alias (Host entry in ~/.ssh/config)"
-echo ""
-read -rp "Auth method [1-5, default=2]: " AUTH_METHOD
-AUTH_METHOD="${AUTH_METHOD:-2}"
-# Normalize text input to number (case-insensitive)
-case "$(to_lower "$AUTH_METHOD")" in
-    password)       AUTH_METHOD=1 ;;
-    key|ssh)        AUTH_METHOD=2 ;;
-    custom)         AUTH_METHOD=3 ;;
-    2fa|duo|mfa)    AUTH_METHOD=4 ;;
-    alias|config)   AUTH_METHOD=5 ;;
-esac
+AUTH_CHOICE="$(tui_choose "How do you connect to this server?" "${AUTH_LABELS[@]}")"
+AUTH_METHOD=""
+for i in "${!AUTH_LABELS[@]}"; do
+    if [ "${AUTH_LABELS[$i]}" = "$AUTH_CHOICE" ]; then
+        AUTH_METHOD=$((i + 1)); break
+    fi
+done
+if [ -z "$AUTH_METHOD" ]; then
+    echo "Error: no auth method selected"; exit 1
+fi
 
 SSH_PORT="22"
 IDENTITY_FILE=""
 CONNECT_TIMEOUT=15
 
+# Method 3 (custom key) needs the key path before the port; method 5 (SSH
+# config alias) skips the port prompt entirely and uses the alias as-is.
+if [ "$AUTH_METHOD" = 3 ]; then
+    # shellcheck disable=SC2088 # Placeholder text, not a path to expand.
+    IDENTITY_FILE="$(tui_input "Path to SSH key" "" "~/.ssh/id_ed25519")"
+    # Tilde-expand a leading ~ since gum/read both pass it through literally.
+    # shellcheck disable=SC2088 # Literal pattern match on a leading "~/".
+    case "$IDENTITY_FILE" in "~/"*) IDENTITY_FILE="$HOME/${IDENTITY_FILE#~/}" ;; esac
+    if [ ! -f "$IDENTITY_FILE" ]; then
+        echo "Error: key file not found: $IDENTITY_FILE"; exit 1
+    fi
+fi
+if [ "$AUTH_METHOD" != 5 ]; then
+    SSH_PORT="$(tui_input "SSH port" "22")"
+fi
+
 case "$AUTH_METHOD" in
-    1)
-        # Password auth
-        read -rp "SSH port [22]: " SSH_PORT
-        SSH_PORT="${SSH_PORT:-22}"
-        SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT")
-        ;;
-    2)
-        # Default key auth
-        read -rp "SSH port [22]: " SSH_PORT
-        SSH_PORT="${SSH_PORT:-22}"
+    1|2)
         SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT")
         ;;
     3)
-        # Custom key path
-        read -rp "Path to SSH key: " IDENTITY_FILE
-        if [ ! -f "$IDENTITY_FILE" ]; then
-            echo "Error: key file not found: $IDENTITY_FILE"; exit 1
-        fi
-        read -rp "SSH port [22]: " SSH_PORT
-        SSH_PORT="${SSH_PORT:-22}"
         SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o Port="$SSH_PORT" -i "$IDENTITY_FILE")
         ;;
     4)
-        # Password + 2FA/DUO — keyboard-interactive, longer timeout
-        read -rp "SSH port [22]: " SSH_PORT
-        SSH_PORT="${SSH_PORT:-22}"
+        # Keyboard-interactive auth (password + 2FA push) needs a longer
+        # window for the user to approve the DUO prompt on their phone.
         CONNECT_TIMEOUT=90
         SSH_OPTS=(-o ConnectTimeout="$CONNECT_TIMEOUT" -o "PreferredAuthentications=keyboard-interactive,password" -o NumberOfPasswordPrompts=3 -o Port="$SSH_PORT")
         echo ""
@@ -500,7 +506,6 @@ case "$AUTH_METHOD" in
         echo "    Approve the push when prompted. Timeout: ${CONNECT_TIMEOUT}s."
         ;;
     5)
-        # SSH config alias — let SSH config handle everything
         SSH_OPTS=(-o ConnectTimeout=30)
         ;;
     *)
@@ -510,7 +515,10 @@ esac
 
 # --- Jump host ---
 echo ""
-read -rp "Connect through a jump/bastion host? [N/user@host]: " JUMP_HOST
+JUMP_HOST=""
+if tui_confirm "Use a jump/bastion host?" "no"; then
+    JUMP_HOST="$(tui_input "Jump host" "" "user@bastion")"
+fi
 if [ -n "$JUMP_HOST" ]; then
     SSH_OPTS+=(-J "$JUMP_HOST")
 fi
@@ -676,61 +684,103 @@ if [ "$AUTO_YES" = false ]; then
     info "What would you like to deploy?"
     echo ""
 
-    display_menu() {
+    # Prefer the gum picker when available; on non-zero gum exit (cancel /
+    # Ctrl-C) fall through to the legacy text menu so there's still a path
+    # to confirm or change the default selection.
+    picked_via_tui=0
+    if tui_available; then
+        available_steps=()
+        preselected_csv=""
+        unavailable_steps=()
         for i in "${!STEPS[@]}"; do
-            local marker avail_note=""
-            if [ "${STEPS_AVAILABLE[$i]}" = "no" ]; then
-                marker=" "
-                avail_note=" ${DIM}(not available)${RESET}"
-            elif [ "${STEPS_SELECTED[$i]}" = "on" ]; then
-                marker="x"
+            if [ "${STEPS_AVAILABLE[$i]}" = "yes" ]; then
+                available_steps+=("${STEPS[$i]}")
+                if [ "${STEPS_SELECTED[$i]}" = "on" ]; then
+                    [ -n "$preselected_csv" ] && preselected_csv+=","
+                    preselected_csv+="${STEPS[$i]}"
+                fi
             else
-                marker=" "
+                unavailable_steps+=("${STEPS[$i]}")
             fi
-            printf "  [%s] %d) %s%b\n" "$marker" "$((i+1))" "${STEPS[$i]}" "$avail_note"
         done
-    }
 
-    display_menu
-    echo ""
-    echo "  Enter numbers to toggle, 'a' for all, 'n' for none, or Enter to confirm:"
-
-    while true; do
-        read -rp "  > " selection
-        if [ -z "$selection" ]; then
-            break
-        fi
-        case "$(to_lower "$selection")" in
-            a|all)
-                for i in "${!STEPS[@]}"; do
-                    [ "${STEPS_AVAILABLE[$i]}" = "yes" ] && STEPS_SELECTED[$i]="on"
-                done
-                ;;
-            n|none)
-                for i in "${!STEPS[@]}"; do
-                    STEPS_SELECTED[$i]="off"
-                done
-                ;;
-            *)
-                for num in $selection; do
-                    if [[ "$num" =~ ^[0-9]+$ ]]; then
-                        idx=$((num - 1))
-                        if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#STEPS[@]} ] && [ "${STEPS_AVAILABLE[$idx]}" = "yes" ]; then
-                            if [ "${STEPS_SELECTED[$idx]}" = "on" ]; then
-                                STEPS_SELECTED[$idx]="off"
-                            else
-                                STEPS_SELECTED[$idx]="on"
-                            fi
+        if [ ${#available_steps[@]} -gt 0 ]; then
+            if [ ${#unavailable_steps[@]} -gt 0 ]; then
+                printf "  ${DIM}(skipping unavailable: %s)${RESET}\n" "$(IFS='|'; tmp="${unavailable_steps[*]}"; echo "${tmp//|/, }")"
+                echo ""
+            fi
+            if tui_result="$(tui_multi "Space toggles, Enter confirms" "$preselected_csv" "${available_steps[@]}")"; then
+                picked_via_tui=1
+                for i in "${!STEPS[@]}"; do STEPS_SELECTED[$i]="off"; done
+                while IFS= read -r picked; do
+                    [ -n "$picked" ] || continue
+                    for i in "${!STEPS[@]}"; do
+                        if [ "${STEPS[$i]}" = "$picked" ]; then
+                            STEPS_SELECTED[$i]="on"; break
                         fi
-                    fi
-                done
-                ;;
-        esac
-        echo ""
+                    done
+                done <<< "$tui_result"
+            fi
+        fi
+    fi
+
+    if [ "$picked_via_tui" = 0 ]; then
+        display_menu() {
+            for i in "${!STEPS[@]}"; do
+                local marker avail_note=""
+                if [ "${STEPS_AVAILABLE[$i]}" = "no" ]; then
+                    marker=" "
+                    avail_note=" ${DIM}(not available)${RESET}"
+                elif [ "${STEPS_SELECTED[$i]}" = "on" ]; then
+                    marker="x"
+                else
+                    marker=" "
+                fi
+                printf "  [%s] %d) %s%b\n" "$marker" "$((i+1))" "${STEPS[$i]}" "$avail_note"
+            done
+        }
+
         display_menu
         echo ""
-        echo "  Enter numbers to toggle, or Enter to confirm:"
-    done
+        echo "  Enter numbers to toggle, 'a' for all, 'n' for none, or Enter to confirm:"
+
+        while true; do
+            read -rp "  > " selection
+            if [ -z "$selection" ]; then
+                break
+            fi
+            case "$(to_lower "$selection")" in
+                a|all)
+                    for i in "${!STEPS[@]}"; do
+                        [ "${STEPS_AVAILABLE[$i]}" = "yes" ] && STEPS_SELECTED[$i]="on"
+                    done
+                    ;;
+                n|none)
+                    for i in "${!STEPS[@]}"; do
+                        STEPS_SELECTED[$i]="off"
+                    done
+                    ;;
+                *)
+                    for num in $selection; do
+                        if [[ "$num" =~ ^[0-9]+$ ]]; then
+                            idx=$((num - 1))
+                            if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#STEPS[@]} ] && [ "${STEPS_AVAILABLE[$idx]}" = "yes" ]; then
+                                if [ "${STEPS_SELECTED[$idx]}" = "on" ]; then
+                                    STEPS_SELECTED[$idx]="off"
+                                else
+                                    STEPS_SELECTED[$idx]="on"
+                                fi
+                            fi
+                        fi
+                    done
+                    ;;
+            esac
+            echo ""
+            display_menu
+            echo ""
+            echo "  Enter numbers to toggle, or Enter to confirm:"
+        done
+    fi
 fi
 
 # ============================================================
@@ -798,7 +848,7 @@ if [ "$auth_transfer_count" -eq 0 ]; then
 fi
 echo ""
 
-if ! confirm "Proceed?" "y"; then
+if ! tui_confirm "Proceed?" "yes"; then
     echo "Aborted."; exit 0
 fi
 
@@ -1033,7 +1083,7 @@ step_clone_setup() {
         local FALLBACK_REPO_URL="https://github.com/jianjianh1/server-configs.git"
         warn "Could not read 'origin' remote from $DIR"
         echo "    Default: $FALLBACK_REPO_URL"
-        if ! confirm "Use the default repo URL above?" "n"; then
+        if ! tui_confirm "Use the default repo URL above?" "no"; then
             error "Aborted. Re-run from inside the intended git clone, or set 'origin' first."
             return 1
         fi
