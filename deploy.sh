@@ -198,6 +198,11 @@ copy_local_file_to_remote() {
         fi
     fi
 
+    # Capture the remote leg's stdout+stderr so we can replay it on failure.
+    # Without this, callers only see a vague "Failed to copy …" and the
+    # actual cause (perm denied, mktemp failure, etc.) is silently dropped.
+    local remote_log rc=0
+    remote_log="$(mktemp "${TMPDIR:-/tmp}/deploy.copy.$$.XXXXXX")"
     base64 < "$local_path" | remote_exec "
         set -eu
         umask 077
@@ -222,7 +227,13 @@ copy_local_file_to_remote() {
         [ \$status -eq 0 ] || cleanup_tmp
         trap - EXIT HUP INT TERM
         exit \$status
-    "
+    " >"$remote_log" 2>&1 || rc=$?
+
+    if [ "$rc" -ne 0 ] && [ -s "$remote_log" ]; then
+        sed 's/^/    [remote] /' "$remote_log" >&2
+    fi
+    rm -f "$remote_log"
+    return "$rc"
 }
 
 ensure_remote_env_keys_loader() {
@@ -280,7 +291,7 @@ SSH_SOCKET_DIR=""
 REMOTE_HOST=""
 
 remote_exec() {
-    if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null; then
+    if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" </dev/null &>/dev/null; then
         error "SSH connection dropped. Try re-running the script."
         return 1
     fi
@@ -295,7 +306,7 @@ remote_exec() {
 # markers; we extract the lines between them locally. Banner noise printed by
 # the outer login shell ends up outside the markers and is stripped.
 remote_capture() {
-    if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null; then
+    if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" </dev/null &>/dev/null; then
         error "SSH connection dropped. Try re-running the script."
         return 1
     fi
