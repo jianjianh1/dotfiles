@@ -32,7 +32,6 @@ tui_window_supported() {
 tui_window_enter() {
     tui_window_supported || return 1
     tput smcup 2>/dev/null || return 1
-    tput civis 2>/dev/null || true
     clear
     TUI_WINDOW_ACTIVE=1
 }
@@ -128,6 +127,9 @@ tui_spin_start() {
     [ "$TUI_WINDOW_ACTIVE" = 1 ] || return 0
     local row="$1"
     tui_spin_stop
+    # Hide the terminal cursor while the spinner is animating so it doesn't
+    # jump around alongside the spinner frame. tui_spin_stop restores it.
+    tput civis 2>/dev/null || true
     (
         local n=${#TUI_SPIN_FRAMES[@]} i=0
         while :; do
@@ -146,6 +148,7 @@ tui_spin_stop() {
     kill "$TUI_SPIN_PID" 2>/dev/null || true
     wait "$TUI_SPIN_PID" 2>/dev/null || true
     TUI_SPIN_PID=""
+    tput cnorm 2>/dev/null || true
 }
 
 # tui_status_run INDEX NAME CMD [ARGS...] — animate the row for INDEX while
