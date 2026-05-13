@@ -24,7 +24,7 @@ run_step() {
         FAILURES+=("$name")
         if [ "${AUTO_YES:-false}" != true ] && [ -t 0 ]; then
             local answer
-            read -rp "  Step '$name' failed. Continue? [Y/n]: " answer
+            read -rep "  Step '$name' failed. Continue? [Y/n]: " answer
             case "${answer:-y}" in
                 [Nn]*) exit 1 ;;
             esac
@@ -275,7 +275,7 @@ tui_input() {
     else
         local hint="" answer
         [ -n "$default" ] && hint=" [$default]"
-        read -rp "$prompt$hint: " answer
+        read -rep "$prompt$hint: " answer
         printf "%s" "${answer:-$default}"
     fi
 }
@@ -289,7 +289,7 @@ tui_choose() {
         local i=1 opt answer
         printf "%s\n" "$header" >&2
         for opt in "$@"; do printf "  %d) %s\n" "$i" "$opt" >&2; i=$((i+1)); done
-        read -rp "  [1-$#]: " answer
+        read -rep "  [1-$#]: " answer
         if [[ "$answer" =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le $# ]; then
             printf "%s" "${!answer}"
         fi
@@ -321,8 +321,11 @@ tui_confirm() {
     else
         local hint answer
         [ "$default" = "yes" ] && hint="[Y/n]" || hint="[y/N]"
-        read -rp "  $prompt $hint: " answer
+        read -rep "  $prompt $hint: " answer
         answer="${answer:-${default:0:1}}"
         [[ "$answer" =~ ^[Yy] ]]
     fi
 }
+
+# shellcheck source=tui.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/tui.sh"
