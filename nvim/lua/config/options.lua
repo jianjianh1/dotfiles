@@ -83,5 +83,5 @@ opt.foldminlines = 2
 -- Completion
 opt.completeopt = "menu,menuone,noselect"
 
--- Background
-opt.background = "dark"
+-- Background — follow SERVER_CONFIGS_THEME exported by bashrc_exports.
+opt.background = (vim.env.SERVER_CONFIGS_THEME == "light") and "light" or "dark"

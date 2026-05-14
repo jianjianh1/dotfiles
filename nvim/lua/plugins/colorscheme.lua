@@ -1,23 +1,20 @@
+local style = (vim.env.SERVER_CONFIGS_THEME == "light") and "day" or "storm"
+
 return {
     "folke/tokyonight.nvim",
     lazy = false,
     priority = 1000,
     opts = {
-        style = "storm",
+        style = style,
         transparent = false,
         styles = {
             comments = { italic = true },
             keywords = { italic = false },
             functions = { bold = true },
         },
-        on_colors = function(colors)
-            -- Nudge toward the vimrc's Oceanic Next palette
-            colors.bg = "#1b2b34"
-            colors.bg_dark = "#162028"
-        end,
     },
     config = function(_, opts)
         require("tokyonight").setup(opts)
-        vim.cmd.colorscheme("tokyonight-storm")
+        vim.cmd.colorscheme("tokyonight-" .. style)
     end,
 }

@@ -1500,8 +1500,10 @@ link_core_configs() {
     backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig" || return 1
     backup_and_link "$DIR/inputrc" "$HOME/.inputrc" || return 1
     backup_and_link "$DIR/dircolors" "$HOME/.dircolors" || return 1
+    backup_and_link "$DIR/dircolors.light" "$HOME/.dircolors.light" || return 1
     backup_and_link "$DIR/sshconfig" "$HOME/.ssh/config" || return 1
     backup_and_link "$DIR/starship.toml" "$HOME/.config/starship.toml" || return 1
+    backup_and_link "$DIR/starship-light.toml" "$HOME/.config/starship-light.toml" || return 1
     # XDG-compliant tmux path (tmux 3.2+ reads this natively)
     mkdir -p "$HOME/.config/tmux" 2>/dev/null || true
     backup_and_link "$DIR/tmux.conf" "$HOME/.config/tmux/tmux.conf" || return 1

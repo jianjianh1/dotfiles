@@ -703,6 +703,39 @@ test_pre_commit_blocks_secrets() (
     fi
 )
 
+test_theme_detection() (
+    # Extract the detect function from bashrc_exports so we can exercise
+    # it without the rest of the file's side effects (starship init,
+    # dircolors eval, etc).
+    local fn
+    fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
+    [ -n "$fn" ] || fail "could not extract _server_configs_detect_theme from bashrc_exports"
+
+    local out
+    # Set TMUX so the OSC 11 probe is skipped — we don't want the test
+    # writing to the controlling terminal of whoever runs the suite.
+
+    # Pre-set override wins over every fallback.
+    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake SERVER_CONFIGS_THEME=light \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "pre-set override not honoured: got '$out'"
+
+    # COLORFGBG dark bg → dark.
+    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake COLORFGBG='15;0' \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "dark" ] || fail "COLORFGBG=15;0 should resolve dark: got '$out'"
+
+    # COLORFGBG light bg → light.
+    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake COLORFGBG='0;15' \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "COLORFGBG=0;15 should resolve light: got '$out'"
+
+    # No tty, no COLORFGBG, non-darwin → falls through to dark.
+    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake OSTYPE=linux-gnu \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "dark" ] || fail "fallback should be dark: got '$out'"
+)
+
 test_chpc_allocs_self_test() (
     python3 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
         fail "chpc-allocs.py --self-test failed"
@@ -748,6 +781,7 @@ main() {
     run_test test_nvim_install_selects_legacy_and_arm_assets
     run_test test_pre_commit_no_staged_files
     run_test test_pre_commit_blocks_secrets
+    run_test test_theme_detection
     run_test test_chpc_allocs_self_test
     run_test test_chpc_allocs_python36_compatible
     echo "All regression tests passed."
