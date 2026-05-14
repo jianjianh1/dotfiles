@@ -1054,18 +1054,21 @@ step_clone_setup() {
 
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."
-        # Refuse to clobber local changes on the remote. A dirty working
-        # tree usually means someone edited a config in place; surface it
-        # instead of silently merging or losing work.
-        if ! remote_exec "cd $REMOTE_DIR && [ -z \"\$(git status --porcelain)\" ]"; then
-            error "Remote $REMOTE_DIR has uncommitted changes"
-            echo "    SSH in and resolve them (commit, stash, or revert), then re-run."
-            return 1
+        # If the remote working tree is dirty, list what's dirty so the user
+        # can recognise it later (git stash list won't show the file names)
+        # and let `git pull --autostash` stash, fast-forward, and pop. Any
+        # conflict on pop leaves the changes in `git stash list` for the
+        # user to recover with `git stash pop` after SSHing in.
+        local dirty
+        dirty="$(remote_exec "cd $REMOTE_DIR && git status --porcelain" 2>/dev/null || true)"
+        if [ -n "$dirty" ]; then
+            warn "Remote $REMOTE_DIR has local changes — stashing for the pull:"
+            printf "%s\n" "$dirty" | sed 's/^/    /'
         fi
-        # --ff-only avoids accidental merge commits when remote/local diverge.
-        if ! remote_exec "cd $REMOTE_DIR && git pull --ff-only"; then
-            error "git pull --ff-only failed on $REMOTE_DIR"
-            echo "    The remote branch has diverged. Reconcile manually on the remote."
+        if ! remote_exec "cd $REMOTE_DIR && git pull --autostash --ff-only"; then
+            error "git pull --autostash --ff-only failed on $REMOTE_DIR"
+            echo "    The remote branch likely diverged. SSH in and reconcile,"
+            echo "    then re-run. Any auto-stashed changes are in 'git stash list'."
             return 1
         fi
     else
