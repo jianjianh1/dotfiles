@@ -704,102 +704,40 @@ if [ "$AUTO_YES" = false ]; then
     info "What would you like to deploy?"
     echo ""
 
-    # Prefer the gum picker when available; on non-zero gum exit (cancel /
-    # Ctrl-C) fall through to the legacy text menu so there's still a path
-    # to confirm or change the default selection.
-    picked_via_tui=0
-    if tui_available; then
-        available_steps=()
-        preselected_csv=""
-        unavailable_steps=()
-        for i in "${!STEPS[@]}"; do
-            if [ "${STEPS_AVAILABLE[$i]}" = "yes" ]; then
-                available_steps+=("${STEPS[$i]}")
-                if [ "${STEPS_SELECTED[$i]}" = "on" ]; then
-                    [ -n "$preselected_csv" ] && preselected_csv+=","
-                    preselected_csv+="${STEPS[$i]}"
-                fi
-            else
-                unavailable_steps+=("${STEPS[$i]}")
+    available_steps=()
+    preselected_csv=""
+    unavailable_steps=()
+    for i in "${!STEPS[@]}"; do
+        if [ "${STEPS_AVAILABLE[$i]}" = "yes" ]; then
+            available_steps+=("${STEPS[$i]}")
+            if [ "${STEPS_SELECTED[$i]}" = "on" ]; then
+                [ -n "$preselected_csv" ] && preselected_csv+=","
+                preselected_csv+="${STEPS[$i]}"
             fi
-        done
-
-        if [ ${#available_steps[@]} -gt 0 ]; then
-            if [ ${#unavailable_steps[@]} -gt 0 ]; then
-                printf "  ${DIM}(skipping unavailable: %s)${RESET}\n" "$(IFS='|'; tmp="${unavailable_steps[*]}"; echo "${tmp//|/, }")"
-                echo ""
-            fi
-            if tui_result="$(tui_multi "Space toggles, Enter confirms" "$preselected_csv" "${available_steps[@]}")"; then
-                picked_via_tui=1
-                for i in "${!STEPS[@]}"; do STEPS_SELECTED[$i]="off"; done
-                while IFS= read -r picked; do
-                    [ -n "$picked" ] || continue
-                    for i in "${!STEPS[@]}"; do
-                        if [ "${STEPS[$i]}" = "$picked" ]; then
-                            STEPS_SELECTED[$i]="on"; break
-                        fi
-                    done
-                done <<< "$tui_result"
-            fi
+        else
+            unavailable_steps+=("${STEPS[$i]}")
         fi
-    fi
+    done
 
-    if [ "$picked_via_tui" = 0 ]; then
-        display_menu() {
-            for i in "${!STEPS[@]}"; do
-                local marker avail_note=""
-                if [ "${STEPS_AVAILABLE[$i]}" = "no" ]; then
-                    marker=" "
-                    avail_note=" ${DIM}(not available)${RESET}"
-                elif [ "${STEPS_SELECTED[$i]}" = "on" ]; then
-                    marker="x"
-                else
-                    marker=" "
-                fi
-                printf "  [%s] %d) %s%b\n" "$marker" "$((i+1))" "${STEPS[$i]}" "$avail_note"
-            done
-        }
-
-        display_menu
-        echo ""
-        echo "  Enter numbers to toggle, 'a' for all, 'n' for none, or Enter to confirm:"
-
-        while true; do
-            read -rep "  > " selection
-            if [ -z "$selection" ]; then
-                break
-            fi
-            case "$(to_lower "$selection")" in
-                a|all)
-                    for i in "${!STEPS[@]}"; do
-                        [ "${STEPS_AVAILABLE[$i]}" = "yes" ] && STEPS_SELECTED[$i]="on"
-                    done
-                    ;;
-                n|none)
-                    for i in "${!STEPS[@]}"; do
-                        STEPS_SELECTED[$i]="off"
-                    done
-                    ;;
-                *)
-                    for num in $selection; do
-                        if [[ "$num" =~ ^[0-9]+$ ]]; then
-                            idx=$((num - 1))
-                            if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#STEPS[@]} ] && [ "${STEPS_AVAILABLE[$idx]}" = "yes" ]; then
-                                if [ "${STEPS_SELECTED[$idx]}" = "on" ]; then
-                                    STEPS_SELECTED[$idx]="off"
-                                else
-                                    STEPS_SELECTED[$idx]="on"
-                                fi
-                            fi
-                        fi
-                    done
-                    ;;
-            esac
+    if [ ${#available_steps[@]} -gt 0 ]; then
+        if [ ${#unavailable_steps[@]} -gt 0 ]; then
+            printf "  ${DIM}(skipping unavailable: %s)${RESET}\n" "$(IFS='|'; tmp="${unavailable_steps[*]}"; echo "${tmp//|/, }")"
             echo ""
-            display_menu
-            echo ""
-            echo "  Enter numbers to toggle, or Enter to confirm:"
-        done
+        fi
+        # tui_multi: gum when available, bash-native arrow multi-select when
+        # not, or echoes the preselected set on a non-tty. On cancel (q / Esc
+        # / Ctrl-C) it exits non-zero and we leave STEPS_SELECTED at defaults.
+        if tui_result="$(tui_multi "Space toggles, Enter confirms" "$preselected_csv" "${available_steps[@]}")"; then
+            for i in "${!STEPS[@]}"; do STEPS_SELECTED[$i]="off"; done
+            while IFS= read -r picked; do
+                [ -n "$picked" ] || continue
+                for i in "${!STEPS[@]}"; do
+                    if [ "${STEPS[$i]}" = "$picked" ]; then
+                        STEPS_SELECTED[$i]="on"; break
+                    fi
+                done
+            done <<< "$tui_result"
+        fi
     fi
 fi
 

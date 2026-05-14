@@ -285,26 +285,27 @@ tui_choose() {
     local header="$1"; shift
     if tui_available; then
         gum choose --header "$header" "$@"
+    elif [ -t 0 ] && [ -t 1 ]; then
+        _tui_arrow_choose "$header" "$@"
     else
-        local i=1 opt answer
-        printf "%s\n" "$header" >&2
-        for opt in "$@"; do printf "  %d) %s\n" "$i" "$opt" >&2; i=$((i+1)); done
-        read -rep "  [1-$#]: " answer
-        if [[ "$answer" =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le $# ]; then
-            printf "%s" "${!answer}"
-        fi
+        printf "%s" "$1"
     fi
 }
 
 # tui_multi HEADER PRESELECTED_CSV OPT1 OPT2 ... — newline-separated picks to
-# stdout. Returns 127 when gum is unavailable so the caller can fall back to
-# its own multi-toggle UI (multi-select is too fiddly to fake with read).
+# stdout. Always returns a result: gum choose if available, the bash-native
+# arrow multi-select if we have a tty, or the preselected set otherwise.
 tui_multi() {
     local header="$1" preselected="$2"; shift 2
     if tui_available; then
         gum choose --no-limit --header "$header" --selected "$preselected" "$@"
+    elif [ -t 0 ] && [ -t 1 ]; then
+        _tui_arrow_multi "$header" "$preselected" "$@"
     else
-        return 127
+        local IFSorig="$IFS" item
+        IFS=,
+        for item in $preselected; do printf "%s\n" "$item"; done
+        IFS="$IFSorig"
     fi
 }
 
