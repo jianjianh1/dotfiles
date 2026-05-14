@@ -340,5 +340,111 @@ tui_confirm() {
     fi
 }
 
-# shellcheck source=tui.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/tui.sh"
+# ----- Bash-native arrow-key menus -------------------------------------------
+#
+# Used by tui_choose / tui_multi when gum isn't available. Render to stderr,
+# return the result on stdout. Bash 3.2 compatible: arrow detection uses
+# `read -rsn2 -t 1` (the smallest integer timeout 3.2 accepts), so plain Esc
+# has up to a 1-second delay before it's treated as cancel — `q` / `Q` is the
+# documented instant cancel.
+
+# _tui_read_key — one keystroke → mnemonic ("up" / "down" / "left" / "right"
+# / "enter" / "space" / "quit") or the raw char.
+_tui_read_key() {
+    local k rest
+    IFS= read -rsn1 k </dev/tty || return 1
+    case "$k" in
+        $'\e')
+            IFS= read -rsn2 -t 1 rest </dev/tty 2>/dev/null || rest=""
+            case "$rest" in
+                '[A') printf "up" ;;
+                '[B') printf "down" ;;
+                '[C') printf "right" ;;
+                '[D') printf "left" ;;
+                *)    printf "quit" ;;
+            esac
+            ;;
+        "")  printf "enter" ;;
+        " ") printf "space" ;;
+        q|Q) printf "quit" ;;
+        *)   printf "%s" "$k" ;;
+    esac
+}
+
+# _tui_arrow_choose HEADER OPT1 OPT2 … — single-select. Exit 1 = cancelled.
+_tui_arrow_choose() {
+    local header="$1"; shift
+    local options=("$@") n=$# sel=0 i k
+    [ "$n" -gt 0 ] || return 1
+
+    tput civis 2>/dev/null || true
+    printf "%s\n" "$header" >&2
+    for ((i = 0; i < n; i++)); do printf "\n" >&2; done
+
+    while :; do
+        printf "\e[%dA" "$n" >&2
+        for ((i = 0; i < n; i++)); do
+            if [ "$i" -eq "$sel" ]; then
+                printf "\e[K\e[36m> %s\e[0m\n" "${options[$i]}" >&2
+            else
+                printf "\e[K  %s\n" "${options[$i]}" >&2
+            fi
+        done
+        k="$(_tui_read_key)"
+        case "$k" in
+            up)    sel=$(( (sel - 1 + n) % n )) ;;
+            down)  sel=$(( (sel + 1) % n )) ;;
+            enter) break ;;
+            quit)  tput cnorm 2>/dev/null || true; return 1 ;;
+        esac
+    done
+    tput cnorm 2>/dev/null || true
+    printf "%s" "${options[$sel]}"
+}
+
+# _tui_arrow_multi HEADER PRESELECTED_CSV OPT1 OPT2 … — multi-select.
+# Space toggles, Enter confirms. Exit 1 = cancelled.
+_tui_arrow_multi() {
+    local header="$1" preselected="$2"; shift 2
+    local options=("$@") n=$# sel=0 i k
+    [ "$n" -gt 0 ] || return 1
+    local picked=()
+    for ((i = 0; i < n; i++)); do picked[$i]=0; done
+    local IFSorig="$IFS" item
+    IFS=,
+    for item in $preselected; do
+        for ((i = 0; i < n; i++)); do
+            [ "${options[$i]}" = "$item" ] && picked[$i]=1
+        done
+    done
+    IFS="$IFSorig"
+
+    tput civis 2>/dev/null || true
+    printf "%s\n" "$header" >&2
+    printf "  (Up/Down to move, Space to toggle, Enter to confirm, q to cancel)\n" >&2
+    for ((i = 0; i < n; i++)); do printf "\n" >&2; done
+
+    while :; do
+        printf "\e[%dA" "$n" >&2
+        for ((i = 0; i < n; i++)); do
+            local mark="[ ]"; [ "${picked[$i]}" = 1 ] && mark="[x]"
+            if [ "$i" -eq "$sel" ]; then
+                printf "\e[K\e[36m> %s %s\e[0m\n" "$mark" "${options[$i]}" >&2
+            else
+                printf "\e[K  %s %s\n" "$mark" "${options[$i]}" >&2
+            fi
+        done
+        k="$(_tui_read_key)"
+        case "$k" in
+            up)    sel=$(( (sel - 1 + n) % n )) ;;
+            down)  sel=$(( (sel + 1) % n )) ;;
+            space) picked[$sel]=$(( 1 - picked[$sel] )) ;;
+            enter) break ;;
+            quit)  tput cnorm 2>/dev/null || true; return 1 ;;
+        esac
+    done
+    tput cnorm 2>/dev/null || true
+    for ((i = 0; i < n; i++)); do
+        [ "${picked[$i]}" = 1 ] && printf "%s\n" "${options[$i]}"
+    done
+}

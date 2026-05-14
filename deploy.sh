@@ -420,9 +420,6 @@ cleanup() {
     if [ -n "$SSH_SOCKET_DIR" ]; then
         rmdir "$SSH_SOCKET_DIR" 2>/dev/null || rm -rf "$SSH_SOCKET_DIR" 2>/dev/null || true
     fi
-    # Order matters: SSH cleanup first, then rmcup so any captured failure
-    # logs land in the restored scrollback (not the alt-screen we discard).
-    tui_window_exit
 }
 
 # ============================================================
@@ -459,9 +456,6 @@ if [ "$AUTO_YES" = false ] && [ -t 1 ] && [ "${NO_TUI:-0}" != 1 ] && ! command -
     echo ""
 fi
 
-tui_window_enter || true
-tui_banner "Remote Server Deploy"
-
 # --- Host ---
 REMOTE_HOST="$(tui_input "Remote host" "" "user@hostname or SSH config alias")"
 if [ -z "$REMOTE_HOST" ]; then
@@ -470,7 +464,6 @@ fi
 if [[ "$REMOTE_HOST" =~ [[:space:]] ]]; then
     echo "Error: invalid host (contains spaces)"; exit 1
 fi
-tui_banner "Connect" "$REMOTE_HOST"
 
 # --- Auth method ---
 AUTH_LABELS=(
@@ -611,7 +604,6 @@ fi
 # Detect Available Items
 # ============================================================
 
-tui_banner "Scan" "$REMOTE_HOST"
 section "Scanning local credentials"
 
 # SSH keys
@@ -704,7 +696,6 @@ for i in "${!STEPS[@]}"; do
 done
 
 if [ "$AUTO_YES" = false ]; then
-    tui_banner "Choose steps" "$REMOTE_HOST"
     echo ""
     info "What would you like to deploy?"
     echo ""
@@ -761,7 +752,6 @@ if [ ${#selected_names[@]} -eq 0 ]; then
     exit 0
 fi
 
-tui_banner "Confirm" "$REMOTE_HOST"
 printf "${BOLD}=== Deploy Summary ===${RESET}\n"
 printf "  Target:  %s" "$REMOTE_HOST"
 [ "$AUTH_METHOD" != "5" ] && printf ":%s" "$SSH_PORT"
@@ -1106,36 +1096,16 @@ step_clone_setup() {
 # Execute Selected Steps
 # ============================================================
 
-# run_step is bypassed for this loop because its linear output would fight
-# the live status panel; FAILURES tracking is replicated below.
 STEP_FNS=(step_ssh_keys step_gh_auth step_clone_setup step_claude_auth step_codex_auth step_api_keys)
 
-selected_names=()
-selected_fns=()
 for i in "${!STEPS[@]}"; do
-    if [ "${STEPS_SELECTED[$i]}" = "on" ]; then
-        selected_names+=("${STEPS[$i]}")
-        selected_fns+=("${STEP_FNS[$i]}")
-    fi
-done
-
-tui_banner "Deploy" "$REMOTE_HOST"
-echo ""
-tui_status_init "${selected_names[@]}"
-
-for j in "${!selected_fns[@]}"; do
-    if ! tui_status_run "$j" "${selected_names[$j]}" "${selected_fns[$j]}"; then
-        FAILURES+=("${selected_names[$j]}")
-    fi
+    [ "${STEPS_SELECTED[$i]}" = "on" ] || continue
+    run_step "${STEPS[$i]}" "${STEP_FNS[$i]}"
 done
 
 # ============================================================
 # Summary
 # ============================================================
-
-# Exit alt-screen first so the summary below lands in the user's normal
-# scrollback (and any captured failure logs flush there too).
-tui_window_exit
 
 printf "${BOLD}===============================${RESET}\n"
 if [ ${#FAILURES[@]} -gt 0 ]; then
