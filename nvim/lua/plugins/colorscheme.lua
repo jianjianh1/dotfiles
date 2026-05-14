@@ -1,11 +1,8 @@
-local style = (vim.env.SERVER_CONFIGS_THEME == "light") and "day" or "storm"
-
 return {
     "folke/tokyonight.nvim",
     lazy = false,
     priority = 1000,
     opts = {
-        style = style,
         transparent = false,
         styles = {
             comments = { italic = true },
@@ -14,7 +11,18 @@ return {
         },
     },
     config = function(_, opts)
-        require("tokyonight").setup(opts)
-        vim.cmd.colorscheme("tokyonight-" .. style)
+        local function apply()
+            local style = (vim.o.background == "light") and "day" or "storm"
+            opts.style = style
+            require("tokyonight").setup(opts)
+            vim.cmd.colorscheme("tokyonight-" .. style)
+        end
+
+        apply()
+        vim.api.nvim_create_autocmd("OptionSet", {
+            pattern = "background",
+            callback = apply,
+            desc = "Re-apply tokyonight when &background changes (e.g. nvim's OSC 11 result lands)",
+        })
     end,
 }
