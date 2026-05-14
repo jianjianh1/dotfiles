@@ -1223,7 +1223,7 @@ install_tree_sitter_cargo() {
 
 install_tree_sitter() {
     if is_macos; then
-        brew_install tree-sitter tree-sitter
+        brew_install tree-sitter-cli tree-sitter
         return $?
     fi
     # Only short-circuit on successful module load; if no module exists on
