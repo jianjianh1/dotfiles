@@ -76,8 +76,7 @@ shopt -s autocd 2>/dev/null || true         # type a directory name to cd into i
 # Honoured by vimrc, nvim, tmux.conf, bat, starship, delta, and the
 # fallback PS1 below.
 #
-# Detection order: explicit env override → OSC 11 probe → COLORFGBG →
-# macOS AppleInterfaceStyle → dark (the previous default).
+# Detection order: explicit env override → OSC 11 probe → COLORFGBG → dark.
 _server_configs_detect_theme() {
     # Already set (inherited from parent shell, tmux, or user override)?
     case "${SERVER_CONFIGS_THEME:-}" in
@@ -126,20 +125,10 @@ _server_configs_detect_theme() {
         esac
     fi
 
-    # macOS Aqua appearance — returns "Dark" in dark mode, errors in light.
-    case "${OSTYPE:-}" in
-        darwin*)
-            if command -v defaults >/dev/null 2>&1; then
-                if [ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = "Dark" ]; then
-                    export SERVER_CONFIGS_THEME=dark
-                else
-                    export SERVER_CONFIGS_THEME=light
-                fi
-                return 0
-            fi
-            ;;
-    esac
-
+    # No reliable probe succeeded. Default to dark — the common terminal
+    # preference, including for users running a dark Terminal.app profile
+    # on a light-mode Mac (AppleInterfaceStyle would mis-classify those).
+    # Override with `export SERVER_CONFIGS_THEME=light` for light terminals.
     export SERVER_CONFIGS_THEME=dark
 }
 _server_configs_detect_theme

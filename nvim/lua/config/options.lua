@@ -83,5 +83,9 @@ opt.foldminlines = 2
 -- Completion
 opt.completeopt = "menu,menuone,noselect"
 
--- Background — follow SERVER_CONFIGS_THEME exported by bashrc_exports.
+-- Background — follow SERVER_CONFIGS_THEME exported by the shell rc.
+-- macOS Terminal.app doesn't reply to OSC 11 and may set $COLORFGBG in
+-- ways Neovim mis-classifies, so we override explicitly. The OptionSet
+-- autocmd in plugins/colorscheme.lua still handles late-arriving OSC 11
+-- responses on terminals that do reply (iTerm2, Ghostty, etc.).
 opt.background = (vim.env.SERVER_CONFIGS_THEME == "light") and "light" or "dark"
