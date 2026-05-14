@@ -1,0 +1,105 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2262
+
+SERVER_CONFIGS_OS="$(uname -s 2>/dev/null || printf unknown)"
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# ls (use eza if available)
+if command -v eza &>/dev/null; then
+    alias ls='eza --group-directories-first'
+    alias ll='eza -la --group-directories-first --git'
+    alias la='eza -a --group-directories-first'
+    alias lt='eza -T --level=2'
+elif ls --color=auto -d . >/dev/null 2>&1; then
+    alias ls='ls --color=auto'
+    alias ll='ls -alFh --color=auto'
+    alias la='ls -A --color=auto'
+elif [ "$SERVER_CONFIGS_OS" = "Darwin" ]; then
+    alias ls='ls -G'
+    alias ll='ls -alFhG'
+    alias la='ls -AG'
+else
+    alias ll='ls -alFh'
+    alias la='ls -A'
+fi
+alias l='ls -CF'
+
+# grep
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+# Git
+alias gs='git status -sb'
+alias ga='git add'
+alias gc='git commit'
+alias gp='git push'
+alias gpu='git pull'
+alias gl='git log --oneline --graph --decorate -20'
+alias gla='git log --oneline --all --graph -20'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gb='git branch'
+alias lg='lazygit'
+
+# Safety nets. `rm -I` (interactive once for >3 files / recursive) is
+# GNU coreutils only — vanilla macOS `rm` lacks it.
+if rm --help 2>&1 | grep -q -- '-I'; then
+    alias rm='rm -I'
+fi
+alias mv='mv -i'
+alias cp='cp -i'
+
+# Disk usage
+alias df='df -h'
+alias du='du -h'
+alias dud='du -d 1 -h | sort -hr'
+
+# System / quick look
+alias h='history | tail -30'
+alias j='jobs -l'
+if command -v ss &>/dev/null; then
+    alias ports='ss -tulnp'
+elif command -v lsof &>/dev/null; then
+    alias ports='lsof -nP -iTCP -sTCP:LISTEN'
+fi
+alias myip='curl -s ifconfig.me'
+alias cls='clear'
+alias path='echo -e ${PATH//:/\\n}'
+alias now='date +"%Y-%m-%d %H:%M:%S"'
+if [ "$SERVER_CONFIGS_OS" != "Darwin" ] && command -v xdg-open &>/dev/null; then
+    alias open='xdg-open'
+fi
+
+# tmux
+alias ta='tmux attach -t'
+alias tn='tmux new -s'
+alias tl='tmux list-sessions'
+alias tk='tmux kill-session -t'
+
+# Modern tool replacements (guarded)
+command -v bat &>/dev/null && alias cat='bat --paging=never'
+command -v fd &>/dev/null && alias ff='fd'
+
+if [ -f ~/.server-configs-generated/bashrc_compat ]; then
+    source ~/.server-configs-generated/bashrc_compat
+fi
+
+# Neovim (alias vim/vi to nvim when available)
+if command -v nvim &>/dev/null; then
+    alias vim='nvim'
+    alias vi='nvim'
+fi
+
+# Tool integrations (cached via _server_configs_load_cached_init from zshrc_exports)
+_server_configs_load_cached_init zoxide "zoxide init zsh"
+_server_configs_load_cached_init fzf "fzf --zsh"
+if [ -f ~/.fzf.zsh ]; then
+    source ~/.fzf.zsh
+fi

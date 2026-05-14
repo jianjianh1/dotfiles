@@ -1518,6 +1518,45 @@ link_generated_configs() {
     manifest_add_path "$HOME/.codex/config.toml" || return 1
     append_line_if_missing 'source ~/.bashrc_exports' "$HOME/.bashrc" || return 1
     append_line_if_missing 'source ~/.bashrc_aliases' "$HOME/.bashrc" || return 1
+    link_zsh_configs || return 1
+}
+
+# Zsh parallel of the bashrc wiring above. Always runs on macOS (zsh is the
+# default login shell since Catalina); runs elsewhere only if zsh is
+# installed, so Linux hosts without zsh skip cleanly.
+link_zsh_configs() {
+    if ! is_macos && ! command -v zsh &>/dev/null; then
+        return 0
+    fi
+    backup_and_link "$DIR/zshrc_exports" "$HOME/.zshrc_exports" || return 1
+    backup_and_link "$DIR/zshrc_aliases" "$HOME/.zshrc_aliases" || return 1
+
+    # Don't append through ~/.zshrc if it's a symlink — could write into
+    # another dotfiles repo.
+    local zshrc="$HOME/.zshrc"
+    if is_managed_symlink "$zshrc"; then
+        echo "  ~/.zshrc already managed by this repo"
+        return 0
+    fi
+    if [ -L "$zshrc" ]; then
+        local target
+        target="$(portable_realpath "$zshrc" 2>/dev/null || true)"
+        if [ -z "$target" ]; then
+            backup_and_link "$DIR/zshrc" "$zshrc" || return 1
+            return 0
+        fi
+        echo "  ~/.zshrc is a symlink to $target — skipping zsh source wiring." >&2
+        echo "    Add these lines manually to that file (or its source) for zsh support:" >&2
+        echo "      source ~/.zshrc_exports" >&2
+        echo "      source ~/.zshrc_aliases" >&2
+        return 0
+    fi
+    if [ -e "$zshrc" ]; then
+        append_line_if_missing 'source ~/.zshrc_exports' "$zshrc" || return 1
+        append_line_if_missing 'source ~/.zshrc_aliases' "$zshrc" || return 1
+    else
+        backup_and_link "$DIR/zshrc" "$zshrc" || return 1
+    fi
 }
 
 setup_main() {

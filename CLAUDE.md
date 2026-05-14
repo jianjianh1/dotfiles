@@ -40,6 +40,12 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
   └── sources ~/.bashrc_aliases  (symlink → bashrc_aliases)
        └── sources ~/.server-configs-generated/bashrc_compat
 
+~/.zshrc  (symlink → zshrc when absent, else two source lines appended)
+  └── sources ~/.zshrc_exports  (symlink → zshrc_exports)
+       └── sources ~/.server-configs-generated/bashrc_compat  (POSIX-clean, shared)
+  └── sources ~/.zshrc_aliases  (symlink → zshrc_aliases)
+       └── sources ~/.server-configs-generated/bashrc_compat
+
 ~/.vimrc  (symlink → vimrc)
   └── sources ~/.server-configs-generated/vimrc.compat
 
@@ -49,6 +55,8 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ~/.gitconfig  (symlink → gitconfig)
   └── includes ~/.server-configs-generated/gitconfig.compat
 ```
+
+Bash and zsh have **parallel rc files** (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 
 ## Setup
 

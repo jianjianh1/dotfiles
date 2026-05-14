@@ -98,6 +98,10 @@ remove_dir_if_empty() {
 
 clean_line_from_file() {
     local file="$1" pattern="$2"
+    # Skip symlinks — delete_matching_lines writes through them.
+    if [ -L "$file" ]; then
+        return 0
+    fi
     if [ -f "$file" ]; then
         delete_matching_lines "$file" "$pattern" || return 1
         echo "  Cleaned $file"
@@ -155,6 +159,11 @@ remove_symlinks() {
     unlink_config "$HOME/.config/tmux/tmux.conf"
     unlink_config "$HOME/.bashrc_exports"
     unlink_config "$HOME/.bashrc_aliases"
+    unlink_config "$HOME/.zshrc_exports"
+    unlink_config "$HOME/.zshrc_aliases"
+    # Only remove ~/.zshrc when it's our symlink. A pre-existing user
+    # ~/.zshrc with our source lines appended is handled by remove_bashrc_lines.
+    unlink_config "$HOME/.zshrc"
 }
 
 remove_bashrc_lines() {
@@ -163,6 +172,9 @@ remove_bashrc_lines() {
     clean_line_from_file "$HOME/.bashrc" '^source ~/.bashrc_aliases$'
     clean_line_from_file "$HOME/.bashrc" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
     clean_line_from_file "$HOME/.profile" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
+    clean_line_from_file "$HOME/.zshrc" '^source ~/.zshrc_exports$'
+    clean_line_from_file "$HOME/.zshrc" '^source ~/.zshrc_aliases$'
+    clean_line_from_file "$HOME/.zshrc" '^\[ -f ~/.env_keys \] && . ~/.env_keys$'
 }
 
 remove_git_hooks_config() {

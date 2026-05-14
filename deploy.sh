@@ -239,8 +239,13 @@ copy_local_file_to_remote() {
 ensure_remote_env_keys_loader() {
     remote_exec "
         touch ~/.env_keys && chmod 600 ~/.env_keys
-        grep -qF '[ -f ~/.env_keys ] && . ~/.env_keys' ~/.bashrc 2>/dev/null || echo '[ -f ~/.env_keys ] && . ~/.env_keys' >> ~/.bashrc
-        grep -qF '[ -f ~/.env_keys ] && . ~/.env_keys' ~/.profile 2>/dev/null || echo '[ -f ~/.env_keys ] && . ~/.env_keys' >> ~/.profile
+        line='[ -f ~/.env_keys ] && . ~/.env_keys'
+        ensure_line() { grep -qF \"\$line\" \"\$1\" 2>/dev/null || echo \"\$line\" >> \"\$1\"; }
+        ensure_line ~/.bashrc
+        ensure_line ~/.profile
+        # ~/.zshrc only if it already exists; setup.sh creates it on macOS.
+        [ -f ~/.zshrc ] && ensure_line ~/.zshrc
+        true
     "
 }
 

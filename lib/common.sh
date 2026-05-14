@@ -107,6 +107,18 @@ portable_realpath() {
     return 1
 }
 
+# True iff $1 is a symlink whose target resolves into this repo ($DIR).
+# Callers must have $DIR set (every script that sources common.sh does).
+is_managed_symlink() {
+    [ -L "$1" ] || return 1
+    local target
+    target="$(portable_realpath "$1" 2>/dev/null || true)"
+    case "$target" in
+        "$DIR"|"$DIR"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 sha256_file() {
     local path="$1"
 
