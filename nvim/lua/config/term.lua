@@ -16,4 +16,5 @@ end
 
 return {
     is_apple_terminal = function() return program() == "Apple_Terminal" end,
+    is_vscode_terminal = function() return program() == "vscode" end,
 }

@@ -93,3 +93,18 @@ opt.completeopt = "menu,menuone,noselect"
 -- OptionSet autocmd in plugins/colorscheme.lua re-applies tokyonight.
 local ok, out = pcall(vim.fn.system, { vim.fn.expand("~/.local/bin/detect-theme") })
 opt.background = (ok and vim.trim(out) == "light") and "light" or "dark"
+
+-- VSCode's integrated terminal (xterm.js) advertises support for the CSI u /
+-- modifyOtherKeys key-encoding protocols, but mis-encodes Shift+digit chords:
+-- `!@#$%^&*()` arrive as bare digits in insert mode. nvim 0.12 sends an enable
+-- sequence at startup based on the probe response and exposes no option to
+-- suppress it, so undo the enable by writing the corresponding disable
+-- sequences. vim.schedule defers past nvim's startup flush so we cancel after
+-- nvim has set the mode.
+if require("config.term").is_vscode_terminal() then
+    vim.schedule(function()
+        io.write("\27[<1u")      -- disable kitty / CSI u keyboard protocol
+        io.write("\27[>4;0m")    -- disable modifyOtherKeys
+        io.flush()
+    end)
+end
