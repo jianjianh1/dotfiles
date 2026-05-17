@@ -50,7 +50,7 @@ Delta auto-detects the terminal background; no light/dark override is pinned in 
 | `push.default` | `current` | Push current branch to same-named remote |
 | `push.autoSetupRemote` | `true` | Auto-track remote on first push |
 | `fetch.prune` | `true` | Delete stale remote-tracking branches |
-| `merge.conflictstyle` | `zdiff3` | Three-way merge conflicts with zealous diff (shows base, less noise) |
+| `merge.conflictstyle` | `zdiff3` (git ≥ 2.35) / `diff3` (older) | Three-way merge conflicts; emitted into `gitconfig.compat` by `setup.sh` so subprocess git calls on older hosts don't trip "unknown style 'zdiff3'" |
 | `diff.colorMoved` | `default` | Highlight moved lines in diffs |
 | `rebase.autoStash` | `true` | Auto-stash before rebase, pop after |
 | `rerere.enabled` | `true` | Remember conflict resolutions |

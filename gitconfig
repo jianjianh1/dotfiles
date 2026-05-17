@@ -38,9 +38,6 @@
 	prune = true
 	pruneTags = true
 
-[merge]
-	conflictstyle = zdiff3
-
 [diff]
 	algorithm = histogram
 	colorMoved = default
