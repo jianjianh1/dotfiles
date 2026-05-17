@@ -3,6 +3,7 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATED_DIR="$HOME/.server-configs-generated"
+# shellcheck disable=SC2034  # consumed by manifest_contains_path from lib/common.sh
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
 YES=false
 
@@ -148,6 +149,7 @@ remove_symlinks() {
     echo "Removing config symlinks..."
     unlink_config "$HOME/.vimrc"
     unlink_config "$HOME/.tmux.conf"
+    unlink_config "$HOME/.tmux-theme.conf"
     unlink_config "$HOME/.gitconfig"
     unlink_config "$HOME/.inputrc"
     unlink_config "$HOME/.dircolors"
@@ -189,7 +191,7 @@ remove_git_hooks_config() {
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin chpc-allocs; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq uv uvx starship atuin chpc-allocs detect-theme; do
         remove_bin "$bin"
     done
 }

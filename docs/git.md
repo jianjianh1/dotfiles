@@ -37,7 +37,8 @@ email = jianjian.huang@utah.edu
 | `navigate` | `true` | Use `n`/`N` to jump between files in diff |
 | `side-by-side` | `true` | Two-column diff layout |
 | `line-numbers` | `true` | Show line numbers |
-| `dark` | `true` | Dark terminal theme |
+
+Delta auto-detects the terminal background; no light/dark override is pinned in `gitconfig`.
 
 ---
 

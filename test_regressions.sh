@@ -253,15 +253,18 @@ test_manifest_controls_uninstall() (
 
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/gh"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/rg"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/detect-theme"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/opt/nvim/bin/nvim"
     ln -s "$HOME/.local/opt/nvim/bin/nvim" "$HOME/.local/bin/nvim"
-    chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg" "$HOME/.local/opt/nvim/bin/nvim"
+    ln -s "$DIR/tmux-theme.conf" "$HOME/.tmux-theme.conf"
+    chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg" "$HOME/.local/bin/detect-theme" "$HOME/.local/opt/nvim/bin/nvim"
     printf 'config = true\n' > "$HOME/.codex/config.toml"
 
     # shellcheck source=uninstall.sh
     . "$DIR/uninstall.sh"
 
     manifest_add_path "$HOME/.local/bin/gh"
+    manifest_add_path "$HOME/.local/bin/detect-theme"
     manifest_add_path "$HOME/.codex/config.toml"
 
     remove_bin gh
@@ -269,6 +272,12 @@ test_manifest_controls_uninstall() (
 
     remove_bin rg
     [ -e "$HOME/.local/bin/rg" ] || fail "untracked binary should not be removed"
+
+    remove_tools
+    [ ! -e "$HOME/.local/bin/detect-theme" ] || fail "tracked detect-theme was not removed by remove_tools"
+
+    remove_symlinks >/dev/null
+    [ ! -e "$HOME/.tmux-theme.conf" ] || fail "tmux-theme symlink was not removed"
 
     remove_tracked_path "$HOME/.codex/config.toml"
     [ ! -e "$HOME/.codex/config.toml" ] || fail "tracked config copy was not removed"
@@ -292,6 +301,29 @@ test_scripts_source_without_side_effects() (
     . "$DIR/setup.sh"
     command -v setup_main >/dev/null || fail "setup_main missing after source"
     [ ! -e "$HOME/.server-configs-generated" ] || fail "sourcing setup.sh created generated state"
+)
+
+test_detect_theme_installs_to_local_bin() (
+    local tmp target
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME/.server-configs-generated"
+    INSTALL_MANIFEST="$HOME/.server-configs-generated/install-manifest.txt"
+    BIN_DIR="$tmp/not-used"
+    DRY_RUN=false
+
+    # shellcheck source=setup.sh
+    . "$DIR/setup.sh"
+
+    install_detect_theme >/dev/null || fail "install_detect_theme failed"
+    [ -L "$HOME/.local/bin/detect-theme" ] || fail "detect-theme was not linked into ~/.local/bin"
+    target="$(portable_realpath "$HOME/.local/bin/detect-theme" 2>/dev/null || true)"
+    [ "$target" = "$DIR/detect-theme.sh" ] || fail "detect-theme symlink points at '$target'"
+    manifest_contains_path "$HOME/.local/bin/detect-theme" ||
+        fail "detect-theme local-bin path was not recorded in manifest"
+    [ ! -e "$BIN_DIR/detect-theme" ] || fail "detect-theme should ignore BIN_DIR"
 )
 
 test_deploy_sources_without_prompting() (
@@ -704,36 +736,48 @@ test_pre_commit_blocks_secrets() (
 )
 
 test_theme_detection() (
-    # Extract the detect function from bashrc_exports so we can exercise
-    # it without the rest of the file's side effects (starship init,
-    # dircolors eval, etc).
+    # Stage detect-theme.sh at the path the function calls into
+    # ($HOME/.local/bin/detect-theme), pointed at a tmp HOME so we don't
+    # touch the developer's real $HOME.
+    local tmp_home
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    mkdir -p "$tmp_home/.local/bin"
+    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/detect-theme.sh"
+
     local fn
     fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
     [ -n "$fn" ] || fail "could not extract _server_configs_detect_theme from bashrc_exports"
 
     local out
-    # Set TMUX so the OSC 11 probe is skipped — we don't want the test
-    # writing to the controlling terminal of whoever runs the suite.
+    # TMUX=fake skips the OSC 11 probe inside detect-theme so the test doesn't
+    # write to the suite-runner's controlling tty.
 
     # Pre-set override wins over every fallback.
-    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake SERVER_CONFIGS_THEME=light \
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake SERVER_CONFIGS_THEME=light \
         bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
     [ "$out" = "light" ] || fail "pre-set override not honoured: got '$out'"
 
     # COLORFGBG dark bg → dark.
-    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake COLORFGBG='15;0' \
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake COLORFGBG='15;0' \
         bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
     [ "$out" = "dark" ] || fail "COLORFGBG=15;0 should resolve dark: got '$out'"
 
     # COLORFGBG light bg → light.
-    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake COLORFGBG='0;15' \
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake COLORFGBG='0;15' \
         bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
     [ "$out" = "light" ] || fail "COLORFGBG=0;15 should resolve light: got '$out'"
 
     # No tty, no COLORFGBG, non-darwin → falls through to dark.
-    out="$(env -i HOME="$HOME" PATH="$PATH" TMUX=fake OSTYPE=linux-gnu \
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake OSTYPE=linux-gnu \
         bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
     [ "$out" = "dark" ] || fail "fallback should be dark: got '$out'"
+
+    # Helper missing → bashrc function still falls back to dark.
+    out="$(env -i HOME="$(mktemp -d)" PATH="$PATH" TMUX=fake \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "dark" ] || fail "missing helper should still yield dark: got '$out'"
 )
 
 test_chpc_allocs_self_test() (
@@ -769,6 +813,7 @@ main() {
     run_test test_cached_init_handles_empty_output
     run_test test_cached_init_evals_output_when_cache_unwritable
     run_test test_manifest_controls_uninstall
+    run_test test_detect_theme_installs_to_local_bin
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
     run_test test_auth_state_helpers

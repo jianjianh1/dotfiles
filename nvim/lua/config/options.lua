@@ -47,7 +47,12 @@ opt.linebreak = true
 opt.breakindent = true
 opt.list = true
 opt.listchars = "tab:>>·,trail:·,extends:›,precedes:‹,nbsp:␣"
-opt.termguicolors = true
+-- Truecolor only when the terminal advertises it AND it's not Apple Terminal.
+-- Apple Terminal's truecolor parser mis-decodes some \e[48;2;R;G;Bm sequences
+-- as 8-bit ANSI codes, producing bright magenta surfaces. Falling back to
+-- 256-color emits cterm codes that Apple Terminal handles cleanly.
+opt.termguicolors = (vim.env.COLORTERM == "truecolor" or vim.env.COLORTERM == "24bit")
+    and not require("config.term").is_apple_terminal()
 opt.showmode = false -- Lualine shows the mode
 
 -- Search
@@ -83,9 +88,8 @@ opt.foldminlines = 2
 -- Completion
 opt.completeopt = "menu,menuone,noselect"
 
--- Background — follow SERVER_CONFIGS_THEME exported by the shell rc.
--- macOS Terminal.app doesn't reply to OSC 11 and may set $COLORFGBG in
--- ways Neovim mis-classifies, so we override explicitly. The OptionSet
--- autocmd in plugins/colorscheme.lua still handles late-arriving OSC 11
--- responses on terminals that do reply (iTerm2, Ghostty, etc.).
-opt.background = (vim.env.SERVER_CONFIGS_THEME == "light") and "light" or "dark"
+-- Theme via shared helper (OSC 11 → VS Code → Apple Terminal → COLORFGBG → dark).
+-- If nvim's own OSC 11 reply arrives later and flips &background, the
+-- OptionSet autocmd in plugins/colorscheme.lua re-applies tokyonight.
+local ok, out = pcall(vim.fn.system, { vim.fn.expand("~/.local/bin/detect-theme") })
+opt.background = (ok and vim.trim(out) == "light") and "light" or "dark"

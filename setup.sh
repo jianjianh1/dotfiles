@@ -656,11 +656,6 @@ gh_latest() {
         done < "$_GH_LATEST_CACHE_FILE"
     fi
 
-    # Scoped pipefail so a curl-200-but-jq-fail (GitHub rate-limit HTML)
-    # surfaces as a failure instead of an empty $version slipping through.
-    local -
-    set -o pipefail
-
     if command -v jq &>/dev/null; then
         version="$(retry curl -sfL "https://api.github.com/repos/$slug/releases/latest" 2>/dev/null \
             | jq -r '.tag_name // empty' 2>/dev/null \
@@ -1512,10 +1507,25 @@ install_chpc_allocs() {
     manifest_add_path "$BIN_DIR/chpc-allocs"
 }
 
+# detect-theme: shared helper called by bashrc, zshrc, tmux, vim, and nvim.
+# Keep this in ~/.local/bin because every shell rc prepends that path and the
+# configs call this helper directly from there.
+install_detect_theme() {
+    if [ ! -f "$DIR/detect-theme.sh" ]; then
+        echo "  Skipping detect-theme (source missing)"
+        return 1
+    fi
+    chmod +x "$DIR/detect-theme.sh" 2>/dev/null || true
+    mkdir -p "$HOME/.local/bin" || return 1
+    backup_and_link "$DIR/detect-theme.sh" "$HOME/.local/bin/detect-theme" || return 1
+    manifest_add_path "$HOME/.local/bin/detect-theme"
+}
+
 link_core_configs() {
     mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" || return 1
     backup_and_link "$DIR/vimrc" "$HOME/.vimrc" || return 1
     backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf" || return 1
+    backup_and_link "$DIR/tmux-theme.conf" "$HOME/.tmux-theme.conf" || return 1
     backup_and_link "$DIR/nvim" "$HOME/.config/nvim" || return 1
     backup_and_link "$DIR/gitconfig" "$HOME/.gitconfig" || return 1
     backup_and_link "$DIR/inputrc" "$HOME/.inputrc" || return 1
@@ -1676,6 +1686,7 @@ setup_main() {
     run_step "claude"       install_claude
     run_step "codex"        install_codex
     run_step "chpc-allocs"  install_chpc_allocs
+    run_step "detect-theme" install_detect_theme
 
     run_step "compat configs" render_compat_configs
 

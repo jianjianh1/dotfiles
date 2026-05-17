@@ -59,10 +59,15 @@ HOME="$(mktemp -d)" ./setup.sh --dry-run
 | `vimrc` | `~/.vimrc` | symlink |
 | `nvim/` | `~/.config/nvim/` | symlink |
 | `tmux.conf` | `~/.tmux.conf` | symlink |
+| `tmux-theme.conf` | `~/.tmux-theme.conf` | symlink |
 | `gitconfig` | `~/.gitconfig` | symlink |
 | `sshconfig` | `~/.ssh/config` | symlink |
 | `inputrc` | `~/.inputrc` | symlink |
 | `dircolors` | `~/.dircolors` | symlink |
+| `dircolors.light` | `~/.dircolors.light` | symlink |
+| `starship.toml` | `~/.config/starship.toml` | symlink |
+| `starship-light.toml` | `~/.config/starship-light.toml` | symlink |
+| `detect-theme.sh` | `~/.local/bin/detect-theme` | symlink |
 | `claude_settings.json` | `~/.claude/settings.json` | copy |
 | `codex_config.toml` | `~/.codex/config.toml` | copy |
 
@@ -131,10 +136,15 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │           ├── which-key.lua
 │           └── indent-blankline.lua
 ├── tmux.conf                   # tmux config (prefix: Ctrl-a)
+├── tmux-theme.conf             # tmux light/dark status palette
 ├── gitconfig                   # Git config (delta pager, rebase, aliases)
 ├── sshconfig                   # SSH multiplexing + keep-alive
 ├── inputrc                     # Readline (case-insensitive, history search)
 ├── dircolors                   # LS color scheme
+├── dircolors.light             # Light-terminal LS color scheme
+├── starship.toml               # Starship prompt
+├── starship-light.toml         # Light-terminal Starship prompt
+├── detect-theme.sh             # Terminal background detector
 ├── claude_settings.json        # Claude Code settings
 ├── codex_config.toml           # Codex CLI settings
 ├── .githooks/

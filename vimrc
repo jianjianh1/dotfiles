@@ -197,16 +197,20 @@ if !isdirectory($HOME . "/.vim/undodir")
 endif
 
 " === Colors ===
-" Follow the shell's detected terminal theme (set by bashrc_exports).
-" Override with `:set background=light|dark | colo <scheme>` if needed.
+" Theme via shared helper (OSC 11 → VS Code → Apple Terminal → COLORFGBG → dark).
+" Override with `:set background=light|dark` if the helper picks wrong.
+" Truecolor only when the terminal advertises it. Apple Terminal pre-Sonoma
+" mis-parses 24-bit sequences (everything renders solid green); falling back
+" to 256-color via t_Co=256 lets vim emit cterm codes the terminal handles.
 set t_Co=256
-if has('termguicolors')
+if has('termguicolors') && ($COLORTERM ==# 'truecolor' || $COLORTERM ==# '24bit')
     set termguicolors
     let &t_8f = "\<Esc>[38;2;%lu;%lu;%lum"
     let &t_8b = "\<Esc>[48;2;%lu;%lu;%lum"
 endif
 
-if $SERVER_CONFIGS_THEME ==? 'light'
+let s:detected = trim(system(expand('~/.local/bin/detect-theme')))
+if s:detected ==# 'light'
     set background=light
     silent! colorscheme morning
 else

@@ -75,12 +75,16 @@ Tries these UTF-8 locales in order: `C.UTF-8` → `en_US.UTF-8` → `en_US.utf8`
 ### Bat
 
 ```bash
-BAT_THEME="TwoDark"
+BAT_THEME="auto"
+BAT_THEME_DARK="TwoDark"
+BAT_THEME_LIGHT="GitHub"
 ```
+
+Bat auto-detects the terminal background and uses the configured dark/light palettes.
 
 ### Dircolors
 
-Loads `~/.dircolors` via `dircolors -b` if both the file and command exist.
+Loads `~/.dircolors` or `~/.dircolors.light` via `dircolors -b` if both the file and command exist. The light palette is selected when `detect-theme` reports a light terminal.
 
 ### Prompt
 

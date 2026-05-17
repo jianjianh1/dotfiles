@@ -1,8 +1,8 @@
 # tmux Configuration Reference
 
-Source: [`tmux.conf`](../tmux.conf)
+Source: [`tmux.conf`](../tmux.conf), [`tmux-theme.conf`](../tmux-theme.conf)
 
-Symlinked to `~/.tmux.conf`. Sources `~/.server-configs-generated/tmux.compat.conf` for version-adaptive settings.
+Symlinked to `~/.tmux.conf` and `~/.tmux-theme.conf`. Sources `~/.server-configs-generated/tmux.compat.conf` for version-adaptive settings.
 
 ---
 
@@ -121,8 +121,9 @@ First available tool wins. On headless servers with no clipboard, the copy stays
 
 - Left max width: 20 characters
 - Right max width: 60 characters
-- Background: `colour235` (dark gray)
-- Foreground: `colour252` (light gray)
+- Dark background: `colour235`; foreground: `colour252`
+- Light background: `colour254`; foreground: `colour238`
+- Theme selection uses `detect-theme`; tmux also reloads the palette on attach and on `client-light-theme` / `client-dark-theme` hooks in tmux 3.6+.
 
 ---
 
@@ -130,8 +131,8 @@ First available tool wins. On headless servers with no clipboard, the copy stays
 
 | Element | Color |
 |---------|-------|
-| Active pane border | `colour39` (cyan) |
-| Inactive pane border | `colour238` (dark gray) |
+| Active pane border | Dark: `colour39`; light: `colour33` |
+| Inactive pane border | Dark: `colour238`; light: `colour250` |
 
 ---
 

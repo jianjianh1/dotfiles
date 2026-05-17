@@ -72,64 +72,22 @@ shopt -s cdspell        # autocorrect minor cd typos
 shopt -s dirspell       # autocorrect directory name typos in completion
 shopt -s autocd 2>/dev/null || true         # type a directory name to cd into it
 
-# Terminal theme detection — exports SERVER_CONFIGS_THEME=light|dark.
-# Honoured by vimrc, nvim, tmux.conf, bat, starship, delta, and the
-# fallback PS1 below.
-#
-# Detection order: explicit env override → OSC 11 probe → COLORFGBG → dark.
+# Terminal theme detection — exports SERVER_CONFIGS_THEME=light|dark via the
+# shared detect-theme helper (OSC 11 → VS Code settings.json →
+# Apple Terminal → COLORFGBG → dark). Honoured by vimrc, nvim, tmux.conf,
+# starship, dircolors, and the fallback PS1 below.
 _server_configs_detect_theme() {
-    # Already set (inherited from parent shell, tmux, or user override)?
     case "${SERVER_CONFIGS_THEME:-}" in
         light|dark) return 0 ;;
     esac
-
-    local r g b lum resp
-
-    # OSC 11. Skip inside tmux (the sequence usually doesn't pass through
-    # without passthrough enabled) and when not on a tty. `read -t 0.1`
-    # bounds the worst case for terminals that ignore the query.
-    if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-        printf '\e]11;?\e\\' > /dev/tty 2>/dev/null
-        # BEL or ST terminates the response; -d $'\a' covers BEL, the ST
-        # form ends with ESC \ which the timeout will trip on instead.
-        IFS= read -rs -t 0.1 -d $'\a' resp < /dev/tty 2>/dev/null || resp=""
-        if [[ "$resp" =~ rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+) ]]; then
-            # Components may be 1–4 hex digits each ("rgb:f/f/f" through
-            # "rgb:ffff/ffff/ffff"). Normalise to 8-bit by taking the
-            # leading two chars, padding with '0' if shorter.
-            local rh="${BASH_REMATCH[1]}" gh="${BASH_REMATCH[2]}" bh="${BASH_REMATCH[3]}"
-            rh="${rh:0:2}"; gh="${gh:0:2}"; bh="${bh:0:2}"
-            while [ ${#rh} -lt 2 ]; do rh="${rh}0"; done
-            while [ ${#gh} -lt 2 ]; do gh="${gh}0"; done
-            while [ ${#bh} -lt 2 ]; do bh="${bh}0"; done
-            r=$((16#$rh)); g=$((16#$gh)); b=$((16#$bh))
-            # Perceived luminance × 1000 to stay in integer arithmetic.
-            # 0.299·R + 0.587·G + 0.114·B, threshold at 128 (≈ 0.5).
-            lum=$(( (299*r + 587*g + 114*b) / 1000 ))
-            if [ "$lum" -gt 128 ]; then
-                export SERVER_CONFIGS_THEME=light
-            else
-                export SERVER_CONFIGS_THEME=dark
-            fi
-            return 0
-        fi
+    if [ -x "$HOME/.local/bin/detect-theme" ]; then
+        SERVER_CONFIGS_THEME="$("$HOME/.local/bin/detect-theme" 2>/dev/null)"
     fi
-
-    # COLORFGBG: "fg;bg" (rxvt-style) — bg indices 0–6 and 8 are dark,
-    # 7 and 9–15 are light.
-    if [ -n "${COLORFGBG:-}" ]; then
-        local cfg_bg="${COLORFGBG##*;}"
-        case "$cfg_bg" in
-            0|1|2|3|4|5|6|8) export SERVER_CONFIGS_THEME=dark; return 0 ;;
-            7|9|10|11|12|13|14|15) export SERVER_CONFIGS_THEME=light; return 0 ;;
-        esac
-    fi
-
-    # No reliable probe succeeded. Default to dark — the common terminal
-    # preference, including for users running a dark Terminal.app profile
-    # on a light-mode Mac (AppleInterfaceStyle would mis-classify those).
-    # Override with `export SERVER_CONFIGS_THEME=light` for light terminals.
-    export SERVER_CONFIGS_THEME=dark
+    case "${SERVER_CONFIGS_THEME:-}" in
+        light|dark) ;;
+        *) SERVER_CONFIGS_THEME=dark ;;
+    esac
+    export SERVER_CONFIGS_THEME
 }
 _server_configs_detect_theme
 
@@ -167,19 +125,10 @@ if command -v fd &>/dev/null; then
     export FZF_ALT_C_COMMAND='fd --type d --hidden --exclude .git'
 fi
 
-# bat — pick a light-readable theme when the terminal is light.
-if [ "${SERVER_CONFIGS_THEME:-dark}" = "light" ]; then
-    export BAT_THEME="GitHub"
-else
-    export BAT_THEME="TwoDark"
-fi
-
-# delta — gitconfig pins `dark = true`; override at runtime when light so
-# diffs invert correctly. GIT_CONFIG_PARAMETERS is consulted on every
-# git invocation.
-if [ "${SERVER_CONFIGS_THEME:-dark}" = "light" ]; then
-    export GIT_CONFIG_PARAMETERS="'delta.dark=false' 'delta.light=true'"
-fi
+# bat — let bat auto-detect the terminal background, with explicit palettes.
+export BAT_THEME="auto"
+export BAT_THEME_DARK="TwoDark"
+export BAT_THEME_LIGHT="GitHub"
 
 # dircolors — load the light palette when the terminal is light.
 if command -v dircolors &>/dev/null; then

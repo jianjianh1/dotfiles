@@ -77,9 +77,9 @@ The history search bindings are especially useful: type the beginning of a comma
 
 ## Dircolors (`dircolors`)
 
-Source: [`dircolors`](../dircolors) — symlinked to `~/.dircolors`.
+Source: [`dircolors`](../dircolors) and [`dircolors.light`](../dircolors.light) — symlinked to `~/.dircolors` and `~/.dircolors.light`.
 
-Loaded by `bashrc_exports` via `eval "$(dircolors -b ~/.dircolors)"`. Defines `LS_COLORS` for `ls`, `tree`, and other tools.
+Loaded by shell exports via `dircolors -b`. The light palette is selected when `detect-theme` reports a light terminal; otherwise the dark palette is used. Defines `LS_COLORS` for `ls`, `tree`, and other tools.
 
 ### Color Assignments by Category
 
