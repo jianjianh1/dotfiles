@@ -82,6 +82,18 @@ BAT_THEME_LIGHT="GitHub"
 
 Bat auto-detects the terminal background and uses the configured dark/light palettes.
 
+### Theme detection & override
+
+`SERVER_CONFIGS_THEME` (`light`|`dark`) is set at shell startup via the shared `detect-theme` helper (OSC 11 → VS Code `storage.json` → Apple Terminal → `COLORFGBG` → dark fallback). On VS Code Remote-SSH the helper also reads `~/.vscode-server/data/User/globalStorage/storage.json`. When auto-detect picks wrong (common on tmux < 3.3 inside Remote-SSH with no remote `storage.json`), use:
+
+```bash
+theme light   # force light palette
+theme dark    # force dark palette
+theme auto    # clear cache and re-detect
+```
+
+Inside tmux the function propagates the value via `tmux set-environment -g` and re-sources `~/.tmux-theme.conf` to repaint existing panes. Running nvim/vim instances cache `&background` at startup; flip them with `:set background=light` / `:set background=dark` (handled by the colorscheme's `OptionSet` autocmd).
+
 ### Dircolors
 
 Loads `~/.dircolors` or `~/.dircolors.light` via `dircolors -b` if both the file and command exist. The light palette is selected when `detect-theme` reports a light terminal.

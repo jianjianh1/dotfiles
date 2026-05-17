@@ -13,8 +13,32 @@
 #
 # Called from bashrc/zshrc (where step 2 usually wins) and from tmux/vim/nvim
 # (where steps 3 and 4 cover the OSC-11-deaf terminals). Single source of truth.
+#
+# `detect-theme --debug` also prints `detect-theme: step=NAME result=light|dark`
+# to stderr, naming which signal won — handy for diagnosing wrong-theme reports.
+# `detect-theme --force` skips the env-override (step 1) and tmux-env cache
+# (step 2a's first branch) so a stale cached value can't shadow a fresh probe;
+# used by `theme auto` and nvim's FocusGained hook.
 
 set -uo pipefail
+
+DEBUG=0
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d|--debug) DEBUG=1 ;;
+        -f|--force) FORCE=1 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+    shift
+done
+
+emit() {
+    [ "$DEBUG" = "1" ] && printf 'detect-theme: step=%s result=%s\n' "$1" "$2" >&2
+    printf '%s\n' "$2"
+    exit 0
+}
 
 # tmux unconditionally rewrites TERM_PROGRAM=tmux for shells it spawns. When
 # we're called from inside tmux, recover the launching shell's original value
@@ -41,10 +65,13 @@ classify_hex() {
     fi
 }
 
-# 1. Explicit override.
-case "${SERVER_CONFIGS_THEME:-}" in
-    light|dark) printf '%s\n' "$SERVER_CONFIGS_THEME"; exit 0 ;;
-esac
+# 1. Explicit override. Skipped under --force (callers like `theme auto`
+# and nvim's FocusGained hook need a fresh probe regardless of stale env).
+if [ "$FORCE" != "1" ]; then
+    case "${SERVER_CONFIGS_THEME:-}" in
+        light|dark) emit env-override "$SERVER_CONFIGS_THEME" ;;
+    esac
+fi
 
 # 2a. Inside tmux: ask tmux. First read SERVER_CONFIGS_THEME from the server's
 # global env — populated by `theme light|dark|auto`, by _server_configs_detect_theme,
@@ -53,33 +80,81 @@ esac
 # (tmux 3.6+ probes OSC 11 on the client tty and caches it). On older tmux the
 # format is empty and we fall through to the existing chain.
 if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-    cached=$(tmux show-environment -g SERVER_CONFIGS_THEME 2>/dev/null | sed -n 's/^SERVER_CONFIGS_THEME=//p')
-    case "$cached" in
-        light|dark) printf '%s\n' "$cached"; exit 0 ;;
-    esac
+    if [ "$FORCE" != "1" ]; then
+        cached=$(tmux show-environment -g SERVER_CONFIGS_THEME 2>/dev/null | sed -n 's/^SERVER_CONFIGS_THEME=//p')
+        case "$cached" in
+            light|dark) emit tmux-cache "$cached" ;;
+        esac
+    fi
     ct=$(tmux display -p '#{client_theme}' 2>/dev/null)
     case "$ct" in
         light|dark)
             tmux set-environment -g SERVER_CONFIGS_THEME "$ct" 2>/dev/null || true
-            printf '%s\n' "$ct"
-            exit 0
+            emit tmux-client-theme "$ct"
             ;;
     esac
 fi
 
 # 2. OSC 11. Skip inside tmux (response is eaten) and when not on a tty
 # (we're being called from nvim's vim.fn.system, tmux's if-shell, etc.).
-if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+# Poll byte-by-byte up to ~1.5s. xterm.js (VS Code's renderer, incl.
+# Remote-SSH) terminates the reply with ST (ESC \); Apple Terminal and
+# iTerm2 use BEL. `read -d` only accepts one delimiter, so we loop and
+# break on either. Fast terminals exit in milliseconds once the
+# terminator arrives; a laggy SSH link gets the full budget — still
+# better than missing the answer and defaulting to dark.
+#
+# We rely only on `-t 0 -t 1` as the precondition. Some sandboxes (Linux
+# user namespaces, certain SSH setups) make `/dev/tty` functional for
+# read/write but report `[ -r /dev/tty ]` as false, so testing the path
+# explicitly would falsely skip a working probe. The actual `printf
+# >/dev/tty` and `read </dev/tty` calls silently no-op via `2>/dev/null
+# || true` if the path is truly unreachable.
+if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -t 1 ]; then
     printf '\e]11;?\e\\' > /dev/tty 2>/dev/null
     resp=""
-    IFS= read -rs -t 0.5 -d $'\a' resp < /dev/tty 2>/dev/null || true
+    # Redirect /dev/tty into the loop's stdin exactly once for the whole
+    # probe. We DON'T use `exec 3</dev/tty` for this — `exec` with only a
+    # redirect, in a script, exits the whole shell if open() fails (POSIX
+    # 2.14 special-builtin rule), and `2>/dev/null` only swallows the
+    # error message, not the exit. Re-opening `< /dev/tty` per iteration
+    # was also empirically dropping bytes on at least one VS Code
+    # Remote-SSH setup, so neither alternative is acceptable. A compound-
+    # command redirect on `while ... done` opens /dev/tty once at loop
+    # entry and falls through harmlessly if the open fails.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        i=$((i + 1))
+        ch=""
+        IFS= read -rs -t 0.1 -n 1 ch 2>/dev/null || true
+        if [ -z "$ch" ]; then
+            # If nothing has arrived after ~0.5s the terminal isn't going
+            # to answer; bail rather than burning the full budget on every
+            # shell startup. Once any byte is in resp we keep waiting for
+            # the terminator (OSC 11 over SSH delivers ~1 byte per 100ms,
+            # so a ~26-byte reply needs the full 30-poll window).
+            [ -z "$resp" ] && [ "$i" -ge 5 ] && break
+            continue
+        fi
+        resp="${resp}${ch}"
+        if [[ "$resp" =~ rgb:[0-9a-fA-F]+/[0-9a-fA-F]+/[0-9a-fA-F]+ ]]; then
+            case "$ch" in
+                $'\a') break ;;
+                $'\e')
+                    # Drain the trailing \ of ST so it doesn't leak into the next read.
+                    IFS= read -rs -t 0.05 -n 1 _drain 2>/dev/null || true
+                    break
+                    ;;
+            esac
+        fi
+    done </dev/tty
     if [[ "$resp" =~ rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+) ]]; then
         rh="${BASH_REMATCH[1]:0:2}"; gh="${BASH_REMATCH[2]:0:2}"; bh="${BASH_REMATCH[3]:0:2}"
         # Pad single-digit channels (rgb:f/f/f form).
         [ "${#rh}" -lt 2 ] && rh="${rh}0"
         [ "${#gh}" -lt 2 ] && gh="${gh}0"
         [ "${#bh}" -lt 2 ] && bh="${bh}0"
-        classify_hex "#${rh}${gh}${bh}" && exit 0
+        res=$(classify_hex "#${rh}${gh}${bh}") && emit osc11 "$res"
     fi
 fi
 
@@ -101,7 +176,7 @@ if [ "${TERM_PROGRAM:-}" = "vscode" ]; then
         [ -r "$storage" ] || continue
         bg=$(sed -n 's/.*"themeBackground"[[:space:]]*:[[:space:]]*"\(#[0-9a-fA-F]\{6\}\)".*/\1/p' "$storage" | head -n1)
         [ -n "$bg" ] || continue
-        classify_hex "$bg" && exit 0
+        res=$(classify_hex "$bg") && emit vscode-storage "$res"
     done
 fi
 
@@ -115,9 +190,9 @@ if [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ] && command -v osascript >/dev/null
         read -r r g b < <(printf '%s\n' "$rgb" | awk -F'[,[:space:]]+' '{print int($1/256), int($2/256), int($3/256)}')
         if [ -n "${r:-}" ] && [ -n "${g:-}" ] && [ -n "${b:-}" ]; then
             if [ "$(( (299*r + 587*g + 114*b) / 1000 ))" -gt 128 ]; then
-                echo light; exit 0
+                emit apple-terminal light
             else
-                echo dark; exit 0
+                emit apple-terminal dark
             fi
         fi
     fi
@@ -126,10 +201,16 @@ fi
 # 5. COLORFGBG: rxvt-style "fg;bg".
 if [ -n "${COLORFGBG:-}" ]; then
     case "${COLORFGBG##*;}" in
-        0|1|2|3|4|5|6|8)         echo dark;  exit 0 ;;
-        7|9|10|11|12|13|14|15)   echo light; exit 0 ;;
+        0|1|2|3|4|5|6|8)         emit colorfgbg dark  ;;
+        7|9|10|11|12|13|14|15)   emit colorfgbg light ;;
     esac
 fi
 
-# 6. Default.
-echo dark
+# 6. Default — exits non-zero so callers can distinguish a confident detection
+# from this fallback (used by nvim's FocusGained hook to avoid flipping
+# &background away from a correct value when no signal fired). Stdout still
+# prints "dark" for the existing exit-status-blind callers (bashrc_exports,
+# nvim's startup detection).
+[ "$DEBUG" = "1" ] && printf 'detect-theme: step=default result=dark\n' >&2
+printf 'dark\n'
+exit 1

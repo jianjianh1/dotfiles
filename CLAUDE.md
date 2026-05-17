@@ -90,6 +90,7 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 - **tmux prefix** is `Ctrl-a` (not the default `Ctrl-b`).
 - **Indentation**: vimrc defaults to 4-space tabs; web filetypes (html/css/js/ts/json/yaml) use 2-space via autocmd. Neovim adds `lua` to the 2-space list.
 - Glow is used for markdown preview in vim (`<leader>m`).
+- **Theme override**: shell exposes `theme light|dark|auto` (bashrc_aliases / zshrc_aliases). It sets `SERVER_CONFIGS_THEME`, propagates to tmux via `set-environment -g`, and re-sources `~/.tmux-theme.conf`. Running nvim/vim instances need `:set background=light|dark` to repaint (handled by `colorscheme.lua`'s `OptionSet` autocmd). Detection covers VS Code (local + Remote-SSH via `~/.vscode-server/.../storage.json`), Apple Terminal, OSC 11 (outside tmux), and `COLORFGBG`; falls back to dark.
 
 ## CHPC (Center for High Performance Computing)
 

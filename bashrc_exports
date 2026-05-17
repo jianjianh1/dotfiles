@@ -77,11 +77,19 @@ shopt -s autocd 2>/dev/null || true         # type a directory name to cd into i
 # Apple Terminal → COLORFGBG → dark). Honoured by vimrc, nvim, tmux.conf,
 # starship, dircolors, and the fallback PS1 below.
 _server_configs_detect_theme() {
+    # Pass "force" to bypass the stale-env short-circuit and re-run a real
+    # probe via `detect-theme --force` (used by `theme auto` after the
+    # tmux global env has been busted).
+    local force_flag=""
+    if [ "${1:-}" = "force" ]; then
+        force_flag="--force"
+        SERVER_CONFIGS_THEME=""
+    fi
     case "${SERVER_CONFIGS_THEME:-}" in
         light|dark) ;;
         *)
             if [ -x "$HOME/.local/bin/detect-theme" ]; then
-                SERVER_CONFIGS_THEME="$("$HOME/.local/bin/detect-theme" 2>/dev/null)"
+                SERVER_CONFIGS_THEME="$("$HOME/.local/bin/detect-theme" $force_flag 2>/dev/null)"
             fi
             case "${SERVER_CONFIGS_THEME:-}" in
                 light|dark) ;;

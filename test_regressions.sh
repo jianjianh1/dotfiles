@@ -778,6 +778,156 @@ test_theme_detection() (
     out="$(env -i HOME="$(mktemp -d)" PATH="$PATH" TMUX=fake \
         bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
     [ "$out" = "dark" ] || fail "missing helper should still yield dark: got '$out'"
+
+    # VS Code Remote-SSH storage.json → light themeBackground resolves light.
+    # Staged at $tmp_home/.vscode-server/... so detect-theme.sh's loop hits it.
+    mkdir -p "$tmp_home/.vscode-server/data/User/globalStorage"
+    printf '{"themeBackground":"#ffffff"}\n' \
+        > "$tmp_home/.vscode-server/data/User/globalStorage/storage.json"
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake TERM_PROGRAM=vscode \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "Remote-SSH storage.json white bg should resolve light: got '$out'"
+
+    # VS Code Remote-SSH storage.json → dark themeBackground resolves dark.
+    printf '{"themeBackground":"#1e1e1e"}\n' \
+        > "$tmp_home/.vscode-server/data/User/globalStorage/storage.json"
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake TERM_PROGRAM=vscode \
+        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "dark" ] || fail "Remote-SSH storage.json dark bg should resolve dark: got '$out'"
+
+    # Clean up so subsequent assertions don't inherit the staged file.
+    rm -rf "$tmp_home/.vscode-server"
+)
+
+test_theme_function() (
+    # The `theme` function lives in bashrc_aliases and depends on
+    # _server_configs_detect_theme from bashrc_exports. Extract both, source in
+    # order, then exercise light/dark/auto. No tmux integration tested here —
+    # the function guards `tmux set-environment` on `$TMUX`, and we run with
+    # TMUX unset (env -i) so that branch is a no-op.
+    local tmp_home
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    mkdir -p "$tmp_home/.local/bin"
+    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/detect-theme.sh"
+
+    local detect_fn theme_fn
+    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
+    [ -n "$detect_fn" ] || fail "could not extract _server_configs_detect_theme"
+    [ -n "$theme_fn" ] || fail "could not extract theme function"
+
+    local out
+    # `theme light` forces SERVER_CONFIGS_THEME=light regardless of detection.
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme light >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "theme light should set SERVER_CONFIGS_THEME=light: got '$out'"
+
+    # `theme dark` forces SERVER_CONFIGS_THEME=dark.
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme dark >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "dark" ] || fail "theme dark should set SERVER_CONFIGS_THEME=dark: got '$out'"
+
+    # `theme auto` clears any cached value and re-runs detection. With
+    # COLORFGBG=0;15 the fallback chain resolves to light — proves the
+    # SERVER_CONFIGS_THEME unset path actually re-enters detection.
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" COLORFGBG='0;15' \
+        SERVER_CONFIGS_THEME=dark \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme auto >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "theme auto should re-detect (COLORFGBG=0;15 → light): got '$out'"
+
+    # Unknown argument exits non-zero without modifying state.
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" SERVER_CONFIGS_THEME=light \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme bogus 2>/dev/null; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    [ "$out" = "light" ] || fail "theme bogus should not modify SERVER_CONFIGS_THEME: got '$out'"
+)
+
+_theme_auto_setup() {
+    # Common scaffolding for the two theme-auto tests: tmp HOME with a
+    # detect-theme symlink and a tmux stub that logs every invocation and
+    # answers `display -p '#{client_theme}'` / `-V` from env vars.
+    local tmp_home="$1"
+    mkdir -p "$tmp_home/.local/bin"
+    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/detect-theme.sh"
+    cat > "$tmp_home/.local/bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
+if [ "$1" = "display" ] && [ "$2" = "-p" ] && [ "$3" = '#{client_theme}' ]; then
+    printf '%s\n' "${TMUX_STUB_CLIENT_THEME:-}"
+elif [ "$1" = "-V" ]; then
+    printf 'tmux %s\n' "${TMUX_STUB_VERSION:-3.2a}"
+fi
+exit 0
+STUB
+    chmod +x "$tmp_home/.local/bin/tmux"
+}
+
+test_theme_function_auto_busts_cache_on_modern_tmux() (
+    # On tmux 3.6+ (where #{client_theme} returns light/dark), `theme auto`
+    # busts the stale SERVER_CONFIGS_THEME from tmux's global env so the
+    # re-probe doesn't immediately return the value cached by an earlier
+    # run.
+    local tmp_home
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    _theme_auto_setup "$tmp_home"
+
+    local detect_fn theme_fn
+    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
+    [ -n "$detect_fn" ] || fail "could not extract _server_configs_detect_theme"
+    [ -n "$theme_fn" ] || fail "could not extract theme function"
+
+    local log="$tmp_home/tmux.log"
+    : > "$log"
+    env -i HOME="$tmp_home" PATH="$tmp_home/.local/bin:$PATH" \
+        TMUX=fake TMUX_STUB_LOG="$log" \
+        TMUX_STUB_CLIENT_THEME=light TMUX_STUB_VERSION=3.6 \
+        SERVER_CONFIGS_THEME=dark \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme auto >/dev/null 2>&1' >/dev/null 2>&1 || true
+
+    grep -E '^set-environment .*-u .*SERVER_CONFIGS_THEME' "$log" >/dev/null ||
+        fail "theme auto did not bust tmux global env cache on tmux 3.6+. log:
+$(cat "$log")"
+)
+
+test_theme_function_auto_refuses_on_legacy_tmux() (
+    # On tmux < 3.6 there's no in-session probe (#{client_theme} is empty,
+    # passthrough unavailable). `theme auto` must refuse rather than bust
+    # the cache and overwrite it with the dark default that detect-theme
+    # would fall through to.
+    local tmp_home
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    _theme_auto_setup "$tmp_home"
+
+    local detect_fn theme_fn
+    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
+
+    local log="$tmp_home/tmux.log"
+    local stderr_file="$tmp_home/stderr.txt"
+    : > "$log"
+    env -i HOME="$tmp_home" PATH="$tmp_home/.local/bin:$PATH" \
+        TMUX=fake TMUX_STUB_LOG="$log" \
+        TMUX_STUB_CLIENT_THEME='' TMUX_STUB_VERSION=3.2a \
+        SERVER_CONFIGS_THEME=dark \
+        bash -c "$detect_fn"$'\n'"$theme_fn"';
+            theme auto >/dev/null 2> "'"$stderr_file"'"' || true
+
+    ! grep -E '^set-environment .*-u .*SERVER_CONFIGS_THEME' "$log" >/dev/null ||
+        fail "theme auto wrongly busted cache on legacy tmux. log:
+$(cat "$log")"
+    grep -q 'not supported' "$stderr_file" ||
+        fail "theme auto did not emit unsupported-tmux warning on legacy tmux. stderr:
+$(cat "$stderr_file")"
 )
 
 test_chpc_allocs_self_test() (
@@ -827,6 +977,9 @@ main() {
     run_test test_pre_commit_no_staged_files
     run_test test_pre_commit_blocks_secrets
     run_test test_theme_detection
+    run_test test_theme_function
+    run_test test_theme_function_auto_busts_cache_on_modern_tmux
+    run_test test_theme_function_auto_refuses_on_legacy_tmux
     run_test test_chpc_allocs_self_test
     run_test test_chpc_allocs_python36_compatible
     echo "All regression tests passed."

@@ -53,6 +53,32 @@ autocmd("TextYankPost", {
     end,
 })
 
+-- Re-pick up the terminal theme when nvim regains focus or resumes from
+-- suspend. Uses `detect-theme --force` so the stale SERVER_CONFIGS_THEME
+-- inherited from the launching shell can't shadow a fresh probe. The
+-- colorscheme reload is wired through the OptionSet autocmd in
+-- plugins/colorscheme.lua, so flipping &background is enough.
+--
+-- Skip on non-zero exit so the dark-default fallback (inside tmux <3.6
+-- where there is no in-session probe) doesn't flip a correctly-set light
+-- background away.
+augroup("ThemeFollow", { clear = true })
+autocmd({ "FocusGained", "VimResume" }, {
+    group = "ThemeFollow",
+    callback = function()
+        local detect = vim.fn.expand("~/.local/bin/detect-theme")
+        if vim.fn.executable(detect) == 0 then return end
+        local ok, out = pcall(vim.fn.system, { detect, "--force" })
+        if not ok or vim.v.shell_error ~= 0 then return end
+        local detected = vim.trim(out)
+        if detected == "light" and vim.o.background ~= "light" then
+            vim.o.background = "light"
+        elseif detected == "dark" and vim.o.background ~= "dark" then
+            vim.o.background = "dark"
+        end
+    end,
+})
+
 -- Disable expensive features for large files (>1MB)
 augroup("LargeFileTuning", { clear = true })
 autocmd("BufReadPost", {

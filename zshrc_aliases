@@ -83,6 +83,61 @@ alias tn='tmux new -s'
 alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
 
+# Manual theme override. `theme auto` re-runs detect-theme (clears the cached
+# SERVER_CONFIGS_THEME first, otherwise the early-return in
+# _server_configs_detect_theme would no-op). Inside tmux, propagate to the
+# global env so new panes inherit and re-source the theme block to repaint
+# existing panes. Running nvim/vim instances cache &background at startup and
+# need `:set background=light|dark` to flip via the OptionSet autocmd.
+theme() {
+    case "${1:-auto}" in
+        light|dark)
+            export SERVER_CONFIGS_THEME="$1"
+            ;;
+        auto)
+            # Inside tmux, auto-detect needs an in-session probe — tmux 3.6+
+            # exposes #{client_theme}; older tmux has neither that nor
+            # allow-passthrough'd OSC 11. Without a probe, detect-theme falls
+            # through to its dark default and would overwrite a possibly-correct
+            # cached value, so refuse on legacy tmux and tell the user.
+            if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+                case "$(tmux display -p '#{client_theme}' 2>/dev/null)" in
+                    light|dark) ;;
+                    *)
+                        printf 'theme: auto-detect inside tmux %s is not supported (need tmux 3.6+ #{client_theme}). Open a fresh outside-tmux terminal, or use `theme light|dark`.\n' \
+                            "$(tmux -V 2>/dev/null | awk '{print $2}')" >&2
+                        return 1
+                        ;;
+                esac
+            fi
+            unset SERVER_CONFIGS_THEME
+            # Bust tmux's global-env cache so detect-theme step 2a falls
+            # through to a real #{client_theme} re-probe instead of
+            # returning the value cached by an earlier run.
+            if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+                tmux set-environment -g -u SERVER_CONFIGS_THEME 2>/dev/null || true
+            fi
+            if command -v _server_configs_detect_theme >/dev/null 2>&1; then
+                _server_configs_detect_theme force
+            fi
+            ;;
+        -h|--help|help)
+            printf 'usage: theme [light|dark|auto]\n' >&2
+            return 0
+            ;;
+        *)
+            printf 'theme: unknown argument %s (expected light|dark|auto)\n' "$1" >&2
+            return 2
+            ;;
+    esac
+    if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+        tmux set-environment -g SERVER_CONFIGS_THEME "${SERVER_CONFIGS_THEME:-dark}"
+        [ -f "$HOME/.tmux-theme.conf" ] && tmux source-file "$HOME/.tmux-theme.conf" 2>/dev/null
+    fi
+    printf 'theme: SERVER_CONFIGS_THEME=%s%s\n' "${SERVER_CONFIGS_THEME:-unset}" \
+        "${TMUX:+ (tmux repainted; running nvim/vim: :set background=...)}" >&2
+}
+
 # Modern tool replacements (guarded)
 command -v bat &>/dev/null && alias cat='bat --paging=never'
 command -v fd &>/dev/null && alias ff='fd'
