@@ -643,7 +643,7 @@ test_nvim_install_selects_legacy_and_arm_assets() (
 
     calls="$tmp/old-glibc-calls"
     machine_arch() { printf 'x86_64'; }
-    nvim_glibc_version() { printf '2.17'; }
+    glibc_version() { printf '2.17'; }
     install_nvim_tarball() {
         printf 'tarball %s %s\n' "$1" "$2" >> "$calls"
         case "$2" in
@@ -666,7 +666,7 @@ test_nvim_install_selects_legacy_and_arm_assets() (
 
     calls="$tmp/arm-calls"
     machine_arch() { printf 'aarch64'; }
-    nvim_glibc_version() { :; }
+    glibc_version() { :; }
     install_nvim_tarball() {
         printf 'tarball %s %s\n' "$1" "$2" >> "$calls"
         case "$2" in
