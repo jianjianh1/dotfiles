@@ -76,16 +76,25 @@ unsetopt BEEP
 # starship, dircolors, and the fallback PROMPT below.
 _server_configs_detect_theme() {
     case "${SERVER_CONFIGS_THEME:-}" in
-        light|dark) return 0 ;;
-    esac
-    if [ -x "$HOME/.local/bin/detect-theme" ]; then
-        SERVER_CONFIGS_THEME="$("$HOME/.local/bin/detect-theme" 2>/dev/null)"
-    fi
-    case "${SERVER_CONFIGS_THEME:-}" in
         light|dark) ;;
-        *) SERVER_CONFIGS_THEME=dark ;;
+        *)
+            if [ -x "$HOME/.local/bin/detect-theme" ]; then
+                SERVER_CONFIGS_THEME="$("$HOME/.local/bin/detect-theme" 2>/dev/null)"
+            fi
+            case "${SERVER_CONFIGS_THEME:-}" in
+                light|dark) ;;
+                *) SERVER_CONFIGS_THEME=dark ;;
+            esac
+            ;;
     esac
     export SERVER_CONFIGS_THEME
+    # Sync into tmux's global env so if-shell predicates in tmux-theme.conf
+    # short-circuit on the explicit-override path (detect-theme step 1).
+    # Runs on both cold and warm paths so a pane that inherited the value via
+    # session env still refreshes tmux's global env on tmux < 3.6.
+    if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+        tmux set-environment -g SERVER_CONFIGS_THEME "$SERVER_CONFIGS_THEME" 2>/dev/null || true
+    fi
 }
 _server_configs_detect_theme
 

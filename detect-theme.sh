@@ -46,6 +46,27 @@ case "${SERVER_CONFIGS_THEME:-}" in
     light|dark) printf '%s\n' "$SERVER_CONFIGS_THEME"; exit 0 ;;
 esac
 
+# 2a. Inside tmux: ask tmux. First read SERVER_CONFIGS_THEME from the server's
+# global env — populated by `theme light|dark|auto`, by _server_configs_detect_theme,
+# or by a previous run of this script. Faster and more reliable than re-probing,
+# and avoids if-shell env-forwarding quirks on tmux < 3.4. Then try #{client_theme}
+# (tmux 3.6+ probes OSC 11 on the client tty and caches it). On older tmux the
+# format is empty and we fall through to the existing chain.
+if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    cached=$(tmux show-environment -g SERVER_CONFIGS_THEME 2>/dev/null | sed -n 's/^SERVER_CONFIGS_THEME=//p')
+    case "$cached" in
+        light|dark) printf '%s\n' "$cached"; exit 0 ;;
+    esac
+    ct=$(tmux display -p '#{client_theme}' 2>/dev/null)
+    case "$ct" in
+        light|dark)
+            tmux set-environment -g SERVER_CONFIGS_THEME "$ct" 2>/dev/null || true
+            printf '%s\n' "$ct"
+            exit 0
+            ;;
+    esac
+fi
+
 # 2. OSC 11. Skip inside tmux (response is eaten) and when not on a tty
 # (we're being called from nvim's vim.fn.system, tmux's if-shell, etc.).
 if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
@@ -64,12 +85,18 @@ fi
 
 # 3. VS Code: themeBackground in storage.json is the actual rendered colour,
 # regardless of theme name, high-contrast mode, profile, or sync state.
+# The .vscode-server[-insiders] paths cover Remote-SSH hosts where the editor
+# UI lives on a different machine; the file is only present once VS Code has
+# synced state to the remote (some hosts have an empty globalStorage and will
+# fall through to the next signal).
 if [ "${TERM_PROGRAM:-}" = "vscode" ]; then
     for storage in \
         "$HOME/Library/Application Support/Code/User/globalStorage/storage.json" \
         "$HOME/Library/Application Support/Code - Insiders/User/globalStorage/storage.json" \
         "$HOME/.config/Code/User/globalStorage/storage.json" \
-        "$HOME/.config/Code - Insiders/User/globalStorage/storage.json"
+        "$HOME/.config/Code - Insiders/User/globalStorage/storage.json" \
+        "$HOME/.vscode-server/data/User/globalStorage/storage.json" \
+        "$HOME/.vscode-server-insiders/data/User/globalStorage/storage.json"
     do
         [ -r "$storage" ] || continue
         bg=$(sed -n 's/.*"themeBackground"[[:space:]]*:[[:space:]]*"\(#[0-9a-fA-F]\{6\}\)".*/\1/p' "$storage" | head -n1)
