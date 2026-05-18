@@ -1250,6 +1250,42 @@ install_openvscode_server() {
     echo "  openvscode-server v${VERSION} installed to $install_dir"
 }
 
+_vsix_latest_platform_version() {
+    # Resolve the latest version of a VS Code Marketplace extension that
+    # actually ships the requested targetPlatform. Workaround for the
+    # Marketplace quirk where /vsextensions/<name>/latest/vspackage?
+    # targetPlatform=<plat> returns 404 on platform-specific extensions —
+    # `latest` resolves to the platform-neutral entry, which has no
+    # targetPlatform builds, so the filter matches nothing. Prints the
+    # version on success; returns nonzero on parse/network failure.
+    local pub="$1" name="$2" platform="$3"
+    local body resp
+    body=$(printf '{"filters":[{"criteria":[{"filterType":7,"value":"%s.%s"}]}],"flags":1}' "$pub" "$name")
+    resp=$(retry curl -sfL --compressed \
+        -H "Accept: application/json;api-version=3.0-preview.1" \
+        -H "Content-Type: application/json" \
+        -d "$body" \
+        "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery") || return 1
+    if command -v jq &>/dev/null; then
+        printf '%s' "$resp" | jq -er --arg p "$platform" \
+            'first(.results[0].extensions[0].versions[] | select(.targetPlatform==$p) | .version)' \
+            2>/dev/null
+    elif command -v python3 &>/dev/null; then
+        printf '%s' "$resp" | python3 -c '
+import json, sys
+plat = sys.argv[1]
+data = json.load(sys.stdin)
+for v in data["results"][0]["extensions"][0]["versions"]:
+    if v.get("targetPlatform") == plat:
+        print(v["version"])
+        sys.exit(0)
+sys.exit(1)
+' "$platform" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
 install_vscode_extensions() {
     # Pre-populate ~/.vscode-server/extensions/ so Remote-SSH / code tunnel
     # sessions land with Claude Code, ChatGPT, C/C++, and Python already
@@ -1277,7 +1313,7 @@ install_vscode_extensions() {
     trap 'rm -rf "${TMP:-}"' RETURN
 
     local installed=0 skipped=0 failed=0 attempted=0
-    local spec id flag pub name url vsix
+    local spec id flag pub name url vsix ver resolved
     for spec in "${VSCODE_EXTENSIONS[@]}"; do
         id="${spec%%:*}"
         flag="${spec#*:}"
@@ -1292,7 +1328,18 @@ install_vscode_extensions() {
             continue
         fi
         attempted=$((attempted + 1))
-        url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${pub}/vsextensions/${name}/latest/vspackage"
+        # For platform-specific extensions the Marketplace API rejects
+        # `latest` + ?targetPlatform=, so resolve a concrete version first.
+        ver="latest"
+        if [ "$flag" = "platform" ]; then
+            resolved="$(_vsix_latest_platform_version "$pub" "$name" "$PLATFORM" 2>/dev/null || true)"
+            if [ -n "$resolved" ]; then
+                ver="$resolved"
+            else
+                echo "  Warning: could not resolve $PLATFORM version for $id, falling back to 'latest'"
+            fi
+        fi
+        url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${pub}/vsextensions/${name}/${ver}/vspackage"
         [ "$flag" = "platform" ] && url="${url}?targetPlatform=${PLATFORM}"
         vsix="$TMP/${id}.vsix"
         echo "  Downloading $id..."
