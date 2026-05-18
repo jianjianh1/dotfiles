@@ -28,7 +28,7 @@ nvim/
         ├── treesitter.lua            # Syntax parsing
         ├── oil.lua                   # File explorer
         ├── markdown.lua              # Markdown preview
-        ├── editing.lua               # autopairs, Comment, surround
+        ├── editing.lua               # autopairs, surround
         ├── fugitive.lua              # Git wrapper
         ├── diffview.lua              # Diff viewer
         ├── which-key.lua             # Keybinding hints
@@ -335,7 +335,9 @@ Loads on `BufReadPost` and `BufNewFile`.
 
 Auto-closes brackets, quotes, and parentheses. Activates on `InsertEnter`.
 
-#### Comment.nvim
+#### Commenting (built-in)
+
+Neovim 0.10+ ships native commenting; no plugin needed.
 
 | Key | Mode | Action |
 |-----|------|--------|
@@ -343,7 +345,7 @@ Auto-closes brackets, quotes, and parentheses. Activates on `InsertEnter`.
 | `gc{motion}` | n | Toggle comment over motion |
 | `gc` | v | Toggle comment on selection |
 
-Loads on `VeryLazy`.
+Uses treesitter-aware `commentstring`.
 
 #### nvim-surround
 
@@ -461,7 +463,6 @@ nvim --headless '+Lazy! sync' +qa
 | render-markdown.nvim | In-buffer markdown | ft=markdown | — |
 | markdown-preview.nvim | Browser preview | `<leader>m` (markdown) | 1 |
 | nvim-autopairs | Auto-close brackets | InsertEnter | — |
-| Comment.nvim | Toggle comments | VeryLazy | gcc, gc |
 | nvim-surround | Surround text | VeryLazy | cs, ds, ys |
 | which-key.nvim | Keybinding popup | VeryLazy | `<leader>` + wait |
 | indent-blankline.nvim | Indent guides | BufReadPost | — |
