@@ -109,12 +109,15 @@ portable_realpath() {
 
 # True iff $1 is a symlink whose target resolves into this repo ($DIR).
 # Callers must have $DIR set (every script that sources common.sh does).
+# Matches both the literal $DIR and its canonical form, since macOS
+# portable_realpath resolves /var → /private/var while $DIR stays logical.
 is_managed_symlink() {
     [ -L "$1" ] || return 1
-    local target
+    local target dir_canon
     target="$(portable_realpath "$1" 2>/dev/null || true)"
+    dir_canon="$(portable_realpath "$DIR" 2>/dev/null || printf '%s' "$DIR")"
     case "$target" in
-        "$DIR"|"$DIR"/*) return 0 ;;
+        "$DIR"|"$DIR"/*|"$dir_canon"|"$dir_canon"/*) return 0 ;;
         *) return 1 ;;
     esac
 }

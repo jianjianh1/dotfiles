@@ -39,12 +39,19 @@ restore_backup() {
 
 unlink_config() {
     local dst="$1"
-    local target=""
+    local target="" dir_canon="" gen_canon=""
 
     if [ -L "$dst" ]; then
         target="$(portable_realpath "$dst" 2>/dev/null || true)"
+        # macOS resolves /var → /private/var (and similar /tmp → /private/tmp)
+        # via portable_realpath, but $DIR / $GENERATED_DIR are kept in their
+        # logical (pre-resolve) form. Match against both so the comparison
+        # works whether or not the path crossed a symlinked prefix.
+        dir_canon="$(portable_realpath "$DIR" 2>/dev/null || printf '%s' "$DIR")"
+        gen_canon="$(portable_realpath "$GENERATED_DIR" 2>/dev/null || printf '%s' "$GENERATED_DIR")"
         case "$target" in
-            "$DIR"|"$DIR"/*|"$GENERATED_DIR"|"$GENERATED_DIR"/*)
+            "$DIR"|"$DIR"/*|"$GENERATED_DIR"|"$GENERATED_DIR"/*|\
+            "$dir_canon"|"$dir_canon"/*|"$gen_canon"|"$gen_canon"/*)
                 rm -f "$dst"
                 echo "  Removed $dst"
                 restore_backup "$dst"
