@@ -464,8 +464,11 @@ EOF
     # merge.conflictstyle: zdiff3 landed in git 2.35 (Jan 2022). On older gits
     # the static value would trip "fatal: unknown style 'zdiff3'" — including
     # in subprocess git calls from tools like the Claude Code plugin installer.
-    # Fall back to diff3 (same conflict-resolution semantics, just without the
-    # zealous shared-context collapsing). Skip entirely if git is missing.
+    # The static `gitconfig` declares `diff3` as a safe default *before* the
+    # `[include]`; this block's role is upgrade-only — emit `zdiff3` on
+    # git >= 2.35 (last-write-wins overrides the static default) and a
+    # redundant `diff3` echo on older git for clarity. When git_version fails,
+    # skip the block entirely and let the static default rule.
     local gitv
     gitv="$(git_version 2>/dev/null || true)"
     if [ -n "$gitv" ]; then

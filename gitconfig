@@ -57,6 +57,9 @@
 [rerere]
 	enabled = true
 
+[merge]
+	conflictstyle = diff3
+
 [include]
 	path = ~/.server-configs-generated/gitconfig.compat
 
