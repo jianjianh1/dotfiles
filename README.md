@@ -59,7 +59,7 @@ HOME="$(mktemp -d)" ./setup.sh --dry-run
 | `vimrc` | `~/.vimrc` | symlink |
 | `nvim/` | `~/.config/nvim/` | symlink |
 | `tmux.conf` | `~/.tmux.conf` | symlink |
-| `tmux-theme.conf` | `~/.tmux-theme.conf` | symlink |
+| _generated_ `tmux-theme.conf` | `~/.tmux-theme.conf` | symlink (rendered by `setup.sh`) |
 | `gitconfig` | `~/.gitconfig` | symlink |
 | `sshconfig` | `~/.ssh/config` | symlink |
 | `inputrc` | `~/.inputrc` | symlink |
@@ -135,8 +135,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │           ├── markdown.lua
 │           ├── which-key.lua
 │           └── indent-blankline.lua
-├── tmux.conf                   # tmux config (prefix: Ctrl-a)
-├── tmux-theme.conf             # tmux light/dark status palette
+├── tmux.conf                   # tmux config (prefix: Ctrl-a); theme rendered into ~/.server-configs-generated/tmux-theme.conf
 ├── gitconfig                   # Git config (delta pager, rebase, aliases)
 ├── sshconfig                   # SSH multiplexing + keep-alive
 ├── inputrc                     # Readline (case-insensitive, history search)

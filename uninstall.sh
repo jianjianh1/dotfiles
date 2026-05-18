@@ -44,7 +44,7 @@ unlink_config() {
     if [ -L "$dst" ]; then
         target="$(portable_realpath "$dst" 2>/dev/null || true)"
         case "$target" in
-            "$DIR"|"$DIR"/*)
+            "$DIR"|"$DIR"/*|"$GENERATED_DIR"|"$GENERATED_DIR"/*)
                 rm -f "$dst"
                 echo "  Removed $dst"
                 restore_backup "$dst"

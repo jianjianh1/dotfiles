@@ -256,7 +256,8 @@ test_manifest_controls_uninstall() (
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/detect-theme"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/opt/nvim/bin/nvim"
     ln -s "$HOME/.local/opt/nvim/bin/nvim" "$HOME/.local/bin/nvim"
-    ln -s "$DIR/tmux-theme.conf" "$HOME/.tmux-theme.conf"
+    : > "$HOME/.server-configs-generated/tmux-theme.conf"
+    ln -s "$HOME/.server-configs-generated/tmux-theme.conf" "$HOME/.tmux-theme.conf"
     chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg" "$HOME/.local/bin/detect-theme" "$HOME/.local/opt/nvim/bin/nvim"
     printf 'config = true\n' > "$HOME/.codex/config.toml"
 
