@@ -35,6 +35,16 @@ TREE_SITTER_MODULE_CANDIDATES=()
 # VS Code helpers have no CHPC module today; both fall back to binary install.
 CODE_CLI_MODULE_CANDIDATES=()
 OPENVSCODE_MODULE_CANDIDATES=()
+# VS Code extensions auto-installed into ~/.vscode-server/extensions/ by
+# install_vscode_extensions. Format: "<publisher>.<name>[:platform]".
+# The :platform suffix marks extensions that ship per-arch .vsix builds
+# (we'll append ?targetPlatform=linux-x64 / linux-arm64 to the download URL).
+VSCODE_EXTENSIONS=(
+    "anthropic.claude-code"
+    "openai.chatgpt"
+    "ms-vscode.cpptools:platform"
+    "ms-python.python:platform"
+)
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
@@ -1240,6 +1250,71 @@ install_openvscode_server() {
     echo "  openvscode-server v${VERSION} installed to $install_dir"
 }
 
+install_vscode_extensions() {
+    # Pre-populate ~/.vscode-server/extensions/ so Remote-SSH / code tunnel
+    # sessions land with Claude Code, ChatGPT, C/C++, and Python already
+    # enabled. Uses openvscode-server as the unzip/registry mechanism; the
+    # editor host these extensions actually run in is Microsoft VS Code
+    # (the licensed target). Intentionally does not call manifest_add_path:
+    # the user's extensions dir may also hold extensions pushed by local
+    # VS Code Settings Sync, and uninstall.sh must not rm those.
+    is_macos && return 0
+    if ! command -v openvscode-server &>/dev/null; then
+        echo "  Skipping vscode extensions (openvscode-server not installed)"
+        return 0
+    fi
+    local ARCH PLATFORM
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  PLATFORM="linux-x64" ;;
+        aarch64) PLATFORM="linux-arm64" ;;
+        *) echo "  Skipping vscode extensions (unsupported arch: $ARCH)"; return 0 ;;
+    esac
+    local ext_dir="$HOME/.vscode-server/extensions"
+    mkdir -p "$ext_dir" || return 1
+    local TMP
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+
+    local installed=0 skipped=0 failed=0 attempted=0
+    local spec id flag pub name url vsix
+    for spec in "${VSCODE_EXTENSIONS[@]}"; do
+        id="${spec%%:*}"
+        flag="${spec#*:}"
+        [ "$flag" = "$id" ] && flag=""
+        pub="${id%%.*}"
+        name="${id#*.}"
+        # Idempotency: a version-suffixed dir matching this ID counts as
+        # installed. compgen -G expands a glob and returns nonzero on no match.
+        if ! $FORCE && compgen -G "$ext_dir/${id}-*" >/dev/null; then
+            echo "  $id already installed"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        attempted=$((attempted + 1))
+        url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${pub}/vsextensions/${name}/latest/vspackage"
+        [ "$flag" = "platform" ] && url="${url}?targetPlatform=${PLATFORM}"
+        vsix="$TMP/${id}.vsix"
+        echo "  Downloading $id..."
+        if ! retry curl -sfL --compressed -o "$vsix" "$url"; then
+            echo "  Warning: download failed for $id"
+            failed=$((failed + 1))
+            continue
+        fi
+        if openvscode-server --extensions-dir "$ext_dir" \
+               --install-extension "$vsix" --force >/dev/null 2>&1; then
+            installed=$((installed + 1))
+        else
+            echo "  Warning: install failed for $id (possible engine-version mismatch with openvscode-server; local VS Code will install on first Remote-Tunnels connect)"
+            failed=$((failed + 1))
+        fi
+    done
+    echo "  vscode extensions: $installed installed, $skipped skipped, $failed failed"
+    # Only propagate failure when every attempted install failed; partial
+    # success still counts as a success for run_step's purposes.
+    [ "$attempted" -eq 0 ] || [ "$failed" -lt "$attempted" ]
+}
+
 glibc_version() {
     local first_line
 
@@ -1925,6 +2000,7 @@ setup_main() {
     run_step "uv"           install_uv
     run_step "code (tunnel CLI)"   install_code_cli
     run_step "openvscode-server"   install_openvscode_server
+    run_step "vscode extensions"   install_vscode_extensions
     install_gh_tools
     run_step "tree-sitter"  install_tree_sitter
     run_step "nvim"         install_nvim
