@@ -104,13 +104,17 @@ fi
 # terminator arrives; a laggy SSH link gets the full budget — still
 # better than missing the answer and defaulting to dark.
 #
-# We rely only on `-t 0 -t 1` as the precondition. Some sandboxes (Linux
-# user namespaces, certain SSH setups) make `/dev/tty` functional for
-# read/write but report `[ -r /dev/tty ]` as false, so testing the path
-# explicitly would falsely skip a working probe. The actual `printf
-# >/dev/tty` and `read </dev/tty` calls silently no-op via `2>/dev/null
-# || true` if the path is truly unreachable.
-if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -t 1 ]; then
+# Precondition is just `-t 0` (a controlling terminal exists). We
+# DON'T also check `-t 1`: when called via command substitution
+# `SERVER_CONFIGS_THEME="$(detect-theme)"` from shell init, stdout is
+# a pipe even though /dev/tty is perfectly accessible — checking `-t 1`
+# would skip OSC 11 exactly in the load-bearing case. The OSC 11
+# block writes to /dev/tty directly and reads via the loop's
+# `</dev/tty` redirect, both with `2>/dev/null || true`, so stdout
+# being a pipe is irrelevant and a non-existent /dev/tty falls through
+# harmlessly. Likewise we don't test `-r /dev/tty` — some sandboxes
+# make /dev/tty functional for read/write but report it unreadable.
+if [ -z "${TMUX:-}" ] && [ -t 0 ]; then
     printf '\e]11;?\e\\' > /dev/tty 2>/dev/null
     resp=""
     # Redirect /dev/tty into the loop's stdin exactly once for the whole
