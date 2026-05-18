@@ -84,6 +84,41 @@ alias tn='tmux new -s'
 alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
 
+# VS Code remote helpers (installed by setup.sh).
+# vscode-tunnel: start a `code tunnel` on this host. First run prompts for
+# GitHub/MS login; subsequent runs reuse the cached auth and print a
+# vscode.dev URL (also reachable via the Remote-Tunnels extension in a local
+# VS Code). Default tunnel name = short hostname; override: vscode-tunnel myname
+vscode-tunnel() {
+    command -v code >/dev/null 2>&1 || { echo "code CLI not installed (run setup.sh)"; return 1; }
+    local name="${1:-$(hostname -s)}"
+    code tunnel --name "$name" --accept-server-license-terms
+}
+
+# Pre-download vscode-server for a specific VS Code commit so Remote-SSH
+# first-connect is fast (or works on a node without internet). Get the commit
+# from your local VS Code: Help → About → "Commit: <hash>". Idempotent.
+prefetch-vscode-server() {
+    local commit="${1:?usage: prefetch-vscode-server <commit-hash>}"
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch=x64 ;;
+        aarch64) arch=arm64 ;;
+        *) echo "unsupported arch"; return 1 ;;
+    esac
+    local dst="$HOME/.vscode-server/bin/$commit"
+    [ -x "$dst/bin/code-server" ] && { echo "already staged: $dst"; return 0; }
+    mkdir -p "$dst"
+    local url="https://update.code.visualstudio.com/commit:$commit/server-linux-$arch/stable"
+    echo "fetching $url"
+    if ! curl -fL "$url" | tar xz -C "$dst" --strip-components=1; then
+        echo "download failed"
+        rm -rf "$dst"
+        return 1
+    fi
+    echo "staged at $dst"
+}
+
 # Manual theme override. `theme auto` re-runs detect-theme (clears the cached
 # SERVER_CONFIGS_THEME first, otherwise the early-return in
 # _server_configs_detect_theme would no-op). Inside tmux, propagate to the

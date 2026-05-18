@@ -14,7 +14,7 @@ CODEX_CONFIG_MODE="repo"
 reset_module_vars() {
     local module_var
 
-    for module_var in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE; do
+    for module_var in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE CODE_CLI_MODULE OPENVSCODE_MODULE; do
         printf -v "$module_var" '%s' ""
     done
 }
@@ -32,6 +32,9 @@ NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")
 # tree-sitter has no CHPC module today; install_tree_sitter falls back to
 # the prebuilt binary (then to cargo build-from-source if glibc is too old).
 TREE_SITTER_MODULE_CANDIDATES=()
+# VS Code helpers have no CHPC module today; both fall back to binary install.
+CODE_CLI_MODULE_CANDIDATES=()
+OPENVSCODE_MODULE_CANDIDATES=()
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
@@ -1109,6 +1112,134 @@ install_uv() {
     echo "  uv $(uv --version) installed"
 }
 
+install_code_cli() {
+    # Microsoft's standalone `code` CLI (tunnel CLI). Skip on macOS where
+    # users run the full VS Code locally; this binary is meant for remote
+    # hosts where you launch `code tunnel`.
+    if is_macos; then
+        return 0
+    fi
+    if is_chpc && $CHPC_USE_MODULES; then
+        try_chpc_module_load code "VS Code CLI" CODE_CLI_MODULE "${CODE_CLI_MODULE_CANDIDATES[@]}"
+        return
+    fi
+    if command -v code &>/dev/null && ! $FORCE; then
+        # Only treat the existing binary as managed when it's the standalone
+        # tunnel CLI, not some unrelated `code` in PATH (e.g. a wrapper).
+        if code --version 2>&1 | head -3 | grep -qiE 'tunnel|stable|x64|arm64'; then
+            record_command_if_managed code || true
+            echo "code CLI already installed: $(code --version 2>/dev/null | head -1)"
+            return 0
+        fi
+    fi
+    echo "Installing VS Code CLI (code)..."
+    local ARCH CODE_ARCH TMP
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  CODE_ARCH="cli-linux-x64" ;;
+        aarch64) CODE_ARCH="cli-linux-arm64" ;;
+        *) echo "  Skipping code CLI (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/code.tar.gz" "https://update.code.visualstudio.com/latest/${CODE_ARCH}/stable"; then
+        echo "  Warning: failed to download VS Code CLI"
+        return 1
+    fi
+    if ! tar xz -C "$TMP" -f "$TMP/code.tar.gz"; then
+        echo "  Warning: failed to extract VS Code CLI archive"
+        return 1
+    fi
+    if [ ! -f "$TMP/code" ]; then
+        echo "  Warning: VS Code CLI archive had unexpected layout"
+        return 1
+    fi
+    mkdir -p "$HOME/.local/bin"
+    if ! mv -f "$TMP/code" "$HOME/.local/bin/code"; then
+        echo "  Warning: failed to install code binary"
+        return 1
+    fi
+    chmod +x "$HOME/.local/bin/code"
+    hash -r
+    manifest_add_path "$HOME/.local/bin/code"
+    echo "  code $("$HOME/.local/bin/code" --version 2>/dev/null | head -1) installed"
+}
+
+install_openvscode_server() {
+    # Gitpod's openvscode-server fork: full VS Code served on a local HTTP
+    # port. Useful when GitHub/MS account is not desired.
+    if is_macos; then
+        return 0
+    fi
+    if is_chpc && $CHPC_USE_MODULES; then
+        try_chpc_module_load openvscode-server "openvscode-server" OPENVSCODE_MODULE "${OPENVSCODE_MODULE_CANDIDATES[@]}"
+        return
+    fi
+    if command -v openvscode-server &>/dev/null && ! $FORCE; then
+        record_command_if_managed openvscode-server || true
+        echo "openvscode-server already installed: $(openvscode-server --version 2>/dev/null | head -1)"
+        return 0
+    fi
+    echo "Installing openvscode-server..."
+    local ARCH OV_ARCH TMP TAG VERSION
+    ARCH="$(machine_arch)"
+    case "$ARCH" in
+        x86_64)  OV_ARCH="x64" ;;
+        aarch64) OV_ARCH="arm64" ;;
+        *) echo "  Skipping openvscode-server (unsupported arch: $ARCH)"; return 1 ;;
+    esac
+    if ! command -v jq &>/dev/null; then
+        echo "  Warning: jq is required to resolve openvscode-server release tag"
+        return 1
+    fi
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "${TMP:-}"' RETURN
+    if ! retry curl -sfL -o "$TMP/release.json" "https://api.github.com/repos/gitpod-io/openvscode-server/releases/latest"; then
+        echo "  Warning: failed to query openvscode-server latest release"
+        return 1
+    fi
+    TAG="$(jq -r '.tag_name // empty' "$TMP/release.json")"
+    if [ -z "$TAG" ]; then
+        echo "  Warning: could not parse openvscode-server release tag"
+        return 1
+    fi
+    # Tag format is "openvscode-server-v1.95.3"; the asset uses the same prefix.
+    VERSION="${TAG#openvscode-server-v}"
+    local tarball="openvscode-server-v${VERSION}-linux-${OV_ARCH}.tar.gz"
+    local url="https://github.com/gitpod-io/openvscode-server/releases/download/${TAG}/${tarball}"
+    if ! retry curl -sfL -o "$TMP/ov.tar.gz" "$url"; then
+        echo "  Warning: failed to download $tarball"
+        return 1
+    fi
+    if ! tar xz -C "$TMP" -f "$TMP/ov.tar.gz"; then
+        echo "  Warning: failed to extract openvscode-server archive"
+        return 1
+    fi
+    local extracted install_dir target_bin
+    extracted="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'openvscode-server-*' | head -1)"
+    if [ -z "$extracted" ] || [ ! -x "$extracted/bin/openvscode-server" ]; then
+        echo "  Warning: openvscode-server archive had unexpected layout"
+        return 1
+    fi
+    install_dir="$HOME/.local/opt/openvscode-server-${VERSION}"
+    target_bin="$HOME/.local/bin/openvscode-server"
+    mkdir -p "$(dirname "$install_dir")" "$HOME/.local/bin" || return 1
+    rm -rf "$install_dir"
+    if ! mv "$extracted" "$install_dir"; then
+        echo "  Warning: failed to install openvscode-server to $install_dir"
+        return 1
+    fi
+    rm -f "$target_bin"
+    if ! ln -s "$install_dir/bin/openvscode-server" "$target_bin"; then
+        echo "  Warning: failed to link openvscode-server to $target_bin"
+        return 1
+    fi
+    hash -r
+    manifest_add_path "$target_bin"
+    manifest_add_path "$install_dir"
+    echo "  openvscode-server v${VERSION} installed to $install_dir"
+}
+
 glibc_version() {
     local first_line
 
@@ -1792,6 +1923,8 @@ setup_main() {
     run_step "gum"          install_gum
     run_step "node"         install_node
     run_step "uv"           install_uv
+    run_step "code (tunnel CLI)"   install_code_cli
+    run_step "openvscode-server"   install_openvscode_server
     install_gh_tools
     run_step "tree-sitter"  install_tree_sitter
     run_step "nvim"         install_nvim
