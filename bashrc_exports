@@ -76,6 +76,7 @@ shopt -s autocd 2>/dev/null || true         # type a directory name to cd into i
 # shared detect-theme helper (OSC 11 → VS Code settings.json →
 # Apple Terminal → COLORFGBG → dark). Honoured by vimrc, nvim, tmux.conf,
 # starship, dircolors, and the fallback PS1 below.
+# shellcheck disable=SC2120  # called with "force" from bashrc_aliases (cross-file)
 _server_configs_detect_theme() {
     # Pass "force" to bypass the stale-env short-circuit and re-run a real
     # probe via `detect-theme --force` (used by `theme auto` after the
