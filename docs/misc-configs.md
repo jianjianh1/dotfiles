@@ -6,7 +6,12 @@ Covers SSH, readline, and dircolors — smaller configs grouped in one file.
 
 ## SSH (`sshconfig`)
 
-Source: [`sshconfig`](../sshconfig) — symlinked to `~/.ssh/config`.
+Source: [`sshconfig`](../sshconfig) — wired into `~/.ssh/config` via an
+`Include` directive (not a symlink). `setup.sh` ensures the line
+`Include /path/to/this-repo/sshconfig` exists in `~/.ssh/config`; the file
+itself stays user-owned, so per-host blocks you add never dirty the repo
+working tree. `uninstall.sh` removes only the `Include` line and leaves
+your host entries alone.
 
 All settings apply to `Host *` (every connection).
 

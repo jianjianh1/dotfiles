@@ -161,7 +161,10 @@ remove_symlinks() {
     unlink_config "$HOME/.inputrc"
     unlink_config "$HOME/.dircolors"
     unlink_config "$HOME/.dircolors.light"
-    unlink_config "$HOME/.ssh/config"
+    # ~/.ssh/config is now a user-owned file with our Include line wired in
+    # (see setup.sh::wire_ssh_config). Only strip the Include — preserve
+    # any per-host blocks the user added.
+    clean_line_from_file "$HOME/.ssh/config" "^Include $DIR/sshconfig\$"
     unlink_config "$HOME/.config/nvim"
     unlink_config "$HOME/.config/starship.toml"
     unlink_config "$HOME/.config/starship-light.toml"

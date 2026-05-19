@@ -1887,6 +1887,39 @@ install_detect_theme() {
     manifest_add_path "$HOME/.local/bin/detect-theme"
 }
 
+# Wire the universal sshconfig fragment into ~/.ssh/config via an Include
+# directive instead of symlinking. A symlink would route every host entry
+# the user adds the natural way (editing ~/.ssh/config) through to the
+# repo and dirty the working tree. With Include, the repo file stays
+# minimal and user-owned host blocks live in ~/.ssh/config.
+wire_ssh_config() {
+    local config="$HOME/.ssh/config"
+    local include_line="Include $DIR/sshconfig"
+
+    mkdir -p "$HOME/.ssh" || return 1
+    chmod 700 "$HOME/.ssh" || return 1
+
+    # One-shot migration from the old symlink-into-repo install. The
+    # symlink's target is the repo's universal block now; we move the
+    # file aside so the user can recover any per-host entries they had
+    # added (which had been writing through to the repo).
+    if [ -L "$config" ] && is_managed_symlink "$config"; then
+        local backup
+        backup="$config.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -L "$config" "$backup" || return 1
+        rm "$config" || return 1
+        chmod 600 "$backup" 2>/dev/null || true
+        echo "  Detached old SSH config symlink → $backup"
+        echo "  Copy any per-host blocks from that backup into ~/.ssh/config."
+    fi
+
+    if [ ! -e "$config" ]; then
+        touch "$config" || return 1
+    fi
+    chmod 600 "$config" || return 1
+    append_line_if_missing "$include_line" "$config" || return 1
+}
+
 link_core_configs() {
     mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" || return 1
     backup_and_link "$DIR/vimrc" "$HOME/.vimrc" || return 1
@@ -1896,7 +1929,7 @@ link_core_configs() {
     backup_and_link "$DIR/inputrc" "$HOME/.inputrc" || return 1
     backup_and_link "$DIR/dircolors" "$HOME/.dircolors" || return 1
     backup_and_link "$DIR/dircolors.light" "$HOME/.dircolors.light" || return 1
-    backup_and_link "$DIR/sshconfig" "$HOME/.ssh/config" || return 1
+    wire_ssh_config || return 1
     backup_and_link "$DIR/starship.toml" "$HOME/.config/starship.toml" || return 1
     backup_and_link "$DIR/starship-light.toml" "$HOME/.config/starship-light.toml" || return 1
     # XDG-compliant tmux path (tmux 3.2+ reads this natively)
