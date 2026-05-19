@@ -174,7 +174,10 @@ copy_local_file_to_remote() {
     local remote_path="$2"
     local mode="${3:-600}"
 
-    [ -f "$local_path" ] || return 1
+    if [ ! -f "$local_path" ]; then
+        error "Local file not found: $local_path"
+        return 1
+    fi
 
     # Idempotency: skip copy if remote file is byte-identical. FORCE_COPY=1
     # bypasses this (e.g. to rewrite permissions). The sha256 sum is compared
@@ -201,9 +204,17 @@ copy_local_file_to_remote() {
     # Capture the remote leg's stdout+stderr so we can replay it on failure.
     # Without this, callers only see a vague "Failed to copy …" and the
     # actual cause (perm denied, mktemp failure, etc.) is silently dropped.
-    local remote_log rc=0
-    remote_log="$(mktemp "${TMPDIR:-/tmp}/deploy.copy.$$.XXXXXX")"
-    base64 < "$local_path" | remote_exec "
+    # If local mktemp fails (unwritable TMPDIR), fall back to letting the
+    # remote leg stream inline — losing capture beats redirect-to-"" eating
+    # the diagnostic.
+    local remote_log="" rc=0
+    if ! remote_log="$(mktemp "${TMPDIR:-/tmp}/deploy.copy.$$.XXXXXX" 2>/dev/null)"; then
+        warn "Local mktemp failed; remote output will stream inline"
+        remote_log=""
+    fi
+
+    local remote_cmd
+    remote_cmd="
         set -eu
         umask 077
         dest=\"$remote_path\"
@@ -227,12 +238,24 @@ copy_local_file_to_remote() {
         [ \$status -eq 0 ] || cleanup_tmp
         trap - EXIT HUP INT TERM
         exit \$status
-    " >"$remote_log" 2>&1 || rc=$?
-
-    if [ "$rc" -ne 0 ] && [ -s "$remote_log" ]; then
-        sed 's/^/    [remote] /' "$remote_log" >&2
+    "
+    if [ -n "$remote_log" ]; then
+        base64 < "$local_path" | remote_exec "$remote_cmd" >"$remote_log" 2>&1 || rc=$?
+    else
+        base64 < "$local_path" | remote_exec "$remote_cmd" || rc=$?
     fi
-    rm -f "$remote_log"
+
+    # Always say *something* on failure. If we have captured output, replay
+    # it; otherwise print rc/host/dest so the user has a starting point.
+    if [ "$rc" -ne 0 ]; then
+        if [ -n "$remote_log" ] && [ -s "$remote_log" ]; then
+            sed 's/^/    [remote] /' "$remote_log" >&2
+        else
+            printf "    [remote] (no output captured — rc=%s host=%s dest=%s)\n" \
+                "$rc" "$REMOTE_HOST" "$remote_path" >&2
+        fi
+    fi
+    [ -n "$remote_log" ] && rm -f "$remote_log"
     return "$rc"
 }
 
@@ -365,6 +388,28 @@ remote_copy_if_changed() {
         fi
     fi
     remote_copy "$local_path" "$REMOTE_HOST:$remote_path"
+}
+
+# Dump remote state for a dotfile-style dir + a sentinel file inside it.
+# Used by step_{claude,codex}_auth to (a) preflight the destination before
+# the copy and (b) explain what went wrong after a copy failure. Hostile
+# ownership/perms on the dest dir or an existing root-owned target file is
+# the most common real-world cause of an opaque "Failed to copy …" report.
+remote_dump_dir_state() {
+    local dir="$1" file="$2"
+    remote_exec "
+        if [ -e $dir ]; then
+            ls -ld $dir 2>/dev/null
+            stat -c '%U:%G %a' $dir 2>/dev/null || stat -f '%Su:%Sg %p' $dir 2>/dev/null
+        else
+            echo 'no $dir directory'
+        fi
+        if [ -e $dir/$file ]; then
+            ls -la $dir/$file 2>/dev/null
+        else
+            echo 'no existing $dir/$file'
+        fi
+    " 2>&1 | sed 's/^/    /'
 }
 
 remote_claude_supports_print() {
@@ -935,10 +980,16 @@ step_claude_auth() {
         return 1
     fi
 
+    remote_dump_dir_state '$HOME/.claude' '.credentials.json'
+
     if copy_local_file_to_remote "$LOCAL_CLAUDE_CREDENTIALS_FILE" '$HOME/.claude/.credentials.json' 600; then
         success "Claude Code credentials copied to remote"
     else
         error "Failed to copy Claude Code credentials"
+        echo "    Local:"
+        ls -la "$LOCAL_CLAUDE_CREDENTIALS_FILE" 2>&1 | sed 's/^/      /'
+        echo "    Remote (post-failure):"
+        remote_dump_dir_state '$HOME/.claude' '.credentials.json'
         return 1
     fi
 
@@ -979,10 +1030,16 @@ step_codex_auth() {
         return 1
     fi
 
+    remote_dump_dir_state '$HOME/.codex' 'auth.json'
+
     if copy_local_file_to_remote "$LOCAL_CODEX_AUTH_FILE" '$HOME/.codex/auth.json' 600; then
         success "Codex auth file copied to remote"
     else
         error "Failed to copy Codex auth file"
+        echo "    Local:"
+        ls -la "$LOCAL_CODEX_AUTH_FILE" 2>&1 | sed 's/^/      /'
+        echo "    Remote (post-failure):"
+        remote_dump_dir_state '$HOME/.codex' 'auth.json'
         return 1
     fi
 
