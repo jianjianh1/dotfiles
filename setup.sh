@@ -655,6 +655,50 @@ EOF
     CODEX_CONFIG_MODE="fallback"
 }
 
+# Generate machine-level VS Code remote settings that keep cpptools
+# IntelliSense from melting NFS home: cache on fast scratch when available,
+# lower memory ceiling, low-priority workspace parse, watcher/exclude lists
+# that skip build outputs. Always rewrites GENERATED_DIR/vscode-machine-settings.json;
+# only seeds ~/.vscode-server/data/Machine/settings.json when it doesn't
+# already exist (so user edits there are preserved).
+render_vscode_machine_settings() {
+    local cache_path
+    if [ -d "/scratch/general/vast/$USER" ]; then
+        cache_path="/scratch/general/vast/$USER/.vscode-cpptools-cache"
+    elif [ -d "/scratch/general/lustre/$USER" ]; then
+        cache_path="/scratch/general/lustre/$USER/.vscode-cpptools-cache"
+    else
+        cache_path="$HOME/.cache/vscode-cpptools"
+    fi
+
+    local src="$GENERATED_DIR/vscode-machine-settings.json"
+    cat > "$src" <<EOF
+{
+  "C_Cpp.intelliSenseCachePath": "${cache_path}",
+  "C_Cpp.intelliSenseCacheSize": 2048,
+  "C_Cpp.workspaceParsingPriority": "low",
+  "C_Cpp.files.exclude": {
+    "**/.git": true,
+    "**/build": true,
+    "**/.venv": true,
+    "**/node_modules": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/build/**": true,
+    "**/.venv/**": true,
+    "**/node_modules/**": true
+  }
+}
+EOF
+
+    local dst="$HOME/.vscode-server/data/Machine/settings.json"
+    if [ ! -e "$dst" ]; then
+        mkdir -p "$(dirname "$dst")" || return 0
+        cp "$src" "$dst" 2>/dev/null || true
+    fi
+}
+
 write_compat_report() {
     local tmux_version_out="not installed"
     local tmux_default_term
@@ -749,6 +793,7 @@ render_compat_configs() {
     render_bash_compat
     render_claude_settings_target
     render_codex_config_target
+    render_vscode_machine_settings
     write_compat_report
 }
 

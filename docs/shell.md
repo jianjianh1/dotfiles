@@ -220,6 +220,50 @@ These only activate if the tool is installed:
 | `fzf` | `eval "$(fzf --bash)"` — Ctrl+T (file), Ctrl+R (history), Alt+C (cd) |
 | `.fzf.bash` | Legacy fzf integration file (fallback) |
 
+### VS Code remote helpers
+
+| Function | Purpose |
+|----------|---------|
+| `vscode-tunnel [name]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. |
+| `vscode-tunnel-compute [name]` | Allocate a SLURM compute node and start `code tunnel` inside it. Default tunnel name = `notch-dev`. |
+| `vscode-ssh-alloc [name]` | Submit a long-lived `sbatch --wrap='sleep infinity'` allocation and print the assigned compute node so Remote-SSH can dial it. Default job name = `vscode-ssh`. |
+| `vscode-ssh-release [name]` | `scancel` all jobs matching the name (default: `vscode-ssh`). |
+| `prefetch-vscode-server <commit>` | Stage `~/.vscode-server/bin/<commit>` so first Remote-SSH connect is fast or works offline. |
+
+**Never let `vscode-server` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for the C/C++ extension's IntelliSense scan to complete — it gets stuck on "scanning" indefinitely. Use a compute node via one of the two paths below.
+
+#### Tunnel path (`vscode-tunnel-compute`)
+
+Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 cores / 32 GB). Override per-invocation:
+
+| Variable | Default |
+|----------|---------|
+| `VSCODE_TUNNEL_ACCOUNT` | `notchpeak-shared-short` |
+| `VSCODE_TUNNEL_PARTITION` | `notchpeak-shared-short` |
+| `VSCODE_TUNNEL_QOS` | `notchpeak-shared-short` |
+| `VSCODE_TUNNEL_CORES` | `8` |
+| `VSCODE_TUNNEL_MEM` | `32G` |
+| `VSCODE_TUNNEL_TIME` | `8:00:00` |
+
+When the SLURM allocation ends the tunnel dies — reconnect by rerunning `vscode-tunnel-compute`.
+
+#### Remote-SSH path (`vscode-ssh-alloc`)
+
+```
+# on notchpeak1:
+vscode-ssh-alloc                  # prints: Allocation ready on: notch324
+# from local VS Code:
+#   Cmd/Ctrl-Shift-P → "Remote-SSH: Connect to Host" → notch324
+# when done:
+vscode-ssh-release
+```
+
+For the bare node name to work in VS Code, your `~/.ssh/config` needs `Host notchpeak` + a `Host notch* !notchpeak` ProxyJump block — see the [suggested CHPC stanzas](misc-configs.md#suggested-per-host-stanzas-chpc) to paste in. Unlike the tunnel path this uses `sbatch --wrap='sleep infinity'`, so the allocation survives terminal disconnects and reconnects until you `vscode-ssh-release` (or wall-time expires). Override the SLURM triple/limits with `VSCODE_SSH_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME}` (same defaults as the tunnel variables).
+
+#### Shared cpptools settings
+
+`setup.sh` seeds `~/.vscode-server/data/Machine/settings.json` (only if absent) with cpptools-friendly defaults: cache path on `/scratch/general/vast/$USER`, lower cache size, low-priority workspace parse, and exclusion patterns for `build/`, `.venv/`, `node_modules/`. These apply to both transport paths (tunnel and Remote-SSH share the same `~/.vscode-server` tree on the compute node). The canonical source lives at `~/.server-configs-generated/vscode-machine-settings.json`; edit the seeded file freely (it is never overwritten by re-runs).
+
 ### Compat Layer
 
 `~/.server-configs-generated/bashrc_compat` is sourced at the end of both files. It carries a load-once guard and any environment-module load lines emitted by `setup.sh` (e.g. `module load claude-code`) when tools were satisfied via Lmod.

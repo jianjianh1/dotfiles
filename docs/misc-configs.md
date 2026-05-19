@@ -45,6 +45,23 @@ mkdir -p ~/.ssh/sockets
 | `AddKeysToAgent` | `yes` | Auto-add keys to ssh-agent on first use |
 | `IdentitiesOnly` | `yes` | Only offer keys explicitly configured (prevents agent key spam) |
 
+### Suggested per-host stanzas (CHPC)
+
+Per-host blocks belong in your own `~/.ssh/config` (above the `Include` line), not in the repo's `sshconfig`. Paste these to make VS Code Remote-SSH (and plain `ssh`) reach a CHPC compute node through the notchpeak login node:
+
+```ssh-config
+Host notchpeak
+    HostName notchpeak.chpc.utah.edu
+
+# Compute nodes (notch001, notch324, notch369, ...). OpenSSH Host
+# patterns support only * and ?, so negate notchpeak rather than using
+# a character class.
+Host notch* !notchpeak
+    ProxyJump notchpeak
+```
+
+Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `proxyjump notchpeak` and `hostname notch324`. Pairs with the `vscode-ssh-alloc` helper documented in [Shell aliases](shell.md#vs-code-remote-helpers).
+
 ---
 
 ## Readline (`inputrc`)
