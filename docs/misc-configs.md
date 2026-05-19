@@ -62,6 +62,10 @@ Host notch* !notchpeak
 
 Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `proxyjump notchpeak` and `hostname notch324`. Pairs with the `vscode-ssh-alloc` helper documented in [Shell aliases](shell.md#vs-code-remote-helpers).
 
+### IntelliSense for CUDA/CMake projects
+
+`setup.sh` seeds `~/.vscode-server/data/Machine/settings.json` with a non-recursive cpptools `browse.path`, an exclude list covering the HPC dotfile/installdir trees under `$HOME`, and — when nvcc is found via `$CUDA_HOME`/`$PATH`/the CHPC install tree — `compilerPath`, CUDA include dir, and `.cu`/`.cuh` -> `cpp` associations. The seed also points `C_Cpp.default.compileCommands` at `${workspaceFolder}/build/compile_commands.json`; to feed it from a CMake project, add `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)` to `CMakeLists.txt` (or pass `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to `cmake`) and configure into `build/`. The live file is left alone after the first hand-edit; re-running `setup.sh` only refreshes it while it still matches the recorded template.
+
 ---
 
 ## Readline (`inputrc`)

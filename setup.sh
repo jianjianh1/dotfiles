@@ -655,12 +655,38 @@ EOF
     CODEX_CONFIG_MODE="fallback"
 }
 
+# Locate a CUDA toolkit root for cpptools' compilerPath. Honors env vars
+# first, then nvcc on PATH, then the CHPC install tree (newest version
+# with bin/nvcc wins). Prints the root on success, nothing on miss.
+detect_cuda_root() {
+    [ -n "${CUDA_HOME:-}" ] && [ -x "$CUDA_HOME/bin/nvcc" ] && { echo "$CUDA_HOME"; return; }
+    [ -n "${CUDA_PATH:-}" ] && [ -x "$CUDA_PATH/bin/nvcc" ] && { echo "$CUDA_PATH"; return; }
+    if command -v nvcc &>/dev/null; then
+        local nvcc; nvcc="$(command -v nvcc)"
+        ( cd "$(dirname "$nvcc")/.." 2>/dev/null && pwd ) && return
+    fi
+    if is_chpc; then
+        local d
+        for d in $(ls -d /uufs/chpc.utah.edu/sys/installdir/cuda/*/ 2>/dev/null | sort -V -r); do
+            [ -x "${d}bin/nvcc" ] && { echo "${d%/}"; return; }
+        done
+    fi
+}
+
 # Generate machine-level VS Code remote settings that keep cpptools
 # IntelliSense from melting NFS home: cache on fast scratch when available,
-# lower memory ceiling, low-priority workspace parse, watcher/exclude lists
-# that skip build outputs. Always rewrites GENERATED_DIR/vscode-machine-settings.json;
-# only seeds ~/.vscode-server/data/Machine/settings.json when it doesn't
-# already exist (so user edits there are preserved).
+# lower memory ceiling, low-priority workspace parse, non-recursive browse
+# path (critical when the workspace = $HOME), and exclude lists that skip
+# both build outputs and the HPC dotfile/installdir trees under $HOME.
+# When CUDA is detected, also wires compilerPath, CUDA include dir, and
+# .cu/.cuh -> cpp associations so opening a CUDA file resolves instead of
+# spinning forever.
+#
+# Always rewrites GENERATED_DIR/vscode-machine-settings.json. Seeds
+# ~/.vscode-server/data/Machine/settings.json when absent, and refreshes
+# it when the live file is byte-identical to the previously rendered
+# template (tracked via a sibling .prev.sha256). Hand-edits leave the
+# file alone and surface a hint pointing at the new template.
 render_vscode_machine_settings() {
     local cache_path
     if [ -d "/scratch/general/vast/$USER" ]; then
@@ -671,31 +697,125 @@ render_vscode_machine_settings() {
         cache_path="$HOME/.cache/vscode-cpptools"
     fi
 
+    local cuda_root cuda_compiler_line cuda_include_line cuda_defines_line
+    cuda_root="$(detect_cuda_root)"
+    if [ -n "$cuda_root" ]; then
+        cuda_compiler_line="  \"C_Cpp.default.compilerPath\": \"${cuda_root}/bin/nvcc\","
+        cuda_include_line="    \"${cuda_root}/include\""
+        cuda_defines_line="  \"C_Cpp.default.defines\": [\"__CUDACC__\"],"
+    else
+        cuda_compiler_line=""
+        cuda_include_line=""
+        cuda_defines_line=""
+    fi
+
     local src="$GENERATED_DIR/vscode-machine-settings.json"
-    cat > "$src" <<EOF
-{
-  "C_Cpp.intelliSenseCachePath": "${cache_path}",
-  "C_Cpp.intelliSenseCacheSize": 2048,
-  "C_Cpp.workspaceParsingPriority": "low",
-  "C_Cpp.files.exclude": {
-    "**/.git": true,
-    "**/build": true,
-    "**/.venv": true,
-    "**/node_modules": true
-  },
-  "files.watcherExclude": {
-    "**/.git/objects/**": true,
-    "**/build/**": true,
-    "**/.venv/**": true,
-    "**/node_modules/**": true
-  }
-}
-EOF
+    {
+        echo "{"
+        echo "  \"C_Cpp.intelliSenseCachePath\": \"${cache_path}\","
+        echo "  \"C_Cpp.intelliSenseCacheSize\": 2048,"
+        echo "  \"C_Cpp.workspaceParsingPriority\": \"low\","
+        echo "  \"C_Cpp.autoAddFileAssociations\": false,"
+        [ -n "$cuda_compiler_line" ] && echo "$cuda_compiler_line"
+        echo "  \"C_Cpp.default.cStandard\": \"c17\","
+        echo "  \"C_Cpp.default.cppStandard\": \"c++17\","
+        echo "  \"C_Cpp.default.includePath\": ["
+        echo "    \"\${workspaceFolder}/**\"$([ -n "$cuda_include_line" ] && echo ",")"
+        [ -n "$cuda_include_line" ] && echo "$cuda_include_line"
+        echo "  ],"
+        [ -n "$cuda_defines_line" ] && echo "$cuda_defines_line"
+        echo "  \"C_Cpp.default.compileCommands\": \"\${workspaceFolder}/build/compile_commands.json\","
+        echo "  \"C_Cpp.default.browse.path\": [\"\${workspaceFolder}\"],"
+        echo "  \"C_Cpp.default.browse.limitSymbolsToIncludedHeaders\": true,"
+        echo "  \"files.associations\": { \"*.cu\": \"cpp\", \"*.cuh\": \"cpp\" },"
+        echo "  \"C_Cpp.files.exclude\": {"
+        echo "    \"**/.git\": true,"
+        echo "    \"**/build\": true,"
+        echo "    \"**/.venv\": true,"
+        echo "    \"**/node_modules\": true,"
+        echo "    \"**/.cache\": true,"
+        echo "    \"**/.conda\": true,"
+        echo "    \"**/.local/share\": true,"
+        echo "    \"**/.local/lib\": true,"
+        echo "    \"**/.npm\": true,"
+        echo "    \"**/.cargo\": true,"
+        echo "    \"**/.rustup\": true,"
+        echo "    \"**/.nv\": true,"
+        echo "    \"**/.vscode-server\": true,"
+        echo "    \"**/.vscode-server-insiders\": true,"
+        echo "    \"**/.server-configs-generated\": true,"
+        echo "    \"**/.claude\": true,"
+        echo "    \"**/.codex\": true,"
+        echo "    \"**/miniconda*\": true,"
+        echo "    \"**/anaconda*\": true,"
+        echo "    \"**/mambaforge*\": true,"
+        echo "    \"**/lazy-lock.json\": true"
+        echo "  },"
+        echo "  \"files.watcherExclude\": {"
+        echo "    \"**/.git/objects/**\": true,"
+        echo "    \"**/build/**\": true,"
+        echo "    \"**/.venv/**\": true,"
+        echo "    \"**/node_modules/**\": true,"
+        echo "    \"**/.cache/**\": true,"
+        echo "    \"**/.conda/**\": true,"
+        echo "    \"**/.local/share/**\": true,"
+        echo "    \"**/.local/lib/**\": true,"
+        echo "    \"**/.npm/**\": true,"
+        echo "    \"**/.cargo/**\": true,"
+        echo "    \"**/.rustup/**\": true,"
+        echo "    \"**/.nv/**\": true,"
+        echo "    \"**/.vscode-server/**\": true,"
+        echo "    \"**/.vscode-server-insiders/**\": true,"
+        echo "    \"**/.server-configs-generated/**\": true,"
+        echo "    \"**/.claude/**\": true,"
+        echo "    \"**/.codex/**\": true,"
+        echo "    \"**/miniconda*/**\": true,"
+        echo "    \"**/anaconda*/**\": true,"
+        echo "    \"**/mambaforge*/**\": true"
+        echo "  }"
+        echo "}"
+    } > "$src"
 
     local dst="$HOME/.vscode-server/data/Machine/settings.json"
+    local prev_hash_file="$GENERATED_DIR/vscode-machine-settings.prev.sha256"
+    local hash_cmd=""
+    if command -v sha256sum &>/dev/null; then
+        hash_cmd="sha256sum"
+    elif command -v shasum &>/dev/null; then
+        hash_cmd="shasum -a 256"
+    fi
+
     if [ ! -e "$dst" ]; then
         mkdir -p "$(dirname "$dst")" || return 0
         cp "$src" "$dst" 2>/dev/null || true
+    else
+        local refresh=false
+        if [ -n "$hash_cmd" ] && [ -e "$prev_hash_file" ]; then
+            local live_hash recorded_hash
+            live_hash="$($hash_cmd < "$dst" 2>/dev/null | awk '{print $1}')"
+            recorded_hash="$(cat "$prev_hash_file" 2>/dev/null)"
+            [ -n "$live_hash" ] && [ "$live_hash" = "$recorded_hash" ] && refresh=true
+        fi
+        # Bootstrap: if no prior hash, treat the live file as the pre-template
+        # e253172 seed only when it carries that seed's signature key
+        # (intelliSenseCachePath) AND lacks both current-template signature
+        # keys (browse.path, compilerPath). Avoids clobbering unrelated
+        # user files that happen to be small.
+        if ! $refresh \
+            && grep -q 'C_Cpp.intelliSenseCachePath' "$dst" 2>/dev/null \
+            && ! grep -q 'C_Cpp.default.browse.path' "$dst" 2>/dev/null \
+            && ! grep -q 'C_Cpp.default.compilerPath' "$dst" 2>/dev/null; then
+            refresh=true
+        fi
+        if $refresh; then
+            cp "$src" "$dst" 2>/dev/null || true
+        else
+            printf 'Note: %s was hand-edited; not refreshed. New template at %s\n' "$dst" "$src"
+        fi
+    fi
+
+    if [ -n "$hash_cmd" ]; then
+        $hash_cmd < "$src" 2>/dev/null | awk '{print $1}' > "$prev_hash_file" 2>/dev/null || true
     fi
 }
 
