@@ -225,7 +225,8 @@ These only activate if the tool is installed:
 | Function | Purpose |
 |----------|---------|
 | `vscode-tunnel [name]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. |
-| `vscode-tunnel-compute [name]` | Allocate a SLURM compute node and start `code tunnel` inside it. Default tunnel name = `notch-dev`. |
+| `vscode-tunnel-compute [name] [dir]` | Submit a detached `sbatch` job that runs `code tunnel` on a compute node. Idempotent: reuses any RUNNING `vscode-tunnel-<name>` job. Default tunnel name = `notch-dev`. |
+| `vscode-tunnel-release [name]` | `scancel` the `vscode-tunnel-<name>` job (default name: `notch-dev`). |
 | `vscode-ssh-alloc [name]` | Submit a long-lived `sbatch --wrap='sleep infinity'` allocation and print the assigned compute node so Remote-SSH can dial it. Default job name = `vscode-ssh`. |
 | `vscode-ssh-release [name]` | `scancel` all jobs matching the name (default: `vscode-ssh`). |
 | `vscode-doctor` | Print hostname (with login-node warning), `vscode-*` SLURM allocations, cpptools cache path/size, and a tail of the latest cpptools log. Read-only. |
@@ -255,6 +256,15 @@ The allocation persists across disconnects; release it with `vscode-ssh-release`
 
 #### Tunnel path (`vscode-tunnel-compute`)
 
+`vscode-tunnel-compute [<name>] [<dir>]` submits the tunnel as a **detached** `sbatch` job and returns within a few seconds. The function:
+
+1. Verifies authentication via `code tunnel user show` — one-time prerequisite: `code tunnel user login --provider github`.
+2. If a `vscode-tunnel-<name>` job is already RUNNING, reuses it and reprints the `https://vscode.dev/tunnel/<name>` URL — no second sbatch.
+3. Otherwise `sbatch --wrap="exec code tunnel --name <name> --accept-server-license-terms"`, names the job `vscode-tunnel-<name>`, and points `-o`/`-e` at `~/.local/share/vscode-tunnel-<name>.log` so the URL banner and any errors are recoverable after scrollback ends.
+4. Polls `squeue` for node assignment, prints the node + URL + log + stop command.
+
+The tunnel survives the launching terminal closing. Stop it with `vscode-tunnel-release [<name>]` (or `scancel <jobid>`); the SLURM allocation also ends when walltime expires.
+
 Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 cores / 32 GB). Override per-invocation:
 
 | Variable | Default |
@@ -265,8 +275,6 @@ Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 co
 | `VSCODE_TUNNEL_CORES` | `8` |
 | `VSCODE_TUNNEL_MEM` | `32G` |
 | `VSCODE_TUNNEL_TIME` | `8:00:00` |
-
-When the SLURM allocation ends the tunnel dies — reconnect by rerunning `vscode-tunnel-compute`.
 
 #### Manual Remote-SSH path (`vscode-ssh-alloc`)
 

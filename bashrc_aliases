@@ -102,32 +102,88 @@ vscode-tunnel() {
     code tunnel --name "$name" --accept-server-license-terms
 }
 
-# vscode-tunnel-compute: start a `code tunnel` on a SLURM compute node via
-# salloc. Use this on CHPC login nodes — Arbiter caps login-node processes at
-# 4 cores / 8 GB, which is not enough for cpptools IntelliSense to finish
+# vscode-tunnel-compute: start a `code tunnel` on a SLURM compute node as a
+# detached sbatch job. Returns immediately; the tunnel survives the launching
+# terminal closing and is reachable via https://vscode.dev/tunnel/<name>.
+# Use this on CHPC login nodes — Arbiter caps login-node processes at 4
+# cores / 8 GB, which is not enough for cpptools IntelliSense to finish
 # scanning. Defaults to notchpeak-shared-short (no allocation required); set
 # VSCODE_TUNNEL_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME} to override.
+#
+# Idempotent: re-running while a tunnel with the same name is RUNNING
+# reuses it and reprints the URL — no second sbatch.
+#
+# One-time prerequisite (interactive): code tunnel user login --provider github
+#
 #   Usage: vscode-tunnel-compute [<name>] [<dir>]
 # Tunnel name defaults to notch-dev. If <dir> is given, prints a vscode.dev URL
 # that opens straight to that folder.
 vscode-tunnel-compute() {
-    command -v salloc >/dev/null 2>&1 || { echo "salloc not found — not a SLURM host"; return 1; }
+    command -v sbatch >/dev/null 2>&1 || { echo "sbatch not found — not a SLURM host"; return 1; }
     command -v code   >/dev/null 2>&1 || { echo "code CLI not installed (run setup.sh)"; return 1; }
+
     local name="${1:-notch-dev}"
     local dir="${2:-}"
+    local url="https://vscode.dev/tunnel/$name"
     if [ -n "$dir" ]; then
         dir=$(cd "$dir" 2>/dev/null && pwd) || { echo "vscode-tunnel-compute: directory not found: $2"; return 1; }
-        echo "Open in browser: https://vscode.dev/tunnel/$name$dir"
+        url="$url$dir"
     fi
+
+    if ! code tunnel user show >/dev/null 2>&1; then
+        echo "code tunnel is not authenticated. Run on this host first:"
+        echo "  code tunnel user login --provider github"
+        return 1
+    fi
+
+    local jobname="vscode-tunnel-$name"
+    local existing
+    existing="$(squeue -h -u "$USER" -n "$jobname" -t RUNNING -o '%i %N' 2>/dev/null | head -n1)"
+    if [ -n "$existing" ]; then
+        echo "Tunnel '$name' already running (job ${existing%% *} on ${existing##* })."
+        echo "Open in browser: $url"
+        echo "Log:  ~/.local/share/vscode-tunnel-$name.log"
+        echo "Stop: vscode-tunnel-release $name"
+        return 0
+    fi
+
     local acct="${VSCODE_TUNNEL_ACCOUNT:-notchpeak-shared-short}"
     local part="${VSCODE_TUNNEL_PARTITION:-notchpeak-shared-short}"
     local qos="${VSCODE_TUNNEL_QOS:-notchpeak-shared-short}"
     local cores="${VSCODE_TUNNEL_CORES:-8}"
     local mem="${VSCODE_TUNNEL_MEM:-32G}"
     local time="${VSCODE_TUNNEL_TIME:-8:00:00}"
-    salloc -A "$acct" -p "$part" -q "$qos" -n "$cores" --mem="$mem" -t "$time" \
-        --job-name="vscode-tunnel" \
-        bash -lc "code tunnel --name '$name' --accept-server-license-terms"
+    local logfile="$HOME/.local/share/vscode-tunnel-$name.log"
+    mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+
+    local jobid
+    jobid="$(sbatch --parsable -A "$acct" -p "$part" -q "$qos" \
+                    -n "$cores" --mem="$mem" -t "$time" -J "$jobname" \
+                    -o "$logfile" -e "$logfile" \
+                    --wrap="exec code tunnel --accept-server-license-terms --name '$name'")" \
+        || { echo "sbatch failed"; return 1; }
+    [ -n "$jobid" ] && [ "$jobid" != "0" ] || { echo "submission failed"; return 1; }
+
+    echo "Submitted tunnel job $jobid ('$jobname'). Waiting for node..."
+    local node="" tries=0
+    while [ "$tries" -lt 120 ]; do
+        node="$(squeue -h -j "$jobid" -o '%N' 2>/dev/null)"
+        case "$node" in
+            ""|"(null)"|n/a) ;;
+            *) break ;;
+        esac
+        sleep 2
+        tries=$((tries + 1))
+    done
+    if [ -z "$node" ] || [ "$node" = "(null)" ]; then
+        echo "Timed out waiting for allocation. scancel $jobid to drop."
+        return 1
+    fi
+
+    echo "Tunnel running on $node."
+    echo "Open in browser: $url"
+    echo "Log:  tail -f $logfile"
+    echo "Stop: vscode-tunnel-release $name   (or scancel $jobid)"
 }
 
 # vscode-ssh-alloc: reserve a CHPC compute node with a long-lived sbatch
@@ -179,6 +235,25 @@ vscode-ssh-release() {
     ids=$(squeue -h -u "$USER" -n "$name" -o '%i' 2>/dev/null)
     if [ -z "$ids" ]; then
         echo "no jobs named '$name' for $USER"
+        return 0
+    fi
+    echo "cancelling: $ids"
+    # shellcheck disable=SC2086
+    scancel $ids
+}
+
+# vscode-tunnel-release: scancel the sbatch job behind vscode-tunnel-compute.
+# Pass a tunnel name to target a specific tunnel (default: notch-dev). Each
+# tunnel is its own job named 'vscode-tunnel-<name>' — we never wildcard
+# across all of them, to avoid surprises when you have more than one.
+vscode-tunnel-release() {
+    command -v scancel >/dev/null 2>&1 || { echo "scancel not found"; return 1; }
+    local name="${1:-notch-dev}"
+    local jobname="vscode-tunnel-$name"
+    local ids
+    ids=$(squeue -h -u "$USER" -n "$jobname" -o '%i' 2>/dev/null)
+    if [ -z "$ids" ]; then
+        echo "no tunnel '$name' running"
         return 0
     fi
     echo "cancelling: $ids"
