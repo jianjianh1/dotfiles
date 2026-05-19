@@ -113,7 +113,12 @@ vscode-tunnel() {
 # Idempotent: re-running while a tunnel with the same name is RUNNING
 # reuses it and reprints the URL — no second sbatch.
 #
-# One-time prerequisite (interactive): code tunnel user login --provider github
+# Auth note: `code tunnel user show` on a login node passes because the
+# token decrypts via the gnome-keyring running there. Compute nodes have no
+# keyring daemon, so the *first* run on a compute node triggers a one-time
+# device-code login (https://github.com/login/device + an 8-char code) — we
+# tail the slurm log briefly and print the prompt or success URL. After that
+# the token is re-stored in a keyringless mode that works on compute nodes.
 #
 #   Usage: vscode-tunnel-compute [<name>] [<dir>]
 # Tunnel name defaults to notch-dev. If <dir> is given, prints a vscode.dev URL
@@ -128,12 +133,6 @@ vscode-tunnel-compute() {
     if [ -n "$dir" ]; then
         dir=$(cd "$dir" 2>/dev/null && pwd) || { echo "vscode-tunnel-compute: directory not found: $2"; return 1; }
         url="$url$dir"
-    fi
-
-    if ! code tunnel user show >/dev/null 2>&1; then
-        echo "code tunnel is not authenticated. Run on this host first:"
-        echo "  code tunnel user login --provider github"
-        return 1
     fi
 
     local jobname="vscode-tunnel-$name"
@@ -155,6 +154,11 @@ vscode-tunnel-compute() {
     local time="${VSCODE_TUNNEL_TIME:-8:00:00}"
     local logfile="$HOME/.local/share/vscode-tunnel-$name.log"
     mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+
+    # Clear the previous log so device-code / URL grepping picks up only this
+    # run. Keeping it short (truncate, don't unlink) preserves an open `tail
+    # -f` from a parallel terminal.
+    : > "$logfile" 2>/dev/null || true
 
     local jobid
     jobid="$(sbatch --parsable -A "$acct" -p "$part" -q "$qos" \
@@ -179,10 +183,52 @@ vscode-tunnel-compute() {
         echo "Timed out waiting for allocation. scancel $jobid to drop."
         return 1
     fi
-
     echo "Tunnel running on $node."
-    echo "Open in browser: $url"
-    echo "Log:  tail -f $logfile"
+
+    # Watch the log for the tunnel's first interesting line (up to ~30 s):
+    # either a device-code prompt (one-time first-run from compute) or the
+    # vscode.dev URL banner (success). Read incrementally with `tail -F` so
+    # we don't busy-poll.
+    local saw_device=0 saw_url=0 line waited=0
+    while IFS= read -r line; do
+        case "$line" in
+            *"https://github.com/login/device"*)
+                saw_device=1
+                break
+                ;;
+            *"Open this link in your browser"*)
+                saw_url=1
+                break
+                ;;
+        esac
+        waited=$((waited + 1))
+        [ "$waited" -gt 60 ] && break
+    done < <(timeout 30 tail -F -n +1 "$logfile" 2>/dev/null)
+
+    if [ "$saw_device" = 1 ]; then
+        printf '\n\033[33mFirst-run device-code login required on the compute node.\033[0m\n'
+        printf 'Compute nodes have no keyring; the token from the login node\n'
+        printf "can't be decrypted there. Complete the device-code prompt once:\n\n"
+        grep -E "https://github.com/login/device|use code [A-Z0-9-]+" "$logfile" 2>/dev/null \
+            | tail -n 3 | sed 's/^/  /'
+        printf '\nAfter login, the URL banner appears in the log within seconds:\n'
+        printf '  tail -F %s\n' "$logfile"
+        printf '\nOpen in browser (after auth): %s\n' "$url"
+        printf 'Stop: vscode-tunnel-release %s   (or scancel %s)\n' "$name" "$jobid"
+        return 0
+    fi
+
+    if [ "$saw_url" = 1 ]; then
+        echo "Open in browser: $url"
+        echo "Log:  tail -f $logfile"
+        echo "Stop: vscode-tunnel-release $name   (or scancel $jobid)"
+        return 0
+    fi
+
+    # No banner seen — slow boot or something else. Hand off cleanly.
+    echo "Tunnel daemon not ready yet (no URL banner in 30 s)."
+    echo "Watch:  tail -F $logfile"
+    echo "Once ready, open: $url"
     echo "Stop: vscode-tunnel-release $name   (or scancel $jobid)"
 }
 

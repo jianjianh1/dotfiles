@@ -258,12 +258,13 @@ The allocation persists across disconnects; release it with `vscode-ssh-release`
 
 `vscode-tunnel-compute [<name>] [<dir>]` submits the tunnel as a **detached** `sbatch` job and returns within a few seconds. The function:
 
-1. Verifies authentication via `code tunnel user show` — one-time prerequisite: `code tunnel user login --provider github`.
-2. If a `vscode-tunnel-<name>` job is already RUNNING, reuses it and reprints the `https://vscode.dev/tunnel/<name>` URL — no second sbatch.
-3. Otherwise `sbatch --wrap="exec code tunnel --name <name> --accept-server-license-terms"`, names the job `vscode-tunnel-<name>`, and points `-o`/`-e` at `~/.local/share/vscode-tunnel-<name>.log` so the URL banner and any errors are recoverable after scrollback ends.
-4. Polls `squeue` for node assignment, prints the node + URL + log + stop command.
+1. If a `vscode-tunnel-<name>` job is already RUNNING, reuses it and reprints the `https://vscode.dev/tunnel/<name>` URL — no second sbatch.
+2. Otherwise `sbatch --wrap="exec code tunnel --name <name> --accept-server-license-terms"`, names the job `vscode-tunnel-<name>`, and points `-o`/`-e` at `~/.local/share/vscode-tunnel-<name>.log` so the URL banner and any errors are recoverable after scrollback ends.
+3. Polls `squeue` for node assignment, then tails the log for up to 30 s and surfaces whichever of the following lands first: the **device-code prompt** (one-time first run from a compute node — see below) or the **`Open this link in your browser`** banner (success).
 
 The tunnel survives the launching terminal closing. Stop it with `vscode-tunnel-release [<name>]` (or `scancel <jobid>`); the SLURM allocation also ends when walltime expires.
+
+**First-run auth from a compute node.** `code tunnel user show` on a login node passes because the token decrypts via the gnome-keyring daemon running on that login node. Compute nodes have no keyring service, so the *first* tunnel job there can't read the existing token and falls back to a device-code login. `vscode-tunnel-compute` surfaces the device-code URL + 8-character code prominently — visit `https://github.com/login/device`, paste the code, approve. After that, `code tunnel` re-stores the token in a keyringless mode that subsequent compute-node runs can read silently. Bonus side effect: the same stored token still works on the login node too (the keyring backend reads through to the file fallback).
 
 Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 cores / 32 GB). Override per-invocation:
 
