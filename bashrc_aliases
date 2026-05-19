@@ -186,6 +186,93 @@ vscode-ssh-release() {
     scancel $ids
 }
 
+# vscode-doctor: one-shot diagnostic for "VS Code is stuck / slow on this
+# host". Prints where you are, what allocations exist, where the cpptools
+# cache lives, and tails the latest cpptools log if cpptools has spoken.
+# Read-only — never deletes anything.
+vscode-doctor() {
+    local h
+    h="$(hostname -s 2>/dev/null || hostname)"
+    echo "host:       $h"
+    case "$h" in
+        notchpeak[12]|granite[12]|kingspeak[12]|lonepeak[12]|ash[12])
+            echo "  ⚠ this is a CHPC login node — Arbiter caps you at 4 cores / 8 GB."
+            echo "    For IntelliSense, connect via 'Remote-SSH: notchpeak-compute'."
+            ;;
+    esac
+    if command -v squeue >/dev/null 2>&1; then
+        echo
+        echo "vscode-* allocations:"
+        local jobs
+        jobs="$(squeue -h -u "$USER" -o '%i %T %N %j %L' 2>/dev/null \
+                | awk '$4 ~ /^vscode-/ {print}')"
+        if [ -n "$jobs" ]; then
+            printf '  JOBID    STATE    NODE      NAME           TIME-LEFT\n'
+            printf '  %s\n' "$jobs"
+        else
+            echo "  (none)"
+        fi
+    fi
+    local machine="$HOME/.vscode-server/data/Machine/settings.json"
+    if [ -f "$machine" ]; then
+        local cache
+        cache="$(grep -oE '"C_Cpp.intelliSenseCachePath"[^,}]*' "$machine" \
+                 | sed -E 's/.*"([^"]*)"$/\1/')"
+        if [ -n "$cache" ]; then
+            echo
+            printf "cpptools cache: %s" "$cache"
+            if [ -d "$cache" ]; then
+                printf " (%s)\n" "$(du -sh "$cache" 2>/dev/null | awk '{print $1}')"
+            else
+                printf " (not created yet)\n"
+            fi
+        fi
+        if grep -q '"C_Cpp.intelliSenseEngine"[[:space:]]*:[[:space:]]*"disabled"' "$machine"; then
+            echo "  ℹ IntelliSense is disabled by Machine settings (login-node guard)."
+        fi
+    fi
+    local logdir="$HOME/.vscode-server/data/logs"
+    if [ -d "$logdir" ]; then
+        local latest
+        latest="$(ls -1t "$logdir" 2>/dev/null | head -1)"
+        if [ -n "$latest" ]; then
+            echo
+            echo "latest log session: $logdir/$latest"
+            local cpplog
+            cpplog="$(ls -1t "$logdir/$latest"/exthost*/output_logging_*/[0-9]*-C_C++.log 2>/dev/null | head -1)"
+            if [ -n "$cpplog" ] && [ -s "$cpplog" ]; then
+                echo "cpptools log tail ($cpplog):"
+                tail -n 20 "$cpplog" | sed 's/^/  /'
+            fi
+        fi
+    fi
+}
+
+# vscode-cache-clear: wipe the cpptools IntelliSense index (the 'ipch'
+# directory under intelliSenseCachePath). Use when IntelliSense returns
+# stale results or the parser appears wedged. Prompts before deleting.
+vscode-cache-clear() {
+    local machine="$HOME/.vscode-server/data/Machine/settings.json"
+    local cache=""
+    if [ -f "$machine" ]; then
+        cache="$(grep -oE '"C_Cpp.intelliSenseCachePath"[^,}]*' "$machine" \
+                 | sed -E 's/.*"([^"]*)"$/\1/')"
+    fi
+    [ -z "$cache" ] && cache="$HOME/.cache/vscode-cpptools"
+    if [ ! -d "$cache" ]; then
+        echo "cache not present: $cache"
+        return 0
+    fi
+    local size
+    size="$(du -sh "$cache" 2>/dev/null | awk '{print $1}')"
+    printf 'Delete cpptools cache %s (%s)? [y/N] ' "$cache" "$size"
+    local answer; read -r answer
+    case "$answer" in
+        [Yy]*) rm -rf "$cache" && echo "cleared." ;;
+        *)     echo "kept." ;;
+    esac
+}
+
 # Pre-download vscode-server for a specific VS Code commit so Remote-SSH
 # first-connect is fast (or works on a node without internet). Get the commit
 # from your local VS Code: Help → About → "Commit: <hash>". Idempotent.

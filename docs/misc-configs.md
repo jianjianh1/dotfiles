@@ -45,9 +45,13 @@ mkdir -p ~/.ssh/sockets
 | `AddKeysToAgent` | `yes` | Auto-add keys to ssh-agent on first use |
 | `IdentitiesOnly` | `yes` | Only offer keys explicitly configured (prevents agent key spam) |
 
-### Suggested per-host stanzas (CHPC)
+### Generated `notchpeak-compute` alias
 
-Per-host blocks belong in your own `~/.ssh/config` (above the `Include` line), not in the repo's `sshconfig`. Paste these to make VS Code Remote-SSH (and plain `ssh`) reach a CHPC compute node through the notchpeak login node:
+`setup.sh` renders `~/.server-configs-generated/sshconfig.compute` and the repo's `sshconfig` `Include`s it. The alias auto-allocates a compute node behind a single Remote-SSH connect — see [VS Code remote helpers](shell.md#vs-code-remote-helpers) for the full flow. No manual stanzas needed.
+
+### Suggested per-host stanzas (CHPC, manual compute-node path)
+
+If you'd rather connect to a specific compute node by name (e.g., after `vscode-ssh-alloc` prints `notch324`), paste these into your own `~/.ssh/config` above the `Include` line — they're outside the auto-managed config because they're personal preferences:
 
 ```ssh-config
 Host notchpeak
@@ -60,7 +64,7 @@ Host notch* !notchpeak
     ProxyJump notchpeak
 ```
 
-Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `proxyjump notchpeak` and `hostname notch324`. Pairs with the `vscode-ssh-alloc` helper documented in [Shell aliases](shell.md#vs-code-remote-helpers).
+Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `proxyjump notchpeak` and `hostname notch324`.
 
 ### IntelliSense for CUDA/CMake projects
 

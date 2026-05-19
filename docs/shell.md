@@ -228,9 +228,30 @@ These only activate if the tool is installed:
 | `vscode-tunnel-compute [name]` | Allocate a SLURM compute node and start `code tunnel` inside it. Default tunnel name = `notch-dev`. |
 | `vscode-ssh-alloc [name]` | Submit a long-lived `sbatch --wrap='sleep infinity'` allocation and print the assigned compute node so Remote-SSH can dial it. Default job name = `vscode-ssh`. |
 | `vscode-ssh-release [name]` | `scancel` all jobs matching the name (default: `vscode-ssh`). |
+| `vscode-doctor` | Print hostname (with login-node warning), `vscode-*` SLURM allocations, cpptools cache path/size, and a tail of the latest cpptools log. Read-only. |
+| `vscode-cache-clear` | Confirm-then-delete the cpptools IntelliSense index (`intelliSenseCachePath`). Use when results go stale or the parser wedges. |
 | `prefetch-vscode-server <commit>` | Stage `~/.vscode-server/bin/<commit>` so first Remote-SSH connect is fast or works offline. |
 
-**Never let `vscode-server` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for the C/C++ extension's IntelliSense scan to complete — it gets stuck on "scanning" indefinitely. Use a compute node via one of the two paths below.
+**Never let `vscode-server` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for the C/C++ extension's IntelliSense scan to complete — it gets stuck on "scanning" indefinitely. The shipped fix is the `notchpeak-compute` Remote-SSH alias below; `vscode-tunnel-compute` and `vscode-ssh-alloc` are the older manual paths.
+
+#### Remote-SSH path (`notchpeak-compute` alias)
+
+`setup.sh` writes `~/.server-configs-generated/sshconfig.compute`, included by the universal `sshconfig`, which defines:
+
+```
+Host notchpeak-compute
+    HostName notchpeak.chpc.utah.edu
+    User <you>
+    ProxyCommand <repo>/bin/vscode-compute-ssh-proxy.sh notchpeak.chpc.utah.edu <you>
+```
+
+When you connect (`ssh notchpeak-compute`, or VS Code → "Remote-SSH: Connect to Host → `notchpeak-compute`"), the ProxyCommand:
+
+1. SSHes once into `notchpeak.chpc.utah.edu`.
+2. Runs `~/.server-configs/bin/ensure-vscode-alloc.sh`, which reuses any existing RUNNING `vscode-ssh` SLURM job or submits a new `sbatch --wrap='sleep infinity'` and waits for a node.
+3. `exec`s `ssh -W <node>:22 notchpeak…` so the outer client lands on the assigned compute node.
+
+The allocation persists across disconnects; release it with `vscode-ssh-release` (or it walltime-expires). Override sbatch defaults with the same `VSCODE_SSH_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME}` env vars used by `vscode-ssh-alloc`, exported on the login node (e.g. via `~/.bashrc`).
 
 #### Tunnel path (`vscode-tunnel-compute`)
 
@@ -247,7 +268,9 @@ Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 co
 
 When the SLURM allocation ends the tunnel dies — reconnect by rerunning `vscode-tunnel-compute`.
 
-#### Remote-SSH path (`vscode-ssh-alloc`)
+#### Manual Remote-SSH path (`vscode-ssh-alloc`)
+
+Predates `notchpeak-compute`. Use only if you need a hand-controlled allocation (e.g., custom partition/account triples beyond the alias defaults, or you want to land on a specific compute node):
 
 ```
 # on notchpeak1:
