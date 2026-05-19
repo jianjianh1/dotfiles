@@ -87,10 +87,17 @@ alias tk='tmux kill-session -t'
 # vscode-tunnel: start a `code tunnel` on this host. First run prompts for
 # GitHub/MS login; subsequent runs reuse the cached auth and print a
 # vscode.dev URL (also reachable via the Remote-Tunnels extension in a local
-# VS Code). Default tunnel name = short hostname; override: vscode-tunnel myname
+# VS Code). Default tunnel name = short hostname.
+#   Usage: vscode-tunnel [<name>] [<dir>]
+# If <dir> is given, prints a vscode.dev URL that opens straight to that folder.
 vscode-tunnel() {
     command -v code >/dev/null 2>&1 || { echo "code CLI not installed (run setup.sh)"; return 1; }
     local name="${1:-$(hostname -s)}"
+    local dir="${2:-}"
+    if [ -n "$dir" ]; then
+        dir=$(cd "$dir" 2>/dev/null && pwd) || { echo "vscode-tunnel: directory not found: $2"; return 1; }
+        echo "Open in browser: https://vscode.dev/tunnel/$name$dir"
+    fi
     code tunnel --name "$name" --accept-server-license-terms
 }
 
@@ -98,12 +105,19 @@ vscode-tunnel() {
 # salloc. Use this on CHPC login nodes — Arbiter caps login-node processes at
 # 4 cores / 8 GB, which is not enough for cpptools IntelliSense to finish
 # scanning. Defaults to notchpeak-shared-short (no allocation required); set
-# VSCODE_TUNNEL_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME} to override. Tunnel name
-# defaults to notch-dev; pass an explicit name as $1.
+# VSCODE_TUNNEL_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME} to override.
+#   Usage: vscode-tunnel-compute [<name>] [<dir>]
+# Tunnel name defaults to notch-dev. If <dir> is given, prints a vscode.dev URL
+# that opens straight to that folder.
 vscode-tunnel-compute() {
     command -v salloc >/dev/null 2>&1 || { echo "salloc not found — not a SLURM host"; return 1; }
     command -v code   >/dev/null 2>&1 || { echo "code CLI not installed (run setup.sh)"; return 1; }
     local name="${1:-notch-dev}"
+    local dir="${2:-}"
+    if [ -n "$dir" ]; then
+        dir=$(cd "$dir" 2>/dev/null && pwd) || { echo "vscode-tunnel-compute: directory not found: $2"; return 1; }
+        echo "Open in browser: https://vscode.dev/tunnel/$name$dir"
+    fi
     local acct="${VSCODE_TUNNEL_ACCOUNT:-notchpeak-shared-short}"
     local part="${VSCODE_TUNNEL_PARTITION:-notchpeak-shared-short}"
     local qos="${VSCODE_TUNNEL_QOS:-notchpeak-shared-short}"
