@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Personal dotfiles/server configuration repo. Two entry points:
 
-- **`setup.sh`** — run locally to symlink configs into `$HOME` and install CLI tools (glow, nvim, node, uv, Claude Code, Codex, VS Code `code` tunnel CLI, etc.). The shell aliases also define `vscode-tunnel` and `vscode-tunnel-compute` helpers — see `bashrc_aliases`.
+- **`setup.sh`** — run locally to symlink configs into `$HOME` and install CLI tools (glow, nvim, node, uv, Claude Code, Codex, VS Code `code` tunnel CLI, etc.). The shell aliases also define a `vscode-tunnel` helper — see `bashrc_aliases`.
 - **`deploy.sh`** — run locally to bootstrap a remote server over SSH (authorize SSH key, copy `gh`/Claude/Codex auth, clone this repo on the remote, then invoke `setup.sh` there).
 
 Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live in `lib/common.sh` and are sourced by both scripts plus `install_claude_plugins.sh`.

@@ -221,15 +221,3 @@ else
     export VISUAL=vim
 fi
 
-# CHPC login-node banner. Arbiter caps user processes at 4 cores / 8 GB on
-# login nodes, which silently stalls VS Code IntelliSense and any other heavy
-# tooling. Print one line so people don't burn time wondering why. Suppress
-# with SERVER_CONFIGS_NO_LOGIN_BANNER=1 (e.g., automation, dotfile tests).
-if [ -t 1 ] && [ -z "${SERVER_CONFIGS_NO_LOGIN_BANNER:-}" ]; then
-    case "$(hostname -s 2>/dev/null)" in
-        notchpeak[12]|granite[12]|kingspeak[12]|lonepeak[12]|ash[12])
-            printf '\033[33m[CHPC login node]\033[0m heavy work (VS Code, builds) will stall under Arbiter.\n'
-            printf '   For VS Code: run \033[1mvscode-tunnel-compute\033[0m to launch on a compute node.\n'
-            ;;
-    esac
-fi

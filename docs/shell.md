@@ -225,33 +225,6 @@ These only activate if the tool is installed:
 | Function | Purpose |
 |----------|---------|
 | `vscode-tunnel [name] [dir]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. If `<dir>` is given, prints a `https://vscode.dev/tunnel/<name>/<dir>` deep link. |
-| `vscode-tunnel-compute [name] [dir]` | Submit a detached `sbatch` job that runs `code tunnel` on a compute node. Idempotent: reuses any RUNNING `vscode-tunnel-<name>` job. Default tunnel name = `notch-dev`. |
-| `vscode-tunnel-release [name]` | `scancel` the `vscode-tunnel-<name>` job (default name: `notch-dev`). |
-
-**Never let `code tunnel` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for VS Code's remote workspace scan to complete. Use `vscode-tunnel-compute` to land the tunnel on a compute node instead.
-
-#### Tunnel path (`vscode-tunnel-compute`)
-
-`vscode-tunnel-compute [<name>] [<dir>]` submits the tunnel as a **detached** `sbatch` job and returns within a few seconds. The function:
-
-1. If a `vscode-tunnel-<name>` job is already RUNNING, reuses it and reprints the `https://vscode.dev/tunnel/<name>` URL — no second sbatch.
-2. Otherwise `sbatch --wrap="exec code tunnel --name <name> --accept-server-license-terms"`, names the job `vscode-tunnel-<name>`, and points `-o`/`-e` at `~/.local/share/vscode-tunnel-<name>.log` so the URL banner and any errors are recoverable after scrollback ends.
-3. Polls `squeue` for node assignment, then tails the log for up to 30 s and surfaces whichever of the following lands first: the **device-code prompt** (one-time first run from a compute node — see below) or the **`Open this link in your browser`** banner (success).
-
-The tunnel survives the launching terminal closing. Stop it with `vscode-tunnel-release [<name>]` (or `scancel <jobid>`); the SLURM allocation also ends when walltime expires.
-
-**First-run auth from a compute node.** `code tunnel user show` on a login node passes because the token decrypts via the gnome-keyring daemon running on that login node. Compute nodes have no keyring service, so the *first* tunnel job there can't read the existing token and falls back to a device-code login. `vscode-tunnel-compute` surfaces the device-code URL + 8-character code prominently — visit `https://github.com/login/device`, paste the code, approve. After that, `code tunnel` re-stores the token in a keyringless mode that subsequent compute-node runs can read silently. Bonus side effect: the same stored token still works on the login node too (the keyring backend reads through to the file fallback).
-
-Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 cores / 32 GB). Override per-invocation:
-
-| Variable | Default |
-|----------|---------|
-| `VSCODE_TUNNEL_ACCOUNT` | `notchpeak-shared-short` |
-| `VSCODE_TUNNEL_PARTITION` | `notchpeak-shared-short` |
-| `VSCODE_TUNNEL_QOS` | `notchpeak-shared-short` |
-| `VSCODE_TUNNEL_CORES` | `8` |
-| `VSCODE_TUNNEL_MEM` | `32G` |
-| `VSCODE_TUNNEL_TIME` | `8:00:00` |
 
 ### Compat Layer
 
