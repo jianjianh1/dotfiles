@@ -85,22 +85,15 @@ alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
 
 # VS Code remote helpers (installed by setup.sh).
-# vscode-tunnel: start a `code tunnel` on this host. First run prompts for
-# GitHub/MS login; subsequent runs reuse the cached auth and print a
-# vscode.dev URL (also reachable via the Remote-Tunnels extension in a local
-# VS Code). Default tunnel name = short hostname.
-#   Usage: vscode-tunnel [<name>] [<dir>]
-# If <dir> is given, prints a vscode.dev URL that opens straight to that folder.
-vscode-tunnel() {
-    command -v code >/dev/null 2>&1 || { echo "code CLI not installed (run setup.sh)"; return 1; }
-    local name="${1:-$(hostname -s)}"
-    local dir="${2:-}"
-    if [ -n "$dir" ]; then
-        dir=$(cd "$dir" 2>/dev/null && pwd) || { echo "vscode-tunnel: directory not found: $2"; return 1; }
-        echo "Open in browser: https://vscode.dev/tunnel/$name$dir"
-    fi
-    code tunnel --name "$name" --accept-server-license-terms
-}
+# vscode-tunnel: subcommand router around `code tunnel`. First run prompts
+# for GitHub/MS login; subsequent runs reuse the cached auth and print a
+# vscode.dev URL (also reachable via Remote-Tunnels in a local VS Code).
+# Run `vscode-tunnel --help` for the full surface. Definition lives in
+# ~/.local/lib/vscode-tunnel.sh (symlinked from this repo by setup.sh).
+if [ -r "$HOME/.local/lib/vscode-tunnel.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.local/lib/vscode-tunnel.sh"
+fi
 
 
 # Manual theme override. `theme auto` re-runs detect-theme (clears the cached

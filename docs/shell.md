@@ -222,9 +222,25 @@ These only activate if the tool is installed:
 
 ### VS Code remote helpers
 
-| Function | Purpose |
-|----------|---------|
-| `vscode-tunnel [name] [dir]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. If `<dir>` is given, prints a `https://vscode.dev/tunnel/<name>/<dir>` deep link. |
+`vscode-tunnel` is a subcommand router around `code tunnel` on the current host. The function lives in [`lib/vscode-tunnel.sh`](../lib/vscode-tunnel.sh) and is symlinked to `~/.local/lib/vscode-tunnel.sh` by `setup.sh`; both `bashrc_aliases` and `zshrc_aliases` source it.
+
+| Subcommand | Purpose |
+|------------|---------|
+| `vscode-tunnel [start] [<dir>] [-n NAME]` | Default action. Start the tunnel and print the `https://vscode.dev/tunnel/<name>` URL (deep-linked to `<dir>` if given). |
+| `vscode-tunnel url [<dir>] [-n NAME]` | Print the URL only; don't start. |
+| `vscode-tunnel status` | `code tunnel status`. |
+| `vscode-tunnel stop` | Kill the running tunnel (`code tunnel kill`). |
+| `vscode-tunnel restart` | Restart the running tunnel. |
+| `vscode-tunnel rename <new-name>` | Validate and rename the registered tunnel. |
+| `vscode-tunnel unregister` | Unregister this tunnel from the account. |
+| `vscode-tunnel login [--provider github\|microsoft]` | `code tunnel user login`. |
+| `vscode-tunnel logout` / `whoami` | `code tunnel user logout` / `user show`. |
+| `vscode-tunnel service <install\|uninstall\|log>` | Manage the background service. |
+| `vscode-tunnel --help` | Full usage. |
+
+The default tunnel name is `hostname -s`, lowercased and sanitized to fit VS Code's `^[a-z0-9][a-z0-9-]{2,19}$` rule. `-n NAME` overrides it; mixed-case input is lowercased with a one-line warning (VS Code treats tunnel names case-insensitively, so `MyHost` and `myhost` would otherwise register as silently conflicting peers). Paths passed as `<dir>` are resolved with `cd`/`pwd` and percent-encoded in the printed URL.
+
+The first positional arg is treated as a subcommand only if it matches the table above, so `vscode-tunnel ~/Repos/foo` deep-links into that folder without needing the explicit `start`.
 
 ### Compat Layer
 

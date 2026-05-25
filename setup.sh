@@ -1725,7 +1725,8 @@ wire_ssh_config() {
 }
 
 link_core_configs() {
-    mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" || return 1
+    mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" "$HOME/.local/lib" || return 1
+    backup_and_link "$DIR/lib/vscode-tunnel.sh" "$HOME/.local/lib/vscode-tunnel.sh" || return 1
     backup_and_link "$DIR/vimrc" "$HOME/.vimrc" || return 1
     backup_and_link "$DIR/tmux.conf" "$HOME/.tmux.conf" || return 1
     backup_and_link "$DIR/nvim" "$HOME/.config/nvim" || return 1
