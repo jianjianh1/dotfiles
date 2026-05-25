@@ -228,8 +228,8 @@ fi
 if [ -t 1 ] && [ -z "${SERVER_CONFIGS_NO_LOGIN_BANNER:-}" ]; then
     case "$(hostname -s 2>/dev/null)" in
         notchpeak[12]|granite[12]|kingspeak[12]|lonepeak[12]|ash[12])
-            printf '\033[33m[CHPC login node]\033[0m heavy work (VS Code IntelliSense, builds) will stall under Arbiter.\n'
-            printf '   For VS Code: connect Remote-SSH to \033[1mnotchpeak-compute\033[0m. Diagnose with: vscode-doctor\n'
+            printf '\033[33m[CHPC login node]\033[0m heavy work (VS Code, builds) will stall under Arbiter.\n'
+            printf '   For VS Code: run \033[1mvscode-tunnel-compute\033[0m to launch on a compute node.\n'
             ;;
     esac
 fi

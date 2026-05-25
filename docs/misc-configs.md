@@ -45,13 +45,9 @@ mkdir -p ~/.ssh/sockets
 | `AddKeysToAgent` | `yes` | Auto-add keys to ssh-agent on first use |
 | `IdentitiesOnly` | `yes` | Only offer keys explicitly configured (prevents agent key spam) |
 
-### Generated `notchpeak-compute` alias
+### Suggested per-host stanzas (CHPC compute nodes)
 
-`setup.sh` renders `~/.server-configs-generated/sshconfig.compute` and the repo's `sshconfig` `Include`s it. The alias auto-allocates a compute node behind a single Remote-SSH connect — see [VS Code remote helpers](shell.md#vs-code-remote-helpers) for the full flow. No manual stanzas needed.
-
-### Suggested per-host stanzas (CHPC, manual compute-node path)
-
-If you'd rather connect to a specific compute node by name (e.g., after `vscode-ssh-alloc` prints `notch324`), paste these into your own `~/.ssh/config` above the `Include` line — they're outside the auto-managed config because they're personal preferences:
+To address compute nodes by name (e.g. `ssh notch324`), paste these into your own `~/.ssh/config` above the `Include` line — they're outside the auto-managed config because they're personal preferences:
 
 ```ssh-config
 Host notchpeak
@@ -65,10 +61,6 @@ Host notch* !notchpeak
 ```
 
 Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `proxyjump notchpeak` and `hostname notch324`.
-
-### IntelliSense for CUDA/CMake projects
-
-`setup.sh` seeds `~/.vscode-server/data/Machine/settings.json` with a non-recursive cpptools `browse.path`, an exclude list covering the HPC dotfile/installdir trees under `$HOME`, and — when nvcc is found via `$CUDA_HOME`/`$PATH`/the CHPC install tree — `compilerPath`, CUDA include dir, and `.cu`/`.cuh` -> `cpp` associations. The seed also points `C_Cpp.default.compileCommands` at `${workspaceFolder}/build/compile_commands.json`; to feed it from a CMake project, add `set(CMAKE_EXPORT_COMPILE_COMMANDS ON)` to `CMakeLists.txt` (or pass `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to `cmake`) and configure into `build/`. The live file is left alone after the first hand-edit; re-running `setup.sh` only refreshes it while it still matches the recorded template.
 
 ---
 

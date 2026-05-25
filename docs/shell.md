@@ -224,35 +224,11 @@ These only activate if the tool is installed:
 
 | Function | Purpose |
 |----------|---------|
-| `vscode-tunnel [name]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. |
+| `vscode-tunnel [name] [dir]` | Run `code tunnel` on the current host. Default tunnel name = short hostname. If `<dir>` is given, prints a `https://vscode.dev/tunnel/<name>/<dir>` deep link. |
 | `vscode-tunnel-compute [name] [dir]` | Submit a detached `sbatch` job that runs `code tunnel` on a compute node. Idempotent: reuses any RUNNING `vscode-tunnel-<name>` job. Default tunnel name = `notch-dev`. |
 | `vscode-tunnel-release [name]` | `scancel` the `vscode-tunnel-<name>` job (default name: `notch-dev`). |
-| `vscode-ssh-alloc [name]` | Submit a long-lived `sbatch --wrap='sleep infinity'` allocation and print the assigned compute node so Remote-SSH can dial it. Default job name = `vscode-ssh`. |
-| `vscode-ssh-release [name]` | `scancel` all jobs matching the name (default: `vscode-ssh`). |
-| `vscode-doctor` | Print hostname (with login-node warning), `vscode-*` SLURM allocations, cpptools cache path/size, and a tail of the latest cpptools log. Read-only. |
-| `vscode-cache-clear` | Confirm-then-delete the cpptools IntelliSense index (`intelliSenseCachePath`). Use when results go stale or the parser wedges. |
-| `prefetch-vscode-server <commit>` | Stage `~/.vscode-server/bin/<commit>` so first Remote-SSH connect is fast or works offline. |
 
-**Never let `vscode-server` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for the C/C++ extension's IntelliSense scan to complete — it gets stuck on "scanning" indefinitely. The shipped fix is the `notchpeak-compute` Remote-SSH alias below; `vscode-tunnel-compute` and `vscode-ssh-alloc` are the older manual paths.
-
-#### Remote-SSH path (`notchpeak-compute` alias)
-
-`setup.sh` writes `~/.server-configs-generated/sshconfig.compute`, included by the universal `sshconfig`, which defines:
-
-```
-Host notchpeak-compute
-    HostName notchpeak.chpc.utah.edu
-    User <you>
-    ProxyCommand <repo>/bin/vscode-compute-ssh-proxy.sh notchpeak.chpc.utah.edu <you>
-```
-
-When you connect (`ssh notchpeak-compute`, or VS Code → "Remote-SSH: Connect to Host → `notchpeak-compute`"), the ProxyCommand:
-
-1. SSHes once into `notchpeak.chpc.utah.edu`.
-2. Runs `~/.server-configs/bin/ensure-vscode-alloc.sh`, which reuses any existing RUNNING `vscode-ssh` SLURM job or submits a new `sbatch --wrap='sleep infinity'` and waits for a node.
-3. `exec`s `ssh -W <node>:22 notchpeak…` so the outer client lands on the assigned compute node.
-
-The allocation persists across disconnects; release it with `vscode-ssh-release` (or it walltime-expires). Override sbatch defaults with the same `VSCODE_SSH_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME}` env vars used by `vscode-ssh-alloc`, exported on the login node (e.g. via `~/.bashrc`).
+**Never let `code tunnel` run on a CHPC login node.** Arbiter caps login-node processes at 4 cores / 8 GB, which is not enough for VS Code's remote workspace scan to complete. Use `vscode-tunnel-compute` to land the tunnel on a compute node instead.
 
 #### Tunnel path (`vscode-tunnel-compute`)
 
@@ -276,25 +252,6 @@ Default allocation is `notchpeak-shared-short` (no account needed, 8 h max, 8 co
 | `VSCODE_TUNNEL_CORES` | `8` |
 | `VSCODE_TUNNEL_MEM` | `32G` |
 | `VSCODE_TUNNEL_TIME` | `8:00:00` |
-
-#### Manual Remote-SSH path (`vscode-ssh-alloc`)
-
-Predates `notchpeak-compute`. Use only if you need a hand-controlled allocation (e.g., custom partition/account triples beyond the alias defaults, or you want to land on a specific compute node):
-
-```
-# on notchpeak1:
-vscode-ssh-alloc                  # prints: Allocation ready on: notch324
-# from local VS Code:
-#   Cmd/Ctrl-Shift-P → "Remote-SSH: Connect to Host" → notch324
-# when done:
-vscode-ssh-release
-```
-
-For the bare node name to work in VS Code, your `~/.ssh/config` needs `Host notchpeak` + a `Host notch* !notchpeak` ProxyJump block — see the [suggested CHPC stanzas](misc-configs.md#suggested-per-host-stanzas-chpc) to paste in. Unlike the tunnel path this uses `sbatch --wrap='sleep infinity'`, so the allocation survives terminal disconnects and reconnects until you `vscode-ssh-release` (or wall-time expires). Override the SLURM triple/limits with `VSCODE_SSH_{ACCOUNT,PARTITION,QOS,CORES,MEM,TIME}` (same defaults as the tunnel variables).
-
-#### Shared cpptools settings
-
-`setup.sh` seeds `~/.vscode-server/data/Machine/settings.json` (only if absent) with cpptools-friendly defaults: cache path on `/scratch/general/vast/$USER`, lower cache size, low-priority workspace parse, and exclusion patterns for `build/`, `.venv/`, `node_modules/`. These apply to both transport paths (tunnel and Remote-SSH share the same `~/.vscode-server` tree on the compute node). The canonical source lives at `~/.server-configs-generated/vscode-machine-settings.json`; edit the seeded file freely (it is never overwritten by re-runs).
 
 ### Compat Layer
 
