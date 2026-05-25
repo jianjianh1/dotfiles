@@ -80,9 +80,11 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 
 - **vimrc** is plugin-free (uses only built-in vim features + netrw). Don't add plugin managers or plugin dependencies.
 - **nvim/** is the Neovim config (symlinked to `~/.config/nvim/`). Uses lazy.nvim for plugins.
-  - Layout: `init.lua` → `lua/config/{options,keymaps,autocmds,lazy}.lua` → `lua/plugins/*.lua`
+  - Layout: `init.lua` → `lua/config/{options,keymaps,autocmds,lazy,compile_commands}.lua` → `lua/plugins/*.lua`
   - Leader is Space.
-  - 12 plugin spec files in `lua/plugins/`. Each file = one plugin or group.
+  - 15 plugin spec files in `lua/plugins/`. Each file = one plugin or group.
+  - **LSP**: pyright (tuned to `openFilesOnly`) + ruff (lint only, hover disabled) + clangd (`--background-index --clang-tidy`) + lua_ls. `<C-]>`/`F12` jump to definition, `<F2>` renames, `<leader>uh` toggles inlay hints. See `docs/neovim.md` for the full table.
+  - **clangd auto-bootstrap**: on first attach, `config/compile_commands.lua` runs `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` for CMake projects and symlinks the result to the root. Make projects expose `:GenCompileCommands` (needs `bear`).
   - Which-key groups: `<leader>f` = find, `<leader>g` = git, `<leader>b` = buffer.
   - **Oil replaces netrw** (`vim.g.loaded_netrw = 1`). `<leader>e` and `-` open Oil.
   - **`<leader>m` differs between vim and nvim**: vim runs `!glow %` (terminal); nvim triggers `MarkdownPreviewToggle` (browser) on markdown files.

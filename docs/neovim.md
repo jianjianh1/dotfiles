@@ -406,6 +406,78 @@ This overrides the core `<leader>m` (glow) binding when editing `.md` files.
 
 Build step runs `mkdp#util#install()` only if `node` is available.
 
+### LSP (pyright + ruff + clangd + lua_ls)
+
+**File:** `plugins/lsp.lua` (+ `config/compile_commands.lua`)
+
+Tuned for a VS Code IntelliSense feel: low diagnostic noise, project-aware navigation, inlay hints, and `Ctrl+]` / `F12` to jump to definition.
+
+#### Servers
+
+| Server | Role | Notes |
+|---|---|---|
+| pyright | Python types, hover, go-to-def, auto-import | `typeCheckingMode=basic`, `diagnosticMode=openFilesOnly` (no workspace-wide spam) |
+| ruff    | Python lint diagnostics | Hover disabled so pyright wins the popup |
+| clangd  | C/C++ semantic | `--background-index --clang-tidy --header-insertion=iwyu --completion-style=detailed --function-arg-placeholders` |
+| lua_ls  | Lua | Inlay hints enabled |
+
+Installed via mason on first launch (`:Mason` to inspect). Add more with `ensure_installed` in `plugins/lsp.lua`.
+
+#### Keybindings (active when an LSP attaches)
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `gd` / `<C-]>` / `<F12>` | n (F12 also i) | Go to definition |
+| `<C-t>` | n | Pop back from definition (built-in tag stack) |
+| `gr` / `<S-F12>` | n | References |
+| `gI` | n | Implementation |
+| `<leader>D` | n | Type definition |
+| `K` / `gh` | n | Hover documentation |
+| `<C-s>` | i | Signature help |
+| `<leader>rn` / `<F2>` | n | Rename symbol |
+| `<leader>ca` | n | Code action |
+| `<leader>cd` | n | Show line diagnostics |
+| `[d` / `]d` | n | Previous / next diagnostic |
+| `<leader>uh` | n | Toggle inlay hints (buffers that support them) |
+| `<leader>cs` | n | Switch source/header (clangd only) |
+
+#### Project structure (C/C++)
+
+clangd auto-discovers `compile_commands.json` by walking up from the source file. The config bootstraps it for you:
+
+- **CMake projects** — on first clangd attach, runs `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` in the background and symlinks `build/compile_commands.json` to the project root. clangd reloads automatically.
+- **Make projects** — detection only. Run `:GenCompileCommands` to invoke `bear -- make` (because that command actually builds). To opt into auto-run, `touch .server-configs-bear-ok` at the project root.
+- **Manual** — `:GenCompileCommands` always re-runs the appropriate generator, ignoring the per-session cache.
+
+`compile_commands.json` discovery checks the project root and common build dirs (`build/`, `Build/`, `out/`, `cmake-build-{debug,release}/`).
+
+#### Project structure (Python)
+
+pyright finds imports via `pyrightconfig.json` or `pyproject.toml` at the project root. For src-layouts or anything non-trivial, drop a `pyrightconfig.json`:
+
+```json
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": ["src"]
+}
+```
+
+Otherwise pyright uses `autoSearchPaths` to guess.
+
+#### Diagnostics display
+
+- Virtual text inline: `● error message` (severity-sorted, no updates during insert).
+- Float popup on `<leader>cd` with rounded border and source name when ambiguous.
+- Signs: `✘` error / `▲` warn / `●` info / `○` hint.
+
+#### Troubleshooting
+
+- `:LspInfo` — which servers are attached to the current buffer, what they consider the root, log path.
+- `:checkhealth lsp` — capability and binary checks.
+- `:Mason` — install / update / inspect language servers.
+- Heavy diagnostic noise? Make sure pyright sees a project root (presence of `pyproject.toml` / `setup.py` / `.git`) so `openFilesOnly` can do its job.
+
 ---
 
 ## Autocmds (`config/autocmds.lua`)
@@ -472,6 +544,6 @@ nvim --headless '+Lazy! sync' +qa
 | trouble.nvim | Diagnostics / loclist / qflist UI | `:Trouble` | `<leader>xx/xb/xl/xq` |
 | mason.nvim | LSP/tool installer | `:Mason` | — |
 | mason-lspconfig.nvim | Bridge mason ↔ lspconfig | With mason | — |
-| nvim-lspconfig | LSP client config (pyright, clangd, lua_ls) | BufReadPre, BufNewFile | `gd`, `gr`, `gI`, `K`, `<leader>rn/ca/D`, `[d`, `]d` |
+| nvim-lspconfig | LSP client config (pyright, ruff, clangd, lua_ls) | BufReadPre, BufNewFile | see [LSP](#lsp-pyright--ruff--clangd--lua_ls) |
 | plenary.nvim | Utility library | Dependency | — |
 | nvim-web-devicons | File type icons | Dependency | — |
