@@ -147,6 +147,13 @@ append_line_if_missing() {
 
     if ! grep -qF "$line" "$file" 2>/dev/null; then
         mkdir -p "$(dirname "$file")" || return 1
+        # If the file lacks a trailing newline, the append would fuse onto
+        # the last line. `tail -c 1` of a newline-terminated file yields an
+        # empty string (command substitution strips it); any other last byte
+        # comes through as non-empty.
+        if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null)" ]; then
+            printf '\n' >> "$file" || return 1
+        fi
         printf '%s\n' "$line" >> "$file" || return 1
     fi
 }
