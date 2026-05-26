@@ -36,6 +36,7 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 | [`bibtex-fetch`](../ai/skills/bibtex-fetch/SKILL.md) | DOI, arXiv ID, `.bib`, BibTeX entries, citation auditing |
 | [`paper-review`](../ai/skills/paper-review/SKILL.md) | drafting reviewer comments, scoring rubrics, critiquing a draft, reproducibility checks |
 | [`technical-writing`](../ai/skills/technical-writing/SKILL.md) | READMEs, docs, paper sections, blog posts, markdown style, active voice, AI-tell removal |
+| [`reply-style`](../ai/skills/reply-style/SKILL.md) | Assistant-side counterpart to `technical-writing` — governs Claude's own conversational tone: brief, AmE, no AI-tells, no idioms or sports metaphors, single verbs over phrasal verbs |
 
 Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase.
 
