@@ -1762,6 +1762,17 @@ link_generated_configs() {
     link_zsh_configs || return 1
 }
 
+# Run scripts/install_claude_skills.sh to clone upstream skill repos
+# (obra/superpowers, anthropics/skills) into ~/.local/share/claude-skills/
+# and symlink the curated set into ~/.claude/skills/. Forwards --force and
+# --dry-run so a top-level `./install.sh --force` re-clones upstream too.
+install_external_claude_skills() {
+    local args=()
+    [ "$FORCE" = true ]   && args+=(--force)
+    [ "$DRY_RUN" = true ] && args+=(--dry-run)
+    bash "$DIR/scripts/install_claude_skills.sh" "${args[@]}"
+}
+
 # Symlink every directory under ai/skills/ into ~/.claude/skills/<name>.
 # Skills are pure markdown so no CHPC gate is needed (unlike MCP servers,
 # which are still installed only by scripts/install_claude_plugins.sh).
@@ -1933,6 +1944,7 @@ setup_main() {
     # Link remaining configs
     run_step "shell config links" link_generated_configs
     run_step "claude skills"      link_claude_skills
+    run_step "external skills"    install_external_claude_skills
     # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
     if [[ $- == *i* ]] && [ "$DRY_RUN" = false ]; then
         # shellcheck source=/dev/null

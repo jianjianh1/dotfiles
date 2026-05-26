@@ -65,14 +65,25 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ~/.codex/config.toml      (copy of ai/codex_config.toml)
 
 ~/.claude/skills/<name>   (symlink → ai/skills/<name>, one per subdir)
+                          (also: symlink → ~/.local/share/claude-skills/<repo>/skills/<name>
+                                 for upstream skills cloned by
+                                 scripts/install_claude_skills.sh)
+~/.local/share/claude-skills/   (clone cache for obra/superpowers and
+                                 anthropics/skills; refreshed on install
+                                 --force; removable via uninstall.sh)
 ```
 
 **Skills vs. settings**: `ai/claude_settings.json` and `ai/codex_config.toml`
 are **copies** (per-host overrides expected). Each `ai/skills/<name>/` is a
 **symlink** — skills are shared knowledge that should track the repo
-verbatim, like `editor/nvim` or `shell/bashrc_aliases`. See
-[`docs/ai-skills.md`](docs/ai-skills.md) for the bundled set and authoring
-notes. Skills are pure markdown — no MCP, no CHPC gate.
+verbatim, like `editor/nvim` or `shell/bashrc_aliases`. Upstream skills
+follow the same symlink pattern, but their content lives in a clone cache
+at `~/.local/share/claude-skills/` rather than in this repo. See
+[`docs/ai-skills.md`](docs/ai-skills.md) for the bundled set, the upstream
+set (obra/superpowers, anthropics/skills), and authoring notes. Skills are
+pure markdown — no MCP, no CHPC gate. The two adjacent plugin/MCP additions
+(`context7`, `serena`) live in `scripts/install_claude_plugins.sh` and
+honor the existing CHPC gate.
 
 Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 

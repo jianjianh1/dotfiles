@@ -5,6 +5,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATED_DIR="$HOME/.dotfiles-generated"
 # shellcheck disable=SC2034  # consumed by manifest_contains_path from lib/common.sh
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
+EXTERNAL_SKILLS_CACHE="$HOME/.local/share/claude-skills"
 YES=false
 
 # shellcheck source=lib/common.sh
@@ -39,7 +40,7 @@ restore_backup() {
 
 unlink_config() {
     local dst="$1"
-    local target="" dir_canon="" gen_canon=""
+    local target="" dir_canon="" gen_canon="" ext_canon=""
 
     if [ -L "$dst" ]; then
         target="$(portable_realpath "$dst" 2>/dev/null || true)"
@@ -49,9 +50,12 @@ unlink_config() {
         # works whether or not the path crossed a symlinked prefix.
         dir_canon="$(portable_realpath "$DIR" 2>/dev/null || printf '%s' "$DIR")"
         gen_canon="$(portable_realpath "$GENERATED_DIR" 2>/dev/null || printf '%s' "$GENERATED_DIR")"
+        ext_canon="$(portable_realpath "$EXTERNAL_SKILLS_CACHE" 2>/dev/null || printf '%s' "$EXTERNAL_SKILLS_CACHE")"
         case "$target" in
             "$DIR"|"$DIR"/*|"$GENERATED_DIR"|"$GENERATED_DIR"/*|\
-            "$dir_canon"|"$dir_canon"/*|"$gen_canon"|"$gen_canon"/*)
+            "$EXTERNAL_SKILLS_CACHE"|"$EXTERNAL_SKILLS_CACHE"/*|\
+            "$dir_canon"|"$dir_canon"/*|"$gen_canon"|"$gen_canon"/*|\
+            "$ext_canon"|"$ext_canon"/*)
                 rm -f "$dst"
                 echo "  Removed $dst"
                 restore_backup "$dst"
@@ -168,6 +172,42 @@ unlink_claude_skills() {
     remove_dir_if_empty "$HOME/.claude/skills"
 }
 
+# Remove the upstream-skill symlinks created by
+# scripts/install_claude_skills.sh. Walks every symlink under
+# ~/.claude/skills/ and removes only those whose targets resolve into the
+# external-skills cache directory (~/.local/share/claude-skills/). Skills
+# the user added under their own names — or that point elsewhere — are
+# left untouched. Decoupled from the install script's curated arrays so
+# additions/removals there don't break uninstall.
+unlink_external_claude_skills() {
+    local skills_dst="$HOME/.claude/skills"
+    [ -d "$skills_dst" ] || return 0
+    local link target ext_canon
+    ext_canon="$(portable_realpath "$EXTERNAL_SKILLS_CACHE" 2>/dev/null || printf '%s' "$EXTERNAL_SKILLS_CACHE")"
+    for link in "$skills_dst"/*; do
+        [ -L "$link" ] || continue
+        target="$(portable_realpath "$link" 2>/dev/null || true)"
+        case "$target" in
+            "$EXTERNAL_SKILLS_CACHE"/*|"$ext_canon"/*)
+                rm -f "$link"
+                echo "  Removed $link"
+                ;;
+        esac
+    done
+    remove_dir_if_empty "$skills_dst"
+}
+
+# Remove the upstream-skills clone cache. Separate from the symlink
+# cleanup above because the cache may also be used by other tools the
+# user wires up, and because it's larger / slower to recreate.
+remove_external_skills_cache() {
+    echo "Removing upstream-skill clone cache..."
+    if [ -d "$EXTERNAL_SKILLS_CACHE" ]; then
+        rm -rf "$EXTERNAL_SKILLS_CACHE"
+        echo "  Removed $EXTERNAL_SKILLS_CACHE"
+    fi
+}
+
 remove_symlinks() {
     echo "Removing config symlinks..."
     unlink_config "$HOME/.vimrc"
@@ -190,6 +230,7 @@ remove_symlinks() {
     unlink_config "$HOME/.zshrc_exports"
     unlink_config "$HOME/.zshrc_aliases"
     unlink_claude_skills
+    unlink_external_claude_skills
     # Only remove ~/.zshrc when it's our symlink. A pre-existing user
     # ~/.zshrc with our source lines appended is handled by remove_bashrc_lines.
     unlink_config "$HOME/.zshrc"
@@ -310,6 +351,9 @@ main() {
     echo ""
 
     confirm "Remove config symlinks?" && remove_symlinks
+    echo ""
+    confirm "Remove upstream-skill clone cache (~/.local/share/claude-skills/)?" \
+        && remove_external_skills_cache
     echo ""
     confirm "Remove source lines from ~/.bashrc?" && remove_bashrc_lines
     echo ""

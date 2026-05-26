@@ -221,6 +221,21 @@ else
     echo "    Skipping Git (uvx not found — install uv first)"
 fi
 
+# --- Serena ---
+# Oraios's semantic-code-navigation MCP. Per Oraios's docs, the recommended
+# install path is `claude mcp add` with uvx pulling from the GitHub HEAD —
+# the marketplace/plugin form is documented as out-of-date.
+echo "  Adding Serena MCP server..."
+if ! $CLAUDE_HAS_MCP; then
+    echo "    Skipping Serena (Claude Code MCP commands unavailable)"
+elif command -v uvx &>/dev/null; then
+    install_plugin "mcp:serena" mcp_add serena --scope user --transport stdio serena \
+        -- uvx --from git+https://github.com/oraios/serena \
+                serena start-mcp-server --context claude-code
+else
+    echo "    Skipping Serena (uvx not found — install uv first)"
+fi
+
 echo ""
 echo "Done! Installed MCP servers:"
 if $CLAUDE_HAS_MCP; then
@@ -259,6 +274,18 @@ install_and_enable_plugin pr-review-toolkit
 
 # Development tools
 install_and_enable_plugin agent-sdk-dev
+
+# Knowledge / docs
+# context7: live API docs for libraries (PyTorch, NumPy, MPI, CUDA, …).
+# Ships a documentation-lookup skill + docs-researcher agent + /context7:docs.
+install_and_enable_plugin context7
+
+# obra/superpowers is intentionally NOT installed here. It's available as
+# both a plugin and a clonable skill bundle; we use the clone form via
+# scripts/install_claude_skills.sh because the user prefers natural skill
+# names (/systematic-debugging) over plugin namespacing
+# (/superpowers:systematic-debugging). Installing both forms would double
+# the descriptions held in context.
 
 # Code intelligence (LSPs)
 install_and_enable_plugin clangd-lsp

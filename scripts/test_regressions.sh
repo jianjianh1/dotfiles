@@ -982,6 +982,30 @@ test_skill_files_have_valid_frontmatter() (
     [ "$count" -gt 0 ] || fail "no skills found under $skills_dir"
 )
 
+# install_claude_skills.sh must (a) parse cleanly under bash and (b)
+# honor --dry-run by NOT touching ~/.local/share/claude-skills or
+# ~/.claude/skills (no clones, no symlinks). Catches accidental drift in
+# the DRY_RUN contract enforced by lib/common.sh::run_step.
+test_install_claude_skills_dry_run() (
+    local tmp script
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    script="$DIR/scripts/install_claude_skills.sh"
+
+    bash -n "$script" || fail "install_claude_skills.sh syntax error"
+
+    HOME="$tmp" bash "$script" --dry-run >/dev/null || \
+        fail "install_claude_skills.sh --dry-run returned non-zero"
+
+    if [ -d "$tmp/.local/share/claude-skills" ]; then
+        fail "install_claude_skills.sh --dry-run created cache directory"
+    fi
+    if [ -d "$tmp/.claude/skills" ]; then
+        fail "install_claude_skills.sh --dry-run created skills directory"
+    fi
+    return 0
+)
+
 run_test() {
     local name="$1"
 
@@ -1021,6 +1045,7 @@ main() {
     run_test test_chpc_allocs_self_test
     run_test test_chpc_allocs_python36_compatible
     run_test test_skill_files_have_valid_frontmatter
+    run_test test_install_claude_skills_dry_run
     echo "All regression tests passed."
 }
 
