@@ -1698,41 +1698,22 @@ install_detect_theme() {
     manifest_add_path "$HOME/.local/bin/detect-theme"
 }
 
-# Wire the universal sshconfig fragment into ~/.ssh/config via an Include
-# directive instead of symlinking. A symlink would route every host entry
-# the user adds the natural way (editing ~/.ssh/config) through to the
-# repo and dirty the working tree. With Include, the repo file stays
-# minimal and user-owned host blocks live in ~/.ssh/config.
-wire_ssh_config() {
+# One-shot migration: older installs appended `Include $DIR/ssh/sshconfig`
+# to ~/.ssh/config and created ~/.ssh/sockets for ControlMaster. Both are
+# gone now — strip the Include line and rmdir the (empty) sockets dir so
+# upgrading hosts end up clean. Idempotent: no-ops once the line is gone.
+# Safe to delete entirely after enough time has passed for all hosts to
+# have run install.sh at least once post-removal.
+unwire_ssh_config_legacy() {
     local config="$HOME/.ssh/config"
-    local include_line="Include $DIR/ssh/sshconfig"
-
-    mkdir -p "$HOME/.ssh" || return 1
-    chmod 700 "$HOME/.ssh" || return 1
-
-    # One-shot migration from the old symlink-into-repo install. The
-    # symlink's target is the repo's universal block now; we move the
-    # file aside so the user can recover any per-host entries they had
-    # added (which had been writing through to the repo).
-    if [ -L "$config" ] && is_managed_symlink "$config"; then
-        local backup
-        backup="$config.bak.$(date +%Y%m%d-%H%M%S)"
-        cp -L "$config" "$backup" || return 1
-        rm "$config" || return 1
-        chmod 600 "$backup" 2>/dev/null || true
-        echo "  Detached old SSH config symlink → $backup"
-        echo "  Copy any per-host blocks from that backup into ~/.ssh/config."
+    if [ -f "$config" ] && [ ! -L "$config" ]; then
+        clean_line_from_file "$config" "^Include $DIR/ssh/sshconfig\$"
     fi
-
-    if [ ! -e "$config" ]; then
-        touch "$config" || return 1
-    fi
-    chmod 600 "$config" || return 1
-    append_line_if_missing "$include_line" "$config" || return 1
+    remove_dir_if_empty "$HOME/.ssh/sockets"
 }
 
 link_core_configs() {
-    mkdir -p "$HOME/.config" "$HOME/.ssh/sockets" "$HOME/.vim/undodir" "$HOME/.local/lib" || return 1
+    mkdir -p "$HOME/.config" "$HOME/.vim/undodir" "$HOME/.local/lib" || return 1
     backup_and_link "$DIR/lib/vscode-tunnel.sh" "$HOME/.local/lib/vscode-tunnel.sh" || return 1
     backup_and_link "$DIR/editor/vimrc" "$HOME/.vimrc" || return 1
     backup_and_link "$DIR/tmux/tmux.conf" "$HOME/.tmux.conf" || return 1
@@ -1741,7 +1722,7 @@ link_core_configs() {
     backup_and_link "$DIR/shell/inputrc" "$HOME/.inputrc" || return 1
     backup_and_link "$DIR/shell/dircolors" "$HOME/.dircolors" || return 1
     backup_and_link "$DIR/shell/dircolors.light" "$HOME/.dircolors.light" || return 1
-    wire_ssh_config || return 1
+    unwire_ssh_config_legacy || true
     backup_and_link "$DIR/shell/starship.toml" "$HOME/.config/starship.toml" || return 1
     backup_and_link "$DIR/shell/starship-light.toml" "$HOME/.config/starship-light.toml" || return 1
     # XDG-compliant tmux path (tmux 3.2+ reads this natively)

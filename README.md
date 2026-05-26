@@ -69,7 +69,6 @@ HOME="$(mktemp -d)" ./install.sh --dry-run
 | `tmux/tmux.conf` | `~/.tmux.conf` | symlink |
 | _generated_ `tmux-theme.conf` | `~/.tmux-theme.conf` | symlink (rendered by `install.sh`) |
 | `git/gitconfig` | `~/.gitconfig` | symlink |
-| `ssh/sshconfig` | wired into `~/.ssh/config` via `Include` | append |
 | `ai/claude_settings.json` | `~/.claude/settings.json` | copy |
 | `ai/codex_config.toml` | `~/.codex/config.toml` | copy |
 | `scripts/detect-theme.sh` | `~/.local/bin/detect-theme` | symlink |
@@ -140,8 +139,6 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │   └── tmux.conf               # tmux config (prefix: Ctrl-a)
 ├── git/
 │   └── gitconfig               # delta pager, rebase, aliases
-├── ssh/
-│   └── sshconfig               # SSH multiplexing + keep-alive (wired via Include)
 ├── ai/
 │   ├── claude_settings.json    # Claude Code settings
 │   ├── codex_config.toml       # Codex CLI settings
@@ -215,7 +212,7 @@ Comprehensive lookup tables for every keybinding, alias, option, and setting:
 | [docs/neovim.md](docs/neovim.md) | All plugins, their keybindings, architecture, differences from vim |
 | [docs/tmux.md](docs/tmux.md) | Every tmux keybinding, option, status bar, copy mode |
 | [docs/git.md](docs/git.md) | Git config, delta, behavior settings, all aliases (git + shell) |
-| [docs/misc-configs.md](docs/misc-configs.md) | SSH multiplexing, readline settings, dircolors |
+| [docs/misc-configs.md](docs/misc-configs.md) | Readline settings, dircolors |
 | [docs/ai-tools.md](docs/ai-tools.md) | Claude Code settings, Codex config, MCP servers |
 | [docs/ai-skills.md](docs/ai-skills.md) | Claude Code skills under `ai/skills/` (HPC, CUDA, MPI, LaTeX, paper review, …) |
 | [docs/chpc-allocs.md](docs/chpc-allocs.md) | `chpc-allocs` SLURM allocations & wait predictions |

@@ -170,6 +170,31 @@ delete_matching_lines() {
     rm -f "$tmp"
 }
 
+# rmdir $1 only if it's an empty directory. Silent no-op if missing or
+# non-empty. Used by install/uninstall to tidy directories the repo
+# previously created (e.g. one-shot legacy cleanup paths).
+remove_dir_if_empty() {
+    local path="$1" label="${2:-}"
+    label="${label:-$(display_path "$path")}"
+    if [ -d "$path" ]; then
+        rmdir "$path" 2>/dev/null && echo "  Removed $label"
+    fi
+}
+
+# Strip every line matching $2 (extended regex) from $1. Refuses to write
+# through symlinks so we don't accidentally edit a repo-tracked file via
+# a managed link. Quiet no-op when the file is absent.
+clean_line_from_file() {
+    local file="$1" pattern="$2"
+    if [ -L "$file" ]; then
+        return 0
+    fi
+    if [ -f "$file" ]; then
+        delete_matching_lines "$file" "$pattern" || return 1
+        echo "  Cleaned $file"
+    fi
+}
+
 # Quote a command string so it can be passed as the single payload to
 # `bash -lc ...` without losing shell metacharacters.
 quote_for_bash_lc() {

@@ -90,26 +90,6 @@ remove_tracked_path() {
     fi
 }
 
-remove_dir_if_empty() {
-    local path="$1" label="${2:-}"
-    label="${label:-$(display_path "$path")}"
-    if [ -d "$path" ]; then
-        rmdir "$path" 2>/dev/null && echo "  Removed $label"
-    fi
-}
-
-clean_line_from_file() {
-    local file="$1" pattern="$2"
-    # Skip symlinks — delete_matching_lines writes through them.
-    if [ -L "$file" ]; then
-        return 0
-    fi
-    if [ -f "$file" ]; then
-        delete_matching_lines "$file" "$pattern" || return 1
-        echo "  Cleaned $file"
-    fi
-}
-
 remove_bin() {
     local bin="$1"
     if manifest_contains_path "$HOME/.local/bin/$bin"; then
@@ -198,10 +178,6 @@ remove_symlinks() {
     unlink_config "$HOME/.inputrc"
     unlink_config "$HOME/.dircolors"
     unlink_config "$HOME/.dircolors.light"
-    # ~/.ssh/config is now a user-owned file with our Include line wired in
-    # (see install.sh::wire_ssh_config). Only strip the Include — preserve
-    # any per-host blocks the user added.
-    clean_line_from_file "$HOME/.ssh/config" "^Include $DIR/ssh/sshconfig\$"
     unlink_config "$HOME/.config/nvim"
     unlink_config "$HOME/.config/starship.toml"
     unlink_config "$HOME/.config/starship-light.toml"
@@ -285,7 +261,6 @@ remove_dirs() {
     remove_dir_if_empty "$HOME/.config/tmux"
     remove_dir_if_empty "$HOME/.vim/undodir"
     remove_dir_if_empty "$HOME/.vim"
-    remove_dir_if_empty "$HOME/.ssh/sockets"
     remove_dir_if_empty "$HOME/.claude"
     remove_dir_if_empty "$HOME/.codex"
     remove_dir_if_empty "$HOME/.local/share/man/man1"

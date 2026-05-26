@@ -6,7 +6,7 @@ Configs are grouped by topic into subdirectories:
 
 - `shell/` — bash/zsh rc files, readline, dircolors, starship prompt
 - `editor/` — `vimrc` and the `nvim/` Neovim tree (one plugin spec per file in `lua/plugins/`)
-- `tmux/`, `git/`, `ssh/`, `ai/` — single-tool configs
+- `tmux/`, `git/`, `ai/` — single-tool configs
 - `scripts/` — `install_claude_plugins.sh`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
 - `lib/` — shared shell helpers (`common.sh`, `vscode-tunnel.sh`)
 - `docs/` — per-tool reference tables
@@ -17,7 +17,7 @@ Operational logic lives in three top-level scripts: `install.sh` (local install 
 
 | File(s) | Safe to edit | Notes |
 |---------|-------------|-------|
-| Config files under `shell/`, `editor/`, `tmux/`, `git/`, `ssh/`, `ai/` | Yes | Test with `install.sh` after changes |
+| Config files under `shell/`, `editor/`, `tmux/`, `git/`, `ai/` | Yes | Test with `install.sh` after changes |
 | `editor/nvim/lua/plugins/*.lua` | Yes | Each file = one plugin spec. Add new plugins as new files. Run `:Lazy! sync` after |
 | `editor/nvim/lua/config/*.lua` | Yes | Options, keymaps, autocmds. Changes affect all nvim users |
 | `lib/common.sh` | Careful | Shared by all scripts — changes affect `install.sh`, `deploy.sh`, `scripts/install_claude_plugins.sh`, `uninstall.sh` |
