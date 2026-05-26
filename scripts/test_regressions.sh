@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
@@ -17,9 +17,9 @@ test_remote_bash_lc_quote() (
     trap 'rm -rf "$tmp"' EXIT
 
     export HOME="$tmp/home"
-    mkdir -p "$HOME/.server-configs/.git"
+    mkdir -p "$HOME/.dotfiles/.git"
 
-    quoted="$(quote_for_bash_lc '[ -d $HOME/.server-configs/.git ]')"
+    quoted="$(quote_for_bash_lc '[ -d $HOME/.dotfiles/.git ]')"
     eval "bash -lc $quoted" || fail "remote bash -lc quoting lost \$HOME expansion"
 )
 
@@ -130,7 +130,7 @@ EOF
     # Scope the cache file to $tmp so it gets cleaned up with the test;
     # without this override gh_latest leaks /tmp/.gh-latest-cache.<pid>.
     PATH="$tmp/bin:$PATH" _GH_LATEST_CACHE_FILE="$tmp/gh-cache" bash -c "
-        . '$DIR/setup.sh'
+        . '$DIR/install.sh'
         v1=\"\$(gh_latest fake/repo)\"
         v2=\"\$(gh_latest fake/repo)\"
         [ \"\$v1\" = '9.9.9' ] || { echo \"v1=\$v1\" >&2; exit 1; }
@@ -169,13 +169,13 @@ EOF
     # Extract just the function definition to a real file: sourcing via
     # `<(sed ...)` is flaky on macOS's bash 3.2 (the FIFO interacts badly
     # with `source`'s seek attempts), so use a temp file instead.
-    sed -n '/^_server_configs_load_cached_init() {$/,/^}$/p' "$DIR/bashrc_exports" > "$tmp/cached_init.bash"
+    sed -n '/^_dotfiles_load_cached_init() {$/,/^}$/p' "$DIR/shell/bashrc_exports" > "$tmp/cached_init.bash"
 
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
         . '$tmp/cached_init.bash'
-        _server_configs_load_cached_init silentool 'silentool init bash'
-        _server_configs_load_cached_init silentool 'silentool init bash'
-        _server_configs_load_cached_init silentool 'silentool init bash'
+        _dotfiles_load_cached_init silentool 'silentool init bash'
+        _dotfiles_load_cached_init silentool 'silentool init bash'
+        _dotfiles_load_cached_init silentool 'silentool init bash'
     " || fail "cached init helper returned non-zero"
 
     local invocations
@@ -190,7 +190,7 @@ test_cached_init_evals_output_when_cache_unwritable() (
     trap 'rm -rf "$tmp"' EXIT
 
     mkdir -p "$tmp/bin" "$tmp/home/.cache"
-    printf 'blocks mkdir -p\n' > "$tmp/home/.cache/server-configs"
+    printf 'blocks mkdir -p\n' > "$tmp/home/.cache/dotfiles"
     cat > "$tmp/bin/initool" <<'EOF'
 #!/usr/bin/env bash
 [ "$*" = "init bash" ] || exit 2
@@ -199,11 +199,11 @@ EOF
     chmod +x "$tmp/bin/initool"
     touch -t 197001020000 "$tmp/bin/initool"
 
-    sed -n '/^_server_configs_load_cached_init() {$/,/^}$/p' "$DIR/bashrc_exports" > "$tmp/cached_init.bash"
+    sed -n '/^_dotfiles_load_cached_init() {$/,/^}$/p' "$DIR/shell/bashrc_exports" > "$tmp/cached_init.bash"
 
     HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "
         . '$tmp/cached_init.bash'
-        _server_configs_load_cached_init initool 'initool init bash'
+        _dotfiles_load_cached_init initool 'initool init bash'
         [ \"\${INITOOL_READY:-}\" = 1 ]
     " || fail "cached init fallback did not eval generated init output"
 )
@@ -248,16 +248,16 @@ test_manifest_controls_uninstall() (
     trap 'rm -rf "$tmp"' EXIT
 
     export HOME="$tmp/home"
-    mkdir -p "$HOME/.server-configs-generated" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin" "$HOME/.codex"
-    INSTALL_MANIFEST="$HOME/.server-configs-generated/install-manifest.txt"
+    mkdir -p "$HOME/.dotfiles-generated" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin" "$HOME/.codex"
+    INSTALL_MANIFEST="$HOME/.dotfiles-generated/install-manifest.txt"
 
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/gh"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/rg"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/detect-theme"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/opt/nvim/bin/nvim"
     ln -s "$HOME/.local/opt/nvim/bin/nvim" "$HOME/.local/bin/nvim"
-    : > "$HOME/.server-configs-generated/tmux-theme.conf"
-    ln -s "$HOME/.server-configs-generated/tmux-theme.conf" "$HOME/.tmux-theme.conf"
+    : > "$HOME/.dotfiles-generated/tmux-theme.conf"
+    ln -s "$HOME/.dotfiles-generated/tmux-theme.conf" "$HOME/.tmux-theme.conf"
     chmod +x "$HOME/.local/bin/gh" "$HOME/.local/bin/rg" "$HOME/.local/bin/detect-theme" "$HOME/.local/opt/nvim/bin/nvim"
     printf 'config = true\n' > "$HOME/.codex/config.toml"
 
@@ -298,10 +298,10 @@ test_scripts_source_without_side_effects() (
     export HOME="$tmp/home"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     command -v setup_main >/dev/null || fail "setup_main missing after source"
-    [ ! -e "$HOME/.server-configs-generated" ] || fail "sourcing setup.sh created generated state"
+    [ ! -e "$HOME/.dotfiles-generated" ] || fail "sourcing install.sh created generated state"
 )
 
 test_detect_theme_installs_to_local_bin() (
@@ -310,18 +310,18 @@ test_detect_theme_installs_to_local_bin() (
     trap 'rm -rf "$tmp"' EXIT
 
     export HOME="$tmp/home"
-    mkdir -p "$HOME/.server-configs-generated"
-    INSTALL_MANIFEST="$HOME/.server-configs-generated/install-manifest.txt"
+    mkdir -p "$HOME/.dotfiles-generated"
+    INSTALL_MANIFEST="$HOME/.dotfiles-generated/install-manifest.txt"
     BIN_DIR="$tmp/not-used"
     DRY_RUN=false
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
 
     install_detect_theme >/dev/null || fail "install_detect_theme failed"
     [ -L "$HOME/.local/bin/detect-theme" ] || fail "detect-theme was not linked into ~/.local/bin"
     target="$(portable_realpath "$HOME/.local/bin/detect-theme" 2>/dev/null || true)"
-    [ "$target" = "$DIR/detect-theme.sh" ] || fail "detect-theme symlink points at '$target'"
+    [ "$target" = "$DIR/scripts/detect-theme.sh" ] || fail "detect-theme symlink points at '$target'"
     manifest_contains_path "$HOME/.local/bin/detect-theme" ||
         fail "detect-theme local-bin path was not recorded in manifest"
     [ ! -e "$BIN_DIR/detect-theme" ] || fail "detect-theme should ignore BIN_DIR"
@@ -454,12 +454,12 @@ test_setup_dry_run_is_non_mutating() (
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
 
-    output="$(HOME="$tmp/home" bash "$DIR/setup.sh" --dry-run 2>&1)" ||
-        fail "setup.sh --dry-run failed: $output"
+    output="$(HOME="$tmp/home" bash "$DIR/install.sh" --dry-run 2>&1)" ||
+        fail "install.sh --dry-run failed: $output"
     printf '%s\n' "$output" | grep -q '\[dry-run\]' ||
-        fail "setup.sh --dry-run did not report dry-run steps"
-    [ ! -e "$tmp/home/.server-configs-generated" ] ||
-        fail "setup.sh --dry-run created generated state"
+        fail "install.sh --dry-run did not report dry-run steps"
+    [ ! -e "$tmp/home/.dotfiles-generated" ] ||
+        fail "install.sh --dry-run created generated state"
 )
 
 test_chpc_config_rendering_uses_repo_files() (
@@ -472,28 +472,28 @@ test_chpc_config_rendering_uses_repo_files() (
     export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     mkdir -p "$GENERATED_DIR"
     render_compat_configs
 
     [ "$CLAUDE_SETTINGS_MODE" = "repo" ] ||
         fail "CHPC Claude settings should use the repo file directly (got mode '$CLAUDE_SETTINGS_MODE')"
-    [ "$CLAUDE_SETTINGS_SRC" = "$DIR/claude_settings.json" ] ||
+    [ "$CLAUDE_SETTINGS_SRC" = "$DIR/ai/claude_settings.json" ] ||
         fail "CHPC Claude settings src should be the repo file (got '$CLAUDE_SETTINGS_SRC')"
     [ "$CODEX_CONFIG_MODE" = "repo" ] ||
         fail "CHPC Codex config should use the repo file directly (got mode '$CODEX_CONFIG_MODE')"
-    [ "$CODEX_CONFIG_SRC" = "$DIR/codex_config.toml" ] ||
+    [ "$CODEX_CONFIG_SRC" = "$DIR/ai/codex_config.toml" ] ||
         fail "CHPC Codex config src should be the repo file (got '$CODEX_CONFIG_SRC')"
 
-    grep -q '"defaultMode": "bypassPermissions"' "$DIR/claude_settings.json" ||
+    grep -q '"defaultMode": "bypassPermissions"' "$DIR/ai/claude_settings.json" ||
         fail "Repo Claude settings should use bypassPermissions per no-restriction defaults"
-    grep -q '"enabled": false' "$DIR/claude_settings.json" ||
+    grep -q '"enabled": false' "$DIR/ai/claude_settings.json" ||
         fail "Repo Claude settings should disable sandboxing per no-restriction defaults"
 
-    grep -q 'approval_policy = "never"' "$DIR/codex_config.toml" ||
+    grep -q 'approval_policy = "never"' "$DIR/ai/codex_config.toml" ||
         fail "Repo Codex config should auto-approve per no-restriction defaults"
-    grep -q 'sandbox_mode = "danger-full-access"' "$DIR/codex_config.toml" ||
+    grep -q 'sandbox_mode = "danger-full-access"' "$DIR/ai/codex_config.toml" ||
         fail "Repo Codex config should use danger-full-access per no-restriction defaults"
 )
 
@@ -506,8 +506,8 @@ test_chpc_module_loads_initialize_module_command() (
     export HOSTNAME="login1.chpc.utah.edu"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     mkdir -p "$GENERATED_DIR"
     # shellcheck disable=SC2034 # render_bash_compat reads module variables indirectly.
     CLAUDE_MODULE="claude-code"
@@ -517,8 +517,8 @@ test_chpc_module_loads_initialize_module_command() (
 
     bash_compat="$GENERATED_DIR/bashrc_compat"
     init_line="$(grep -n 'for init in /etc/profile.d/modules.sh' "$bash_compat" | cut -d: -f1)"
-    claude_line="$(grep -n '_server_configs_module_load claude-code' "$bash_compat" | cut -d: -f1)"
-    codex_line="$(grep -n '_server_configs_module_load codex' "$bash_compat" | cut -d: -f1)"
+    claude_line="$(grep -n '_dotfiles_module_load claude-code' "$bash_compat" | cut -d: -f1)"
+    codex_line="$(grep -n '_dotfiles_module_load codex' "$bash_compat" | cut -d: -f1)"
 
     [ -n "$init_line" ] || fail "module initialization block missing"
     [ -n "$claude_line" ] || fail "Claude module load missing"
@@ -543,8 +543,8 @@ test_module_var_reset_clears_stale_values() (
     export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     mkdir -p "$GENERATED_DIR"
 
     CLAUDE_MODULE="stale-claude"
@@ -555,7 +555,7 @@ test_module_var_reset_clears_stale_values() (
 
     render_bash_compat
     bash_compat="$GENERATED_DIR/bashrc_compat"
-    if grep -Eq '(_server_configs_module_load|module load) stale-' "$bash_compat"; then
+    if grep -Eq '(_dotfiles_module_load|module load) stale-' "$bash_compat"; then
         fail "stale module values leaked into bash compat config"
     fi
 )
@@ -570,7 +570,7 @@ test_chpc_mcp_skip_and_override() (
     export PATH="$tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     mkdir -p "$HOME" "$tmp/bin"
 
-    output="$(bash "$DIR/install_claude_plugins.sh" 2>&1)" ||
+    output="$(bash "$DIR/scripts/install_claude_plugins.sh" 2>&1)" ||
         fail "CHPC MCP default skip should exit successfully"
     printf '%s\n' "$output" | grep -q 'CHPC detected: skipping MCP server installation.' ||
         fail "CHPC MCP default run should skip"
@@ -585,12 +585,12 @@ test_chpc_mcp_skip_and_override() (
         'esac' > "$tmp/bin/claude"
     chmod +x "$tmp/bin/claude"
 
-    output="$(bash "$DIR/install_claude_plugins.sh" --allow-chpc 2>&1)" ||
+    output="$(bash "$DIR/scripts/install_claude_plugins.sh" --allow-chpc 2>&1)" ||
         fail "CHPC MCP --allow-chpc should continue with fake Claude: $output"
     printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
         fail "CHPC MCP --allow-chpc did not continue past CHPC guard"
 
-    output="$(SERVER_CONFIGS_ALLOW_CHPC_MCP=true bash "$DIR/install_claude_plugins.sh" 2>&1)" ||
+    output="$(DOTFILES_ALLOW_CHPC_MCP=true bash "$DIR/scripts/install_claude_plugins.sh" 2>&1)" ||
         fail "CHPC MCP env override should continue with fake Claude: $output"
     printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
         fail "CHPC MCP env override did not continue past CHPC guard"
@@ -604,8 +604,8 @@ test_nvim_manifest_records_only_owned_layout() (
     export HOME="$tmp/home"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     mkdir -p "$GENERATED_DIR" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin"
     : > "$INSTALL_MANIFEST"
 
@@ -634,8 +634,8 @@ test_nvim_install_selects_legacy_and_arm_assets() (
     export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
     mkdir -p "$HOME"
 
-    # shellcheck source=setup.sh
-    . "$DIR/setup.sh"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
     FORCE=true
     CHPC_USE_MODULES=false
 
@@ -744,40 +744,40 @@ test_theme_detection() (
     tmp_home="$(mktemp -d)"
     trap 'rm -rf "$tmp_home"' EXIT
     mkdir -p "$tmp_home/.local/bin"
-    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
-    chmod +x "$DIR/detect-theme.sh"
+    ln -s "$DIR/scripts/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/scripts/detect-theme.sh"
 
     local fn
-    fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
-    [ -n "$fn" ] || fail "could not extract _server_configs_detect_theme from bashrc_exports"
+    fn="$(sed -n '/^_dotfiles_detect_theme() {/,/^}/p' "$DIR/shell/bashrc_exports")"
+    [ -n "$fn" ] || fail "could not extract _dotfiles_detect_theme from bashrc_exports"
 
     local out
     # TMUX=fake skips the OSC 11 probe inside detect-theme so the test doesn't
     # write to the suite-runner's controlling tty.
 
     # Pre-set override wins over every fallback.
-    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake SERVER_CONFIGS_THEME=light \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake DOTFILES_THEME=light \
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "light" ] || fail "pre-set override not honoured: got '$out'"
 
     # COLORFGBG dark bg → dark.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake COLORFGBG='15;0' \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "dark" ] || fail "COLORFGBG=15;0 should resolve dark: got '$out'"
 
     # COLORFGBG light bg → light.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake COLORFGBG='0;15' \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "light" ] || fail "COLORFGBG=0;15 should resolve light: got '$out'"
 
     # No tty, no COLORFGBG, non-darwin → falls through to dark.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake OSTYPE=linux-gnu \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "dark" ] || fail "fallback should be dark: got '$out'"
 
     # Helper missing → bashrc function still falls back to dark.
     out="$(env -i HOME="$(mktemp -d)" PATH="$PATH" TMUX=fake \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "dark" ] || fail "missing helper should still yield dark: got '$out'"
 
     # VS Code Remote-SSH storage.json → light themeBackground resolves light.
@@ -786,14 +786,14 @@ test_theme_detection() (
     printf '{"themeBackground":"#ffffff"}\n' \
         > "$tmp_home/.vscode-server/data/User/globalStorage/storage.json"
     out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake TERM_PROGRAM=vscode \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "light" ] || fail "Remote-SSH storage.json white bg should resolve light: got '$out'"
 
     # VS Code Remote-SSH storage.json → dark themeBackground resolves dark.
     printf '{"themeBackground":"#1e1e1e"}\n' \
         > "$tmp_home/.vscode-server/data/User/globalStorage/storage.json"
     out="$(env -i HOME="$tmp_home" PATH="$PATH" TMUX=fake TERM_PROGRAM=vscode \
-        bash -c "$fn"'; _server_configs_detect_theme; printf "%s" "$SERVER_CONFIGS_THEME"')"
+        bash -c "$fn"'; _dotfiles_detect_theme; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "dark" ] || fail "Remote-SSH storage.json dark bg should resolve dark: got '$out'"
 
     # Clean up so subsequent assertions don't inherit the staged file.
@@ -802,7 +802,7 @@ test_theme_detection() (
 
 test_theme_function() (
     # The `theme` function lives in bashrc_aliases and depends on
-    # _server_configs_detect_theme from bashrc_exports. Extract both, source in
+    # _dotfiles_detect_theme from bashrc_exports. Extract both, source in
     # order, then exercise light/dark/auto. No tmux integration tested here —
     # the function guards `tmux set-environment` on `$TMUX`, and we run with
     # TMUX unset (env -i) so that branch is a no-op.
@@ -810,42 +810,42 @@ test_theme_function() (
     tmp_home="$(mktemp -d)"
     trap 'rm -rf "$tmp_home"' EXIT
     mkdir -p "$tmp_home/.local/bin"
-    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
-    chmod +x "$DIR/detect-theme.sh"
+    ln -s "$DIR/scripts/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/scripts/detect-theme.sh"
 
     local detect_fn theme_fn
-    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
-    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
-    [ -n "$detect_fn" ] || fail "could not extract _server_configs_detect_theme"
+    detect_fn="$(sed -n '/^_dotfiles_detect_theme() {/,/^}/p' "$DIR/shell/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/shell/bashrc_aliases")"
+    [ -n "$detect_fn" ] || fail "could not extract _dotfiles_detect_theme"
     [ -n "$theme_fn" ] || fail "could not extract theme function"
 
     local out
-    # `theme light` forces SERVER_CONFIGS_THEME=light regardless of detection.
+    # `theme light` forces DOTFILES_THEME=light regardless of detection.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
-            theme light >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
-    [ "$out" = "light" ] || fail "theme light should set SERVER_CONFIGS_THEME=light: got '$out'"
+            theme light >/dev/null 2>&1; printf "%s" "$DOTFILES_THEME"')"
+    [ "$out" = "light" ] || fail "theme light should set DOTFILES_THEME=light: got '$out'"
 
-    # `theme dark` forces SERVER_CONFIGS_THEME=dark.
+    # `theme dark` forces DOTFILES_THEME=dark.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
-            theme dark >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
-    [ "$out" = "dark" ] || fail "theme dark should set SERVER_CONFIGS_THEME=dark: got '$out'"
+            theme dark >/dev/null 2>&1; printf "%s" "$DOTFILES_THEME"')"
+    [ "$out" = "dark" ] || fail "theme dark should set DOTFILES_THEME=dark: got '$out'"
 
     # `theme auto` clears any cached value and re-runs detection. With
     # COLORFGBG=0;15 the fallback chain resolves to light — proves the
-    # SERVER_CONFIGS_THEME unset path actually re-enters detection.
+    # DOTFILES_THEME unset path actually re-enters detection.
     out="$(env -i HOME="$tmp_home" PATH="$PATH" COLORFGBG='0;15' \
-        SERVER_CONFIGS_THEME=dark \
+        DOTFILES_THEME=dark \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
-            theme auto >/dev/null 2>&1; printf "%s" "$SERVER_CONFIGS_THEME"')"
+            theme auto >/dev/null 2>&1; printf "%s" "$DOTFILES_THEME"')"
     [ "$out" = "light" ] || fail "theme auto should re-detect (COLORFGBG=0;15 → light): got '$out'"
 
     # Unknown argument exits non-zero without modifying state.
-    out="$(env -i HOME="$tmp_home" PATH="$PATH" SERVER_CONFIGS_THEME=light \
+    out="$(env -i HOME="$tmp_home" PATH="$PATH" DOTFILES_THEME=light \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
-            theme bogus 2>/dev/null; printf "%s" "$SERVER_CONFIGS_THEME"')"
-    [ "$out" = "light" ] || fail "theme bogus should not modify SERVER_CONFIGS_THEME: got '$out'"
+            theme bogus 2>/dev/null; printf "%s" "$DOTFILES_THEME"')"
+    [ "$out" = "light" ] || fail "theme bogus should not modify DOTFILES_THEME: got '$out'"
 )
 
 _theme_auto_setup() {
@@ -854,8 +854,8 @@ _theme_auto_setup() {
     # answers `display -p '#{client_theme}'` / `-V` from env vars.
     local tmp_home="$1"
     mkdir -p "$tmp_home/.local/bin"
-    ln -s "$DIR/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
-    chmod +x "$DIR/detect-theme.sh"
+    ln -s "$DIR/scripts/detect-theme.sh" "$tmp_home/.local/bin/detect-theme"
+    chmod +x "$DIR/scripts/detect-theme.sh"
     cat > "$tmp_home/.local/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_STUB_LOG"
@@ -871,7 +871,7 @@ STUB
 
 test_theme_function_auto_busts_cache_on_modern_tmux() (
     # On tmux 3.6+ (where #{client_theme} returns light/dark), `theme auto`
-    # busts the stale SERVER_CONFIGS_THEME from tmux's global env so the
+    # busts the stale DOTFILES_THEME from tmux's global env so the
     # re-probe doesn't immediately return the value cached by an earlier
     # run.
     local tmp_home
@@ -880,9 +880,9 @@ test_theme_function_auto_busts_cache_on_modern_tmux() (
     _theme_auto_setup "$tmp_home"
 
     local detect_fn theme_fn
-    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
-    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
-    [ -n "$detect_fn" ] || fail "could not extract _server_configs_detect_theme"
+    detect_fn="$(sed -n '/^_dotfiles_detect_theme() {/,/^}/p' "$DIR/shell/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/shell/bashrc_aliases")"
+    [ -n "$detect_fn" ] || fail "could not extract _dotfiles_detect_theme"
     [ -n "$theme_fn" ] || fail "could not extract theme function"
 
     local log="$tmp_home/tmux.log"
@@ -890,11 +890,11 @@ test_theme_function_auto_busts_cache_on_modern_tmux() (
     env -i HOME="$tmp_home" PATH="$tmp_home/.local/bin:$PATH" \
         TMUX=fake TMUX_STUB_LOG="$log" \
         TMUX_STUB_CLIENT_THEME=light TMUX_STUB_VERSION=3.6 \
-        SERVER_CONFIGS_THEME=dark \
+        DOTFILES_THEME=dark \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
             theme auto >/dev/null 2>&1' >/dev/null 2>&1 || true
 
-    grep -E '^set-environment .*-u .*SERVER_CONFIGS_THEME' "$log" >/dev/null ||
+    grep -E '^set-environment .*-u .*DOTFILES_THEME' "$log" >/dev/null ||
         fail "theme auto did not bust tmux global env cache on tmux 3.6+. log:
 $(cat "$log")"
 )
@@ -910,8 +910,8 @@ test_theme_function_auto_refuses_on_legacy_tmux() (
     _theme_auto_setup "$tmp_home"
 
     local detect_fn theme_fn
-    detect_fn="$(sed -n '/^_server_configs_detect_theme() {/,/^}/p' "$DIR/bashrc_exports")"
-    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/bashrc_aliases")"
+    detect_fn="$(sed -n '/^_dotfiles_detect_theme() {/,/^}/p' "$DIR/shell/bashrc_exports")"
+    theme_fn="$(sed -n '/^theme() {/,/^}/p' "$DIR/shell/bashrc_aliases")"
 
     local log="$tmp_home/tmux.log"
     local stderr_file="$tmp_home/stderr.txt"
@@ -919,11 +919,11 @@ test_theme_function_auto_refuses_on_legacy_tmux() (
     env -i HOME="$tmp_home" PATH="$tmp_home/.local/bin:$PATH" \
         TMUX=fake TMUX_STUB_LOG="$log" \
         TMUX_STUB_CLIENT_THEME='' TMUX_STUB_VERSION=3.2a \
-        SERVER_CONFIGS_THEME=dark \
+        DOTFILES_THEME=dark \
         bash -c "$detect_fn"$'\n'"$theme_fn"';
             theme auto >/dev/null 2> "'"$stderr_file"'"' || true
 
-    ! grep -E '^set-environment .*-u .*SERVER_CONFIGS_THEME' "$log" >/dev/null ||
+    ! grep -E '^set-environment .*-u .*DOTFILES_THEME' "$log" >/dev/null ||
         fail "theme auto wrongly busted cache on legacy tmux. log:
 $(cat "$log")"
     grep -q 'not supported' "$stderr_file" ||
@@ -932,7 +932,7 @@ $(cat "$stderr_file")"
 )
 
 test_chpc_allocs_self_test() (
-    python3 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
+    python3 "$DIR/scripts/chpc-allocs.py" --self-test >/dev/null ||
         fail "chpc-allocs.py --self-test failed"
 )
 
@@ -941,7 +941,7 @@ test_chpc_allocs_python36_compatible() (
         printf 'SKIP: test_chpc_allocs_python36_compatible (python3.6 not found)\n'
         return 0
     fi
-    python3.6 "$DIR/chpc-allocs.py" --self-test >/dev/null ||
+    python3.6 "$DIR/scripts/chpc-allocs.py" --self-test >/dev/null ||
         fail "chpc-allocs.py --self-test failed under python3.6"
 )
 

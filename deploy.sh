@@ -266,7 +266,7 @@ ensure_remote_env_keys_loader() {
         ensure_line() { grep -qF \"\$line\" \"\$1\" 2>/dev/null || echo \"\$line\" >> \"\$1\"; }
         ensure_line ~/.bashrc
         ensure_line ~/.profile
-        # ~/.zshrc only if it already exists; setup.sh creates it on macOS.
+        # ~/.zshrc only if it already exists; install.sh creates it on macOS.
         [ -f ~/.zshrc ] && ensure_line ~/.zshrc
         true
     "
@@ -490,8 +490,8 @@ if [ "$AUTO_YES" = false ] && [ -t 1 ] && [ "${NO_TUI:-0}" != 1 ] && ! command -
     info "Install 'gum' for nicer interactive prompts?"
     echo "  (charmbracelet/gum is a small static Go binary; falls back gracefully if you skip.)"
     if tui_confirm "Install gum now?" "yes"; then
-        # shellcheck source=setup.sh disable=SC1091
-        if ( . "$DIR/setup.sh" && install_gum ); then
+        # shellcheck source=install.sh disable=SC1091
+        if ( . "$DIR/install.sh" && install_gum ); then
             case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
             hash -r
         else
@@ -728,7 +728,7 @@ add_step() {
 
 add_step "SSH keys"              "$([ ${#LOCAL_SSH_KEYS[@]} -gt 0 ] && echo yes || echo no)" "off"
 add_step "GitHub CLI auth"       "$([ "$HAS_GH_AUTH" = true ] && echo yes || echo no)"      "on"
-add_step "Clone repo & setup.sh" "yes"                                                      "on"
+add_step "Clone repo & install.sh" "yes"                                                      "on"
 add_step "Claude Code auth"      "$([ "$HAS_CLAUDE_AUTH" = true ] && echo yes || echo no)"  "on"
 add_step "Codex auth"            "$([ "$HAS_CODEX_AUTH" = true ] && echo yes || echo no)"   "on"
 add_step "API keys (env vars)"   "$([ "$HAS_API_KEYS" = true ] && echo yes || echo no)"    "on"
@@ -1090,7 +1090,7 @@ step_clone_setup() {
     local REPO_URL REPO_SLUG
     REPO_URL="$(git -C "$DIR" remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|')"
     if [ -z "$REPO_URL" ]; then
-        local FALLBACK_REPO_URL="https://github.com/jianjianh1/server-configs.git"
+        local FALLBACK_REPO_URL="https://github.com/jianjianh1/dotfiles.git"
         warn "Could not read 'origin' remote from $DIR"
         echo "    Default: $FALLBACK_REPO_URL"
         if ! tui_confirm "Use the default repo URL above?" "no"; then
@@ -1099,10 +1099,10 @@ step_clone_setup() {
         fi
         REPO_URL="$FALLBACK_REPO_URL"
     fi
-    # Extract owner/repo slug (e.g. "jianjianh1/server-configs")
+    # Extract owner/repo slug (e.g. "jianjianh1/dotfiles")
     REPO_SLUG="$(echo "$REPO_URL" | sed 's|.*github\.com/||; s|\.git$||')"
 
-    local REMOTE_DIR='$HOME/.server-configs'
+    local REMOTE_DIR='$HOME/.dotfiles'
 
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."
@@ -1127,7 +1127,7 @@ step_clone_setup() {
         echo "  Cloning $REPO_SLUG..."
         if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
             # Prefer gh repo clone (uses gh's own auth)
-            if ! remote_exec "cd \$HOME && gh repo clone $REPO_SLUG .server-configs"; then
+            if ! remote_exec "cd \$HOME && gh repo clone $REPO_SLUG .dotfiles"; then
                 error "gh repo clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
                 return 1
             fi
@@ -1140,11 +1140,11 @@ step_clone_setup() {
         fi
     fi
 
-    echo "  Running setup.sh..."
-    if remote_exec "cd $REMOTE_DIR && ./setup.sh"; then
-        success "setup.sh completed"
+    echo "  Running install.sh..."
+    if remote_exec "cd $REMOTE_DIR && ./install.sh"; then
+        success "install.sh completed"
     else
-        warn "setup.sh exited with errors (check output above)"
+        warn "install.sh exited with errors (check output above)"
         return 1
     fi
 }

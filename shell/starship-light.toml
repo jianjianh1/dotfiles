@@ -1,5 +1,5 @@
 # Starship prompt — light-terminal variant of starship.toml.
-# Selected automatically when SERVER_CONFIGS_THEME=light (see bashrc_exports).
+# Selected automatically when DOTFILES_THEME=light (see bashrc_exports).
 # Docs: https://starship.rs/config/
 
 format = """$username$hostname$directory$git_branch$git_status$python$c$cmd_duration$line_break$character"""

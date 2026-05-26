@@ -2,7 +2,7 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GENERATED_DIR="$HOME/.server-configs-generated"
+GENERATED_DIR="$HOME/.dotfiles-generated"
 # shellcheck disable=SC2034  # consumed by manifest_contains_path from lib/common.sh
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
 YES=false
@@ -85,7 +85,7 @@ remove_tracked_path() {
 
     if ! manifest_contains_path "$path"; then
         if [ -e "$path" ] || [ -L "$path" ]; then
-            echo "  Skipped $label (not tracked by setup.sh)"
+            echo "  Skipped $label (not tracked by install.sh)"
         fi
         return 0
     fi
@@ -124,7 +124,7 @@ remove_bin() {
             echo "  Removed ~/.local/bin/$bin"
         fi
     elif [ -e "$HOME/.local/bin/$bin" ]; then
-        echo "  Skipped ~/.local/bin/$bin (not tracked by setup.sh)"
+        echo "  Skipped ~/.local/bin/$bin (not tracked by install.sh)"
     fi
 
     if manifest_contains_path "/usr/local/bin/$bin"; then
@@ -146,7 +146,7 @@ remove_bin() {
             echo "  Found /usr/local/bin/$bin but need sudo to remove"
         fi
     elif [ -e "/usr/local/bin/$bin" ]; then
-        echo "  Skipped /usr/local/bin/$bin (not tracked by setup.sh)"
+        echo "  Skipped /usr/local/bin/$bin (not tracked by install.sh)"
     fi
 }
 
@@ -162,9 +162,9 @@ remove_symlinks() {
     unlink_config "$HOME/.dircolors"
     unlink_config "$HOME/.dircolors.light"
     # ~/.ssh/config is now a user-owned file with our Include line wired in
-    # (see setup.sh::wire_ssh_config). Only strip the Include — preserve
+    # (see install.sh::wire_ssh_config). Only strip the Include — preserve
     # any per-host blocks the user added.
-    clean_line_from_file "$HOME/.ssh/config" "^Include $DIR/sshconfig\$"
+    clean_line_from_file "$HOME/.ssh/config" "^Include $DIR/ssh/sshconfig\$"
     unlink_config "$HOME/.config/nvim"
     unlink_config "$HOME/.config/starship.toml"
     unlink_config "$HOME/.config/starship-light.toml"
@@ -190,7 +190,7 @@ remove_bashrc_lines() {
 }
 
 remove_git_hooks_config() {
-    # setup.sh wires core.hooksPath to .githooks; reset it so the repo falls
+    # install.sh wires core.hooksPath to .githooks; reset it so the repo falls
     # back to the default hooks path if the user later deletes .githooks.
     if git -C "$DIR" config --get core.hooksPath >/dev/null 2>&1; then
         echo "Resetting git config..."
@@ -240,7 +240,7 @@ remove_node() {
 
 remove_dirs() {
     echo "Cleaning up directories..."
-    remove_path "$HOME/.server-configs-generated"
+    remove_path "$HOME/.dotfiles-generated"
     remove_path "$HOME/.tmux/plugins"
     remove_dir_if_empty "$HOME/.tmux"
     remove_dir_if_empty "$HOME/.config/tmux"
@@ -288,7 +288,7 @@ parse_args() {
 main() {
     parse_args "$@"
 
-    echo "server-configs uninstaller"
+    echo "dotfiles uninstaller"
     echo "========================="
     echo ""
 

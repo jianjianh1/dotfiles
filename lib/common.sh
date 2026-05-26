@@ -1,15 +1,15 @@
 # shellcheck shell=bash
-# Shared helpers for setup.sh, deploy.sh, install_claude_plugins.sh.
+# Shared helpers for install.sh, deploy.sh, install_claude_plugins.sh.
 # Sourced, not executed. Callers must:
 #   - run under bash (these use arrays and [[ ]])
 #   - define FAILURES=() before sourcing if they want run_step tracking
 #   - optionally set AUTO_YES=true to silence run_step's on-failure prompt
 #
 # Guard so repeated `source` inside one process is cheap.
-if [ "${_SERVER_CONFIGS_COMMON_SH:-}" = 1 ]; then
+if [ "${_DOTFILES_COMMON_SH:-}" = 1 ]; then
     return 0
 fi
-_SERVER_CONFIGS_COMMON_SH=1
+_DOTFILES_COMMON_SH=1
 
 # Record a failure against $FAILURES if the command fails. If $AUTO_YES is
 # unset/false AND stdin is a tty, prompt the caller to continue; otherwise
@@ -161,7 +161,7 @@ delete_matching_lines() {
     local file="$1" pattern="$2" tmp
 
     [ -f "$file" ] || return 0
-    tmp="$(mktemp "${TMPDIR:-/tmp}/server-configs.XXXXXX")" || return 1
+    tmp="$(mktemp "${TMPDIR:-/tmp}/dotfiles.XXXXXX")" || return 1
     grep -v -E "$pattern" "$file" > "$tmp" || true
     cat "$tmp" > "$file" || {
         rm -f "$tmp"
@@ -180,7 +180,7 @@ quote_for_bash_lc() {
 path_is_manifest_managed() {
     # Only paths under $HOME are eligible for manifest tracking. /usr/local/bin
     # was historically allowed too, but that opened a footgun on shared Linux
-    # hosts: setup.sh installing into /usr/local/bin (when writable) would
+    # hosts: install.sh installing into /usr/local/bin (when writable) would
     # record system binaries that uninstall.sh would later sudo-remove.
     local path="$1"
     case "$path" in

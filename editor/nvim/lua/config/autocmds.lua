@@ -54,7 +54,7 @@ autocmd("TextYankPost", {
 })
 
 -- Re-pick up the terminal theme when nvim regains focus or resumes from
--- suspend. Uses `detect-theme --force` so the stale SERVER_CONFIGS_THEME
+-- suspend. Uses `detect-theme --force` so the stale DOTFILES_THEME
 -- inherited from the launching shell can't shadow a fresh probe. The
 -- colorscheme reload is wired through the OptionSet autocmd in
 -- plugins/colorscheme.lua, so flipping &background is enough.

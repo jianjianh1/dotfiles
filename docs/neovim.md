@@ -1,10 +1,10 @@
 # Neovim Configuration Reference
 
-Source: [`nvim/`](../nvim/) directory, symlinked to `~/.config/nvim/`.
+Source: [`nvim/`](../editor/nvim/) directory, symlinked to `~/.config/nvim/`.
 
 Uses [lazy.nvim](https://github.com/folke/lazy.nvim) for plugin management. For the plugin-free Vim config, see [vim.md](vim.md).
 
-`setup.sh` installs Neovim on Linux from the official release tarball into `~/.local/opt/nvim` and links `~/.local/bin/nvim`. On old x86_64 glibc systems, it falls back to Neovim's legacy glibc 2.17 release tarball instead of the AppImage path.
+`install.sh` installs Neovim on Linux from the official release tarball into `~/.local/opt/nvim` and links `~/.local/bin/nvim`. On old x86_64 glibc systems, it falls back to Neovim's legacy glibc 2.17 release tarball instead of the AppImage path.
 
 ---
 
@@ -446,7 +446,7 @@ Installed via mason on first launch (`:Mason` to inspect). Add more with `ensure
 clangd auto-discovers `compile_commands.json` by walking up from the source file. The config bootstraps it for you:
 
 - **CMake projects** — on first clangd attach, runs `cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` in the background and symlinks `build/compile_commands.json` to the project root. clangd reloads automatically.
-- **Make projects** — detection only. Run `:GenCompileCommands` to invoke `bear -- make` (because that command actually builds). To opt into auto-run, `touch .server-configs-bear-ok` at the project root.
+- **Make projects** — detection only. Run `:GenCompileCommands` to invoke `bear -- make` (because that command actually builds). To opt into auto-run, `touch .dotfiles-bear-ok` at the project root.
 - **Manual** — `:GenCompileCommands` always re-runs the appropriate generator, ignoring the per-session cache.
 
 `compile_commands.json` discovery checks the project root and common build dirs (`build/`, `Build/`, `out/`, `cmake-build-{debug,release}/`).

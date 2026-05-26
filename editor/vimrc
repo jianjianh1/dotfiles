@@ -13,15 +13,15 @@ set timeoutlen=300
 set ttimeout
 set ttimeoutlen=10              " Fast escape key
 
-" Safe ASCII default for listchars in case ~/.server-configs-generated is
-" missing (fresh clone, before setup.sh runs). vim's built-in default
+" Safe ASCII default for listchars in case ~/.dotfiles-generated is
+" missing (fresh clone, before install.sh runs). vim's built-in default
 " includes `eol:$` which clutters every line; override before optionally
 " loading the compat file (which may upgrade these to UTF-8 glyphs).
 set listchars=tab:\|\ ,trail:.,extends:>,precedes:<,nbsp:_
 
-" Version-sensitive settings are rendered by setup.sh.
-if filereadable(expand('~/.server-configs-generated/vimrc.compat'))
-    execute 'source' fnameescape(expand('~/.server-configs-generated/vimrc.compat'))
+" Version-sensitive settings are rendered by install.sh.
+if filereadable(expand('~/.dotfiles-generated/vimrc.compat'))
+    execute 'source' fnameescape(expand('~/.dotfiles-generated/vimrc.compat'))
 endif
 
 " === UI ===

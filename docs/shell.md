@@ -1,8 +1,8 @@
 # Shell Configuration Reference
 
-Sources: [`bashrc_exports`](../bashrc_exports), [`bashrc_aliases`](../bashrc_aliases)
+Sources: [`bashrc_exports`](../shell/bashrc_exports), [`bashrc_aliases`](../shell/bashrc_aliases)
 
-Both files are symlinked into `$HOME` and sourced from `~/.bashrc`. Each also sources `~/.server-configs-generated/bashrc_compat` at the end for version-adaptive settings.
+Both files are symlinked into `$HOME` and sourced from `~/.bashrc`. Each also sources `~/.dotfiles-generated/bashrc_compat` at the end for version-adaptive settings.
 
 ---
 
@@ -84,7 +84,7 @@ Bat auto-detects the terminal background and uses the configured dark/light pale
 
 ### Theme detection & override
 
-`SERVER_CONFIGS_THEME` (`light`|`dark`) is set at shell startup via the shared `detect-theme` helper (OSC 11 → VS Code `storage.json` → Apple Terminal → `COLORFGBG` → dark fallback). On VS Code Remote-SSH the helper also reads `~/.vscode-server/data/User/globalStorage/storage.json`. When auto-detect picks wrong (common on tmux < 3.3 inside Remote-SSH with no remote `storage.json`), use:
+`DOTFILES_THEME` (`light`|`dark`) is set at shell startup via the shared `detect-theme` helper (OSC 11 → VS Code `storage.json` → Apple Terminal → `COLORFGBG` → dark fallback). On VS Code Remote-SSH the helper also reads `~/.vscode-server/data/User/globalStorage/storage.json`. When auto-detect picks wrong (common on tmux < 3.3 inside Remote-SSH with no remote `storage.json`), use:
 
 ```bash
 theme light   # force light palette
@@ -222,7 +222,7 @@ These only activate if the tool is installed:
 
 ### VS Code remote helpers
 
-`vscode-tunnel` is a subcommand router around `code tunnel` on the current host. The function lives in [`lib/vscode-tunnel.sh`](../lib/vscode-tunnel.sh) and is symlinked to `~/.local/lib/vscode-tunnel.sh` by `setup.sh`; both `bashrc_aliases` and `zshrc_aliases` source it.
+`vscode-tunnel` is a subcommand router around `code tunnel` on the current host. The function lives in [`lib/vscode-tunnel.sh`](../lib/vscode-tunnel.sh) and is symlinked to `~/.local/lib/vscode-tunnel.sh` by `install.sh`; both `bashrc_aliases` and `zshrc_aliases` source it.
 
 | Subcommand | Purpose |
 |------------|---------|
@@ -244,4 +244,4 @@ The first positional arg is treated as a subcommand only if it matches the table
 
 ### Compat Layer
 
-`~/.server-configs-generated/bashrc_compat` is sourced at the end of both files. It carries a load-once guard and any environment-module load lines emitted by `setup.sh` (e.g. `module load claude-code`) when tools were satisfied via Lmod.
+`~/.dotfiles-generated/bashrc_compat` is sourced at the end of both files. It carries a load-once guard and any environment-module load lines emitted by `install.sh` (e.g. `module load claude-code`) when tools were satisfied via Lmod.

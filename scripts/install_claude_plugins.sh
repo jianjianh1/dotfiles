@@ -4,12 +4,12 @@ set -uo pipefail
 # Install MCP servers (plugins) for Claude Code.
 # Requires: claude CLI, npx (node), and optionally a GITHUB_PERSONAL_ACCESS_TOKEN.
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
 
-ALLOW_CHPC_MCP="${SERVER_CONFIGS_ALLOW_CHPC_MCP:-false}"
+ALLOW_CHPC_MCP="${DOTFILES_ALLOW_CHPC_MCP:-false}"
 
 usage() {
     cat <<'EOF'
@@ -17,7 +17,7 @@ Usage: install_claude_plugins.sh [--allow-chpc] [--help|-h]
   --allow-chpc  Install on CHPC after required MCP approval
   -h, --help    Show this help
 
-Set SERVER_CONFIGS_ALLOW_CHPC_MCP=true as an automation-friendly alternative
+Set DOTFILES_ALLOW_CHPC_MCP=true as an automation-friendly alternative
 to --allow-chpc.
 EOF
 }
@@ -40,12 +40,12 @@ done
 if is_chpc && [ "$ALLOW_CHPC_MCP" != true ]; then
     echo "CHPC detected: skipping MCP server installation."
     echo "MCP servers require CHPC approval — contact helpdesk@chpc.utah.edu."
-    echo "After approval, re-run with --allow-chpc or SERVER_CONFIGS_ALLOW_CHPC_MCP=true."
+    echo "After approval, re-run with --allow-chpc or DOTFILES_ALLOW_CHPC_MCP=true."
     exit 0
 fi
 
 if ! command -v claude &>/dev/null; then
-    echo "Error: claude CLI not found. Run setup.sh first."
+    echo "Error: claude CLI not found. Run install.sh first."
     exit 1
 fi
 

@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2262
 
-SERVER_CONFIGS_OS="$(uname -s 2>/dev/null || printf unknown)"
+DOTFILES_OS="$(uname -s 2>/dev/null || printf unknown)"
 
 # Navigation
 alias ..='cd ..'
@@ -18,7 +18,7 @@ elif ls --color=auto -d . >/dev/null 2>&1; then
     alias ls='ls --color=auto'
     alias ll='ls -alFh --color=auto'
     alias la='ls -A --color=auto'
-elif [ "$SERVER_CONFIGS_OS" = "Darwin" ]; then
+elif [ "$DOTFILES_OS" = "Darwin" ]; then
     alias ls='ls -G'
     alias ll='ls -alFhG'
     alias la='ls -AG'
@@ -49,8 +49,7 @@ alias gb='git branch'
 alias lg='lazygit'
 
 # Safety nets. `rm -I` (interactive once for >3 files / recursive) is
-# GNU coreutils only — vanilla macOS `rm` lacks it. Probe once at shell
-# startup and only alias when supported.
+# GNU coreutils only — vanilla macOS `rm` lacks it.
 if rm --help 2>&1 | grep -q -- '-I'; then
     alias rm='rm -I'
 fi
@@ -74,7 +73,7 @@ alias myip='curl -s ifconfig.me'
 alias cls='clear'
 alias path='echo -e ${PATH//:/\\n}'
 alias now='date +"%Y-%m-%d %H:%M:%S"'
-if [ "$SERVER_CONFIGS_OS" != "Darwin" ] && command -v xdg-open &>/dev/null; then
+if [ "$DOTFILES_OS" != "Darwin" ] && command -v xdg-open &>/dev/null; then
     alias open='xdg-open'
 fi
 
@@ -84,12 +83,12 @@ alias tn='tmux new -s'
 alias tl='tmux list-sessions'
 alias tk='tmux kill-session -t'
 
-# VS Code remote helpers (installed by setup.sh).
+# VS Code remote helpers (installed by install.sh).
 # vscode-tunnel: subcommand router around `code tunnel`. First run prompts
 # for GitHub/MS login; subsequent runs reuse the cached auth and print a
 # vscode.dev URL (also reachable via Remote-Tunnels in a local VS Code).
 # Run `vscode-tunnel --help` for the full surface. Definition lives in
-# ~/.local/lib/vscode-tunnel.sh (symlinked from this repo by setup.sh).
+# ~/.local/lib/vscode-tunnel.sh (symlinked from this repo by install.sh).
 if [ -r "$HOME/.local/lib/vscode-tunnel.sh" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.local/lib/vscode-tunnel.sh"
@@ -97,15 +96,15 @@ fi
 
 
 # Manual theme override. `theme auto` re-runs detect-theme (clears the cached
-# SERVER_CONFIGS_THEME first, otherwise the early-return in
-# _server_configs_detect_theme would no-op). Inside tmux, propagate to the
+# DOTFILES_THEME first, otherwise the early-return in
+# _dotfiles_detect_theme would no-op). Inside tmux, propagate to the
 # global env so new panes inherit and re-source the theme block to repaint
 # existing panes. Running nvim/vim instances cache &background at startup and
 # need `:set background=light|dark` to flip via the OptionSet autocmd.
 theme() {
     case "${1:-auto}" in
         light|dark)
-            export SERVER_CONFIGS_THEME="$1"
+            export DOTFILES_THEME="$1"
             ;;
         auto)
             # Inside tmux, auto-detect needs an in-session probe — tmux 3.6+
@@ -123,15 +122,15 @@ theme() {
                         ;;
                 esac
             fi
-            unset SERVER_CONFIGS_THEME
+            unset DOTFILES_THEME
             # Bust tmux's global-env cache so detect-theme step 2a falls
             # through to a real #{client_theme} re-probe instead of
             # returning the value cached by an earlier run.
             if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-                tmux set-environment -g -u SERVER_CONFIGS_THEME 2>/dev/null || true
+                tmux set-environment -g -u DOTFILES_THEME 2>/dev/null || true
             fi
-            if command -v _server_configs_detect_theme >/dev/null 2>&1; then
-                _server_configs_detect_theme force
+            if command -v _dotfiles_detect_theme >/dev/null 2>&1; then
+                _dotfiles_detect_theme force
             fi
             ;;
         -h|--help|help)
@@ -144,22 +143,19 @@ theme() {
             ;;
     esac
     if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-        tmux set-environment -g SERVER_CONFIGS_THEME "${SERVER_CONFIGS_THEME:-dark}"
+        tmux set-environment -g DOTFILES_THEME "${DOTFILES_THEME:-dark}"
         [ -f "$HOME/.tmux-theme.conf" ] && tmux source-file "$HOME/.tmux-theme.conf" 2>/dev/null
     fi
-    printf 'theme: SERVER_CONFIGS_THEME=%s%s\n' "${SERVER_CONFIGS_THEME:-unset}" \
+    printf 'theme: DOTFILES_THEME=%s%s\n' "${DOTFILES_THEME:-unset}" \
         "${TMUX:+ (tmux repainted; running nvim/vim: :set background=...)}" >&2
 }
 
 # Modern tool replacements (guarded)
-# bat as cat is safe — same basic interface. fd/rg are used directly (no alias)
-# since aliasing grep/find breaks scripts that rely on GNU flag syntax.
 command -v bat &>/dev/null && alias cat='bat --paging=never'
 command -v fd &>/dev/null && alias ff='fd'
 
-if [ -f ~/.server-configs-generated/bashrc_compat ]; then
-    # shellcheck source=/dev/null
-    source ~/.server-configs-generated/bashrc_compat
+if [ -f ~/.dotfiles-generated/bashrc_compat ]; then
+    source ~/.dotfiles-generated/bashrc_compat
 fi
 
 # Neovim (alias vim/vi to nvim when available)
@@ -168,10 +164,9 @@ if command -v nvim &>/dev/null; then
     alias vi='nvim'
 fi
 
-# Tool integrations (cached via _server_configs_load_cached_init from bashrc_exports)
-_server_configs_load_cached_init zoxide "zoxide init bash"
-_server_configs_load_cached_init fzf "fzf --bash"
-if [ -f ~/.fzf.bash ]; then
-    # shellcheck source=/dev/null
-    source ~/.fzf.bash
+# Tool integrations (cached via _dotfiles_load_cached_init from zshrc_exports)
+_dotfiles_load_cached_init zoxide "zoxide init zsh"
+_dotfiles_load_cached_init fzf "fzf --zsh"
+if [ -f ~/.fzf.zsh ]; then
+    source ~/.fzf.zsh
 fi

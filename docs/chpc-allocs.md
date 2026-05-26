@@ -1,6 +1,6 @@
 # `chpc-allocs`
 
-Source: [`chpc-allocs.py`](../chpc-allocs.py) (installed to `~/.local/bin/chpc-allocs` by `setup.sh`).
+Source: [`chpc-allocs.py`](../scripts/chpc-allocs.py) (installed to `~/.local/bin/chpc-allocs` by `install.sh`).
 
 Show your CHPC SLURM allocations and predict queue wait time for hypothetical jobs. A "wait check" here is a non-mutating `sbatch --test-only` probe — nothing is actually submitted.
 

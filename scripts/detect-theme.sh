@@ -2,7 +2,7 @@
 # detect-theme.sh — prints "light" or "dark" based on terminal background.
 #
 # Fallback chain (first confident answer wins):
-#   1. $SERVER_CONFIGS_THEME if already set to light|dark.
+#   1. $DOTFILES_THEME if already set to light|dark.
 #   2. OSC 11 probe of /dev/tty (interactive shell context only).
 #   3. VS Code: storage.json themeBackground (the *actual* rendered bg colour,
 #      independent of theme name / high-contrast / sync state).
@@ -68,20 +68,20 @@ classify_hex() {
 # 1. Explicit override. Skipped under --force (callers like `theme auto`
 # and nvim's FocusGained hook need a fresh probe regardless of stale env).
 if [ "$FORCE" != "1" ]; then
-    case "${SERVER_CONFIGS_THEME:-}" in
-        light|dark) emit env-override "$SERVER_CONFIGS_THEME" ;;
+    case "${DOTFILES_THEME:-}" in
+        light|dark) emit env-override "$DOTFILES_THEME" ;;
     esac
 fi
 
-# 2a. Inside tmux: ask tmux. First read SERVER_CONFIGS_THEME from the server's
-# global env — populated by `theme light|dark|auto`, by _server_configs_detect_theme,
+# 2a. Inside tmux: ask tmux. First read DOTFILES_THEME from the server's
+# global env — populated by `theme light|dark|auto`, by _dotfiles_detect_theme,
 # or by a previous run of this script. Faster and more reliable than re-probing,
 # and avoids if-shell env-forwarding quirks on tmux < 3.4. Then try #{client_theme}
 # (tmux 3.6+ probes OSC 11 on the client tty and caches it). On older tmux the
 # format is empty and we fall through to the existing chain.
 if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     if [ "$FORCE" != "1" ]; then
-        cached=$(tmux show-environment -g SERVER_CONFIGS_THEME 2>/dev/null | sed -n 's/^SERVER_CONFIGS_THEME=//p')
+        cached=$(tmux show-environment -g DOTFILES_THEME 2>/dev/null | sed -n 's/^DOTFILES_THEME=//p')
         case "$cached" in
             light|dark) emit tmux-cache "$cached" ;;
         esac
@@ -89,7 +89,7 @@ if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     ct=$(tmux display -p '#{client_theme}' 2>/dev/null)
     case "$ct" in
         light|dark)
-            tmux set-environment -g SERVER_CONFIGS_THEME "$ct" 2>/dev/null || true
+            tmux set-environment -g DOTFILES_THEME "$ct" 2>/dev/null || true
             emit tmux-client-theme "$ct"
             ;;
     esac
@@ -106,7 +106,7 @@ fi
 #
 # Precondition is just `-t 0` (a controlling terminal exists). We
 # DON'T also check `-t 1`: when called via command substitution
-# `SERVER_CONFIGS_THEME="$(detect-theme)"` from shell init, stdout is
+# `DOTFILES_THEME="$(detect-theme)"` from shell init, stdout is
 # a pipe even though /dev/tty is perfectly accessible — checking `-t 1`
 # would skip OSC 11 exactly in the load-bearing case. The OSC 11
 # block writes to /dev/tty directly and reads via the loop's

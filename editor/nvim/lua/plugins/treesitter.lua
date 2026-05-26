@@ -32,7 +32,7 @@ return {
             if vim.fn.executable("tree-sitter") ~= 1 then
                 vim.notify(
                     "nvim-treesitter: 'tree-sitter' CLI not on PATH; parsers not installed. "
-                        .. "Run setup.sh or install tree-sitter manually.",
+                        .. "Run install.sh or install tree-sitter manually.",
                     vim.log.levels.WARN
                 )
             else

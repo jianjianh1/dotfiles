@@ -1,6 +1,6 @@
 # AI Tool Configuration Reference
 
-Sources: [`claude_settings.json`](../claude_settings.json), [`codex_config.toml`](../codex_config.toml), [`install_claude_plugins.sh`](../install_claude_plugins.sh)
+Sources: [`claude_settings.json`](../ai/claude_settings.json), [`codex_config.toml`](../ai/codex_config.toml), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh)
 
 > **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The "Denied Patterns" table below documents a **recommended hardening pattern**, not what the shipped JSON contains (the shipped `permissions.deny` array is empty). Before deploying these configs to a shared host, copy that table's patterns into `permissions.deny` and consider flipping `defaultMode` to `default`.
 
@@ -8,7 +8,7 @@ Sources: [`claude_settings.json`](../claude_settings.json), [`codex_config.toml`
 
 ## Claude Code (`claude_settings.json`)
 
-Copied to `~/.claude/settings.json` by `setup.sh` (via `backup_and_copy`, not symlink — allows local overrides).
+Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not symlink — allows local overrides).
 
 ### Core Settings
 
@@ -94,7 +94,7 @@ Both hooks run `printf '\a' > /dev/tty` to produce an audible notification.
 
 ## Codex CLI (`codex_config.toml`)
 
-Copied to `~/.codex/config.toml` by `setup.sh` (mode `600`).
+Copied to `~/.codex/config.toml` by `install.sh` (mode `600`).
 
 ### Reasoning
 
@@ -140,13 +140,13 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 ### Trusted Projects
 
 ```toml
-[projects."/uufs/chpc.utah.edu/common/home/u1446071/.server-configs"]
+[projects."/uufs/chpc.utah.edu/common/home/u1446071/.dotfiles"]
 trust_level = "trusted"
 ```
 
 ### CHPC behavior
 
-`setup.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.server-configs-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
+`install.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.dotfiles-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
 
 ---
 
@@ -154,7 +154,7 @@ trust_level = "trusted"
 
 The install script sets up Model Context Protocol servers for Claude Code. It detects the installed Claude CLI version and uses the marketplace when available, falling back to manual `npx`/`uvx` registration.
 
-On CHPC systems, MCP installation is skipped by default because servers need local approval first. After approval, run `install_claude_plugins.sh --allow-chpc` or set `SERVER_CONFIGS_ALLOW_CHPC_MCP=true`.
+On CHPC systems, MCP installation is skipped by default because servers need local approval first. After approval, run `install_claude_plugins.sh --allow-chpc` or set `DOTFILES_ALLOW_CHPC_MCP=true`.
 
 ### Installed Servers
 

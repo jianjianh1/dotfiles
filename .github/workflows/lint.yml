@@ -4,22 +4,24 @@ on:
   push:
     paths:
       - '**/*.sh'
-      - 'chpc-allocs.py'
-      - 'test_regressions.sh'
+      - 'scripts/chpc-allocs.py'
+      - 'scripts/test_regressions.sh'
       - '.githooks/**'
-      - 'bashrc_*'
-      - 'vimrc'
-      - 'nvim/**'
+      - 'shell/bashrc_*'
+      - 'shell/zshrc_*'
+      - 'editor/vimrc'
+      - 'editor/nvim/**'
       - '.github/workflows/lint.yml'
   pull_request:
     paths:
       - '**/*.sh'
-      - 'chpc-allocs.py'
-      - 'test_regressions.sh'
+      - 'scripts/chpc-allocs.py'
+      - 'scripts/test_regressions.sh'
       - '.githooks/**'
-      - 'bashrc_*'
-      - 'vimrc'
-      - 'nvim/**'
+      - 'shell/bashrc_*'
+      - 'shell/zshrc_*'
+      - 'editor/vimrc'
+      - 'editor/nvim/**'
       - '.github/workflows/lint.yml'
 
 jobs:
@@ -49,10 +51,10 @@ jobs:
           shellcheck --version
       - name: Syntax check
         run: |
-          bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+          bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
       - name: ShellCheck
         run: |
-          shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
+          shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
       - name: Install ruff (pinned)
         # Pin like shellcheck so a new ruff release doesn't fail
         # previously-passing code without a code change. Use the
@@ -83,12 +85,12 @@ jobs:
           # Stick to ruff's default rule set (pyflakes + pycodestyle E)
           # so we catch real bugs without arguing over style. chpc-allocs
           # is the only Python file in the tree today.
-          "$HOME/.local/bin/ruff" check chpc-allocs.py
+          "$HOME/.local/bin/ruff" check scripts/chpc-allocs.py
       - name: Regression tests
-        run: bash test_regressions.sh
+        run: bash scripts/test_regressions.sh
       - name: Safe smoke checks
         run: |
           ./deploy.sh --help
           ./uninstall.sh --help
-          HOME="$(mktemp -d)" ./setup.sh --dry-run
-          ./setup.sh --probe-modules || true  # fails off-CHPC; just exercise the wiring
+          HOME="$(mktemp -d)" ./install.sh --dry-run
+          ./install.sh --probe-modules || true  # fails off-CHPC; just exercise the wiring

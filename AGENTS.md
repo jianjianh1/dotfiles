@@ -2,39 +2,48 @@
 
 ## Project Structure & Module Organization
 
-This repository is flat and script-driven. Top-level files are the product: shell configs such as `vimrc`, `tmux.conf`, `gitconfig`, `sshconfig`, `bashrc_exports`, and `bashrc_aliases`, plus JSON/TOML settings for Claude and Codex. Operational logic lives in `setup.sh`, `deploy.sh`, `uninstall.sh`, and `install_claude_plugins.sh`. Shared helpers live in `lib/common.sh`. Neovim config lives in `nvim/` (one plugin spec per file in `lua/plugins/`). There is no `src/` or `tests/` tree; keep new files at the top level unless a subdirectory clearly improves organization.
+Configs are grouped by topic into subdirectories:
+
+- `shell/` — bash/zsh rc files, readline, dircolors, starship prompt
+- `editor/` — `vimrc` and the `nvim/` Neovim tree (one plugin spec per file in `lua/plugins/`)
+- `tmux/`, `git/`, `ssh/`, `ai/` — single-tool configs
+- `scripts/` — `install_claude_plugins.sh`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
+- `lib/` — shared shell helpers (`common.sh`, `vscode-tunnel.sh`)
+- `docs/` — per-tool reference tables
+
+Operational logic lives in three top-level scripts: `install.sh` (local install + symlinks + render compat configs), `deploy.sh` (remote SSH bootstrap), `uninstall.sh` (clean removal + backup restore). When adding a new config file, drop it into the matching topical subdir and wire it from `install.sh`.
 
 ## File Ownership & Editing Guide
 
 | File(s) | Safe to edit | Notes |
 |---------|-------------|-------|
-| Config files (`vimrc`, `tmux.conf`, `gitconfig`, etc.) | Yes | Test with `setup.sh` after changes |
-| `nvim/lua/plugins/*.lua` | Yes | Each file = one plugin spec. Add new plugins as new files. Run `:Lazy! sync` after |
-| `nvim/lua/config/*.lua` | Yes | Options, keymaps, autocmds. Changes affect all nvim users |
-| `lib/common.sh` | Careful | Shared by all scripts — changes affect `setup.sh`, `deploy.sh`, `install_claude_plugins.sh`, `uninstall.sh` |
-| `setup.sh` `render_*()` functions | Careful | Changes affect all generated compat files in `~/.server-configs-generated/` |
+| Config files under `shell/`, `editor/`, `tmux/`, `git/`, `ssh/`, `ai/` | Yes | Test with `install.sh` after changes |
+| `editor/nvim/lua/plugins/*.lua` | Yes | Each file = one plugin spec. Add new plugins as new files. Run `:Lazy! sync` after |
+| `editor/nvim/lua/config/*.lua` | Yes | Options, keymaps, autocmds. Changes affect all nvim users |
+| `lib/common.sh` | Careful | Shared by all scripts — changes affect `install.sh`, `deploy.sh`, `scripts/install_claude_plugins.sh`, `uninstall.sh` |
+| `install.sh` `render_*()` functions | Careful | Changes affect all generated compat files in `~/.dotfiles-generated/` |
 | `deploy.sh` auth/copy steps | Careful | Test with `--help` and `--yes` flags. Auth logic is security-sensitive |
-| `~/.server-configs-generated/*` | Never | Overwritten by `setup.sh` on every run |
+| `~/.dotfiles-generated/*` | Never | Overwritten by `install.sh` on every run |
 | Auth files (`.credentials.json`, `auth.json`, `hosts.yml`) | Never committed | Listed in `.gitignore`. Copied securely by `deploy.sh` |
 
 ## Build, Test, and Development Commands
 
 Use the scripts directly from the repo root.
 
-- `./setup.sh` installs tools and symlinks configs into `$HOME`.
-- `./setup.sh --force` reinstalls tools even if they already exist.
-- `./setup.sh --dry-run` shows planned setup steps without changing files.
+- `./install.sh` installs tools and symlinks configs into `$HOME`.
+- `./install.sh --force` reinstalls tools even if they already exist.
+- `./install.sh --dry-run` shows planned setup steps without changing files.
 - `./deploy.sh --help` shows deploy options for remote server setup.
 - `./deploy.sh --yes` skips confirmation prompts during deploy.
 - `./uninstall.sh --yes` removes symlinks and tool installs non-interactively.
-- `bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases` runs a syntax check.
+- `bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases` runs a syntax check.
 
 ## Script Flag Conventions
 
 | Script | Flag | Purpose |
 |--------|------|---------|
-| `setup.sh` | `--force` | Reinstall CLI tools even if already present |
-| `setup.sh` | `--dry-run`, `-n` | Show planned setup steps without changing files |
+| `install.sh` | `--force` | Reinstall CLI tools even if already present |
+| `install.sh` | `--dry-run`, `-n` | Show planned setup steps without changing files |
 | `deploy.sh` | `-y`, `--yes` | Skip all interactive confirmations |
 | `deploy.sh` | `--force-copy` | Re-copy files even if remote content matches |
 | `deploy.sh` | `-h`, `--help` | Show usage information |
@@ -62,22 +71,22 @@ There is no automated test harness. Contributors should treat syntax checks and 
 ### Shell config changes
 
 ```bash
-bash -n bashrc_exports bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 bashrc_exports bashrc_aliases
+bash -n shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 shell/bashrc_exports shell/bashrc_aliases
 # Source in a fresh shell to verify no errors
 ```
 
-### Script changes (`setup.sh`, `deploy.sh`, `uninstall.sh`)
+### Script changes (`install.sh`, `deploy.sh`, `uninstall.sh`)
 
 ```bash
-bash -n setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 setup.sh deploy.sh uninstall.sh install_claude_plugins.sh lib/common.sh .githooks/pre-commit test_regressions.sh bashrc_exports bashrc_aliases
-bash test_regressions.sh
+bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+bash scripts/test_regressions.sh
 # Run affected script to smoke test
-./setup.sh --dry-run          # after setup.sh changes (safe, no side effects)
-./setup.sh                    # after setup.sh changes
-./deploy.sh --help            # after deploy.sh changes (safe, no side effects)
-./uninstall.sh --help         # after uninstall.sh changes
+./install.sh --dry-run          # after install.sh changes (safe, no side effects)
+./install.sh                    # after install.sh changes
+./deploy.sh --help              # after deploy.sh changes (safe, no side effects)
+./uninstall.sh --help           # after uninstall.sh changes
 ```
 
 ### Neovim changes
@@ -88,11 +97,11 @@ nvim -c ':messages' -c ':qa'          # Check for startup errors
 # Open nvim normally and verify no errors in :messages
 ```
 
-### Setup.sh compat changes
+### Install.sh compat changes
 
 ```bash
-./setup.sh                            # Regenerates ~/.server-configs-generated/
-ls -la ~/.server-configs-generated/   # Verify expected files exist
+./install.sh                    # Regenerates ~/.dotfiles-generated/
+ls -la ~/.dotfiles-generated/   # Verify expected files exist
 # Inspect generated files for correctness
 ```
 

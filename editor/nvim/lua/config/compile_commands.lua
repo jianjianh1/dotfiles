@@ -105,11 +105,11 @@ function M.ensure(path, manual)
     end
 
     if has_make and vim.fn.executable("bear") == 1 then
-        if manual or vim.uv.fs_stat(root .. "/.server-configs-bear-ok") then
+        if manual or vim.uv.fs_stat(root .. "/.dotfiles-bear-ok") then
             run_bear(root)
         else
             notify("Makefile detected. Run :GenCompileCommands to build with bear, "
-                .. "or `touch .server-configs-bear-ok` to auto-run.", vim.log.levels.INFO)
+                .. "or `touch .dotfiles-bear-ok` to auto-run.", vim.log.levels.INFO)
         end
         return
     end

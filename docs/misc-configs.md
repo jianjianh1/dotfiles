@@ -6,8 +6,8 @@ Covers SSH, readline, and dircolors — smaller configs grouped in one file.
 
 ## SSH (`sshconfig`)
 
-Source: [`sshconfig`](../sshconfig) — wired into `~/.ssh/config` via an
-`Include` directive (not a symlink). `setup.sh` ensures the line
+Source: [`sshconfig`](../ssh/sshconfig) — wired into `~/.ssh/config` via an
+`Include` directive (not a symlink). `install.sh` ensures the line
 `Include /path/to/this-repo/sshconfig` exists in `~/.ssh/config`; the file
 itself stays user-owned, so per-host blocks you add never dirty the repo
 working tree. `uninstall.sh` removes only the `Include` line and leaves
@@ -66,7 +66,7 @@ Verify with `ssh -G notch324 | grep -iE '^proxyjump|^hostname'` — expect `prox
 
 ## Readline (`inputrc`)
 
-Source: [`inputrc`](../inputrc) — symlinked to `~/.inputrc`.
+Source: [`inputrc`](../shell/inputrc) — symlinked to `~/.inputrc`.
 
 Configures all readline-based programs (bash, python REPL, gdb, etc.).
 
@@ -99,7 +99,7 @@ The history search bindings are especially useful: type the beginning of a comma
 
 ## Dircolors (`dircolors`)
 
-Source: [`dircolors`](../dircolors) and [`dircolors.light`](../dircolors.light) — symlinked to `~/.dircolors` and `~/.dircolors.light`.
+Source: [`dircolors`](../shell/dircolors) and [`dircolors.light`](../shell/dircolors.light) — symlinked to `~/.dircolors` and `~/.dircolors.light`.
 
 Loaded by shell exports via `dircolors -b`. The light palette is selected when `detect-theme` reports a light terminal; otherwise the dark palette is used. Defines `LS_COLORS` for `ls`, `tree`, and other tools.
 

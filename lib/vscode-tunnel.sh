@@ -3,10 +3,10 @@
 # bashrc_aliases and zshrc_aliases — POSIX-ish so bash 3.2 (macOS) and zsh
 # both load it. Linted by .githooks/pre-commit via the lib/*.sh glob.
 
-if [ "${_SERVER_CONFIGS_VSCODE_TUNNEL_SH:-}" = 1 ]; then
+if [ "${_DOTFILES_VSCODE_TUNNEL_SH:-}" = 1 ]; then
     return 0 2>/dev/null || true
 fi
-_SERVER_CONFIGS_VSCODE_TUNNEL_SH=1
+_DOTFILES_VSCODE_TUNNEL_SH=1
 
 # Enforce lowercase to dodge VS Code's case-insensitive duplicate footgun:
 # `MyHost` and `myhost` register as separate tunnels but route ambiguously.
@@ -123,7 +123,7 @@ _vscode_tunnel_is_subcmd() {
 
 vscode-tunnel() {
     command -v code >/dev/null 2>&1 || {
-        echo "vscode-tunnel: code CLI not installed (run setup.sh)" >&2
+        echo "vscode-tunnel: code CLI not installed (run install.sh)" >&2
         return 1
     }
 

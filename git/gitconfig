@@ -61,7 +61,7 @@
 	conflictstyle = diff3
 
 [include]
-	path = ~/.server-configs-generated/gitconfig.compat
+	path = ~/.dotfiles-generated/gitconfig.compat
 
 [alias]
 	s = status

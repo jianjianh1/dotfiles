@@ -2,7 +2,7 @@
 # Pre-commit: syntax-check all *.sh, run shellcheck if available, and
 # scan staged content for secrets.
 # Enable once per clone: git config core.hooksPath .githooks
-# (setup.sh does this automatically.)
+# (install.sh does this automatically.)
 
 set -u
 
@@ -13,7 +13,7 @@ cd "$REPO_ROOT" || exit 1
 staged_sh=()
 while IFS= read -r f; do
     [ -n "$f" ] && staged_sh+=("$f")
-done < <(git diff --cached --name-only --diff-filter=ACM -- '*.sh' '.githooks/pre-commit' 'lib/*.sh')
+done < <(git diff --cached --name-only --diff-filter=ACM -- '*.sh' '.githooks/pre-commit' 'lib/*.sh' 'scripts/*.sh')
 
 fail=0
 

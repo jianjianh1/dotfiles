@@ -1,5 +1,5 @@
 # Codex CLI configuration
-# Copied to ~/.codex/config.toml by setup.sh
+# Copied to ~/.codex/config.toml by install.sh
 
 # Reasoning
 model_reasoning_effort = "high"
@@ -26,5 +26,5 @@ max_bytes = 52428800
 notifications = true
 animations = true
 
-[projects."/uufs/chpc.utah.edu/common/home/u1446071/.server-configs"]
+[projects."/uufs/chpc.utah.edu/common/home/u1446071/.dotfiles"]
 trust_level = "trusted"
