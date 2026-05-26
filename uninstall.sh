@@ -152,6 +152,22 @@ remove_bin() {
 
 # --- Uninstall steps ---
 
+# Remove the per-skill symlinks created by install.sh::link_claude_skills.
+# Walks ai/skills/ so we only touch skills this repo owns; user-added skills
+# under ~/.claude/skills/<other-name> are left alone. unlink_config checks
+# that each symlink's target resolves into $DIR before removing.
+unlink_claude_skills() {
+    local skills_src="$DIR/ai/skills"
+    [ -d "$skills_src" ] || return 0
+    local skill_dir name
+    for skill_dir in "$skills_src"/*/; do
+        [ -d "$skill_dir" ] || continue
+        name="$(basename "$skill_dir")"
+        unlink_config "$HOME/.claude/skills/$name"
+    done
+    remove_dir_if_empty "$HOME/.claude/skills"
+}
+
 remove_symlinks() {
     echo "Removing config symlinks..."
     unlink_config "$HOME/.vimrc"
@@ -173,6 +189,7 @@ remove_symlinks() {
     unlink_config "$HOME/.bashrc_aliases"
     unlink_config "$HOME/.zshrc_exports"
     unlink_config "$HOME/.zshrc_aliases"
+    unlink_claude_skills
     # Only remove ~/.zshrc when it's our symlink. A pre-existing user
     # ~/.zshrc with our source lines appended is handled by remove_bashrc_lines.
     unlink_config "$HOME/.zshrc"

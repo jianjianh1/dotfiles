@@ -144,7 +144,8 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │   └── sshconfig               # SSH multiplexing + keep-alive (wired via Include)
 ├── ai/
 │   ├── claude_settings.json    # Claude Code settings
-│   └── codex_config.toml       # Codex CLI settings
+│   ├── codex_config.toml       # Codex CLI settings
+│   └── skills/                 # Claude Code skills (HPC, CUDA, LaTeX, …) — symlinked into ~/.claude/skills/
 ├── .githooks/
 │   └── pre-commit              # bash -n + shellcheck + secret scan on staged files
 ├── .gitignore
@@ -158,6 +159,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
     ├── git.md
     ├── misc-configs.md
     ├── ai-tools.md
+    ├── ai-skills.md
     └── chpc-allocs.md
 ```
 
@@ -215,4 +217,5 @@ Comprehensive lookup tables for every keybinding, alias, option, and setting:
 | [docs/git.md](docs/git.md) | Git config, delta, behavior settings, all aliases (git + shell) |
 | [docs/misc-configs.md](docs/misc-configs.md) | SSH multiplexing, readline settings, dircolors |
 | [docs/ai-tools.md](docs/ai-tools.md) | Claude Code settings, Codex config, MCP servers |
+| [docs/ai-skills.md](docs/ai-skills.md) | Claude Code skills under `ai/skills/` (HPC, CUDA, MPI, LaTeX, paper review, …) |
 | [docs/chpc-allocs.md](docs/chpc-allocs.md) | `chpc-allocs` SLURM allocations & wait predictions |

@@ -1762,6 +1762,34 @@ link_generated_configs() {
     link_zsh_configs || return 1
 }
 
+# Symlink every directory under ai/skills/ into ~/.claude/skills/<name>.
+# Skills are pure markdown so no CHPC gate is needed (unlike MCP servers,
+# which are still installed only by scripts/install_claude_plugins.sh).
+# Unlike claude_settings.json (per-host overrides → copy), skills are
+# shared knowledge that should track the repo, so they are symlinked.
+link_claude_skills() {
+    local skills_src="$DIR/ai/skills"
+    local skills_dst="$HOME/.claude/skills"
+    local skill_dir name dst
+
+    if [ ! -d "$skills_src" ]; then
+        return 0
+    fi
+
+    mkdir -p "$skills_dst" || return 1
+
+    for skill_dir in "$skills_src"/*/; do
+        [ -d "$skill_dir" ] || continue
+        [ -f "${skill_dir}SKILL.md" ] || continue
+        name="$(basename "$skill_dir")"
+        dst="$skills_dst/$name"
+        # Strip trailing slash so the symlink target is the directory itself,
+        # not "<dir>/" — ln -sf with a trailing slash creates a link inside.
+        backup_and_link "${skill_dir%/}" "$dst" || return 1
+        manifest_add_path "$dst" || return 1
+    done
+}
+
 # Zsh parallel of the bashrc wiring above. Always runs on macOS (zsh is the
 # default login shell since Catalina); runs elsewhere only if zsh is
 # installed, so Linux hosts without zsh skip cleanly.
@@ -1904,6 +1932,7 @@ setup_main() {
 
     # Link remaining configs
     run_step "shell config links" link_generated_configs
+    run_step "claude skills"      link_claude_skills
     # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
     if [[ $- == *i* ]] && [ "$DRY_RUN" = false ]; then
         # shellcheck source=/dev/null

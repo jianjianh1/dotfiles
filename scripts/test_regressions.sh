@@ -945,6 +945,43 @@ test_chpc_allocs_python36_compatible() (
         fail "chpc-allocs.py --self-test failed under python3.6"
 )
 
+# Each ai/skills/<name>/SKILL.md must have YAML frontmatter starting on
+# line 1, contain a `name:` field matching the directory, and a non-empty
+# `description:`. Catches typos and missing fields that would break skill
+# discovery once symlinked into ~/.claude/skills/.
+test_skill_files_have_valid_frontmatter() (
+    local skills_dir="$DIR/ai/skills" skill_dir name skill_file
+    local declared_name declared_description
+
+    [ -d "$skills_dir" ] || fail "ai/skills/ directory is missing"
+
+    local count=0
+    for skill_dir in "$skills_dir"/*/; do
+        [ -d "$skill_dir" ] || continue
+        name="$(basename "$skill_dir")"
+        skill_file="${skill_dir}SKILL.md"
+        [ -f "$skill_file" ] || fail "$name: SKILL.md is missing"
+
+        # First non-empty line must be '---' (frontmatter opens)
+        if [ "$(awk 'NF { print; exit }' "$skill_file")" != "---" ]; then
+            fail "$name: SKILL.md does not start with YAML frontmatter (---)"
+        fi
+
+        declared_name="$(awk '/^---$/{f++; next} f==1 && /^name:/ {sub(/^name:[[:space:]]*/, ""); print; exit}' "$skill_file")"
+        declared_description="$(awk '/^---$/{f++; next} f==1 && /^description:/ {sub(/^description:[[:space:]]*/, ""); print; exit}' "$skill_file")"
+
+        if [ "$declared_name" != "$name" ]; then
+            fail "$name: frontmatter name='$declared_name' does not match directory '$name'"
+        fi
+        if [ -z "$declared_description" ]; then
+            fail "$name: frontmatter description is empty"
+        fi
+        count=$((count + 1))
+    done
+
+    [ "$count" -gt 0 ] || fail "no skills found under $skills_dir"
+)
+
 run_test() {
     local name="$1"
 
@@ -983,6 +1020,7 @@ main() {
     run_test test_theme_function_auto_refuses_on_legacy_tmux
     run_test test_chpc_allocs_self_test
     run_test test_chpc_allocs_python36_compatible
+    run_test test_skill_files_have_valid_frontmatter
     echo "All regression tests passed."
 }
 
