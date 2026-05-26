@@ -28,6 +28,12 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 |---|---|
 | [`distributed-training`](../ai/skills/distributed-training/SKILL.md) | PyTorch DDP/FSDP, torchrun, NCCL, multi-node training, accelerate, deepspeed |
 
+### Explanation style
+
+| Skill | Triggers on |
+|---|---|
+| [`explain-concepts`](../ai/skills/explain-concepts/SKILL.md) | "explain X", "what is Y", "why does Z work", "intuition behind W" — governs how Claude explains HPC, CS, and math concepts (punchline first, intuition before formalism, defined notation, anchored claims) |
+
 ### Academic writing
 
 | Skill | Triggers on |
@@ -38,7 +44,7 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 | [`technical-writing`](../ai/skills/technical-writing/SKILL.md) | READMEs, docs, paper sections, blog posts, markdown style, active voice, AI-tell removal |
 | [`reply-style`](../ai/skills/reply-style/SKILL.md) | Assistant-side counterpart to `technical-writing` — governs Claude's own conversational tone: brief, AmE, no AI-tells, no idioms or sports metaphors, single verbs over phrasal verbs |
 
-Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase.
+Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase. The style triad `reply-style` ↔ `explain-concepts` ↔ `technical-writing` works the same way: each defers to the others rather than restating shared rules.
 
 ## How skills are discovered
 
