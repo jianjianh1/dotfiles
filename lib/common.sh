@@ -278,6 +278,22 @@ backup_and_copy() {
     echo "  Copied $src -> $dst"
 }
 
+# Single source of truth for the upstream-skill clone cache. Consumed by
+# scripts/install_claude_skills.sh (writer) and uninstall.sh (cleaner).
+# shellcheck disable=SC2034  # used by sourcing scripts
+EXTERNAL_SKILLS_CACHE="$HOME/.local/share/claude-skills"
+
+# Collapse $HOME to a leading ~ for display. The ~ is a literal character
+# in the output, never a shell tilde-expansion.
+display_path() {
+    local path="$1" tilde='~'
+    case "$path" in
+        "$HOME") printf '%s' "$tilde" ;;
+        "$HOME"/*) printf '%s/%s' "$tilde" "${path#"$HOME"/}" ;;
+        *) printf '%s' "$path" ;;
+    esac
+}
+
 # ----- Interactive (TUI) helpers ---------------------------------------------
 #
 # All helpers degrade to plain `read -rp` prompts when gum is unavailable,

@@ -5,23 +5,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATED_DIR="$HOME/.dotfiles-generated"
 # shellcheck disable=SC2034  # consumed by manifest_contains_path from lib/common.sh
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
-EXTERNAL_SKILLS_CACHE="$HOME/.local/share/claude-skills"
 YES=false
 
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
+# EXTERNAL_SKILLS_CACHE and display_path come from lib/common.sh.
 
 # --- Helpers ---
-
-display_path() {
-    local path="$1"
-
-    case "$path" in
-        "$HOME") printf "~" ;;
-        "$HOME"/*) printf "%s/%s" "~" "${path#"$HOME"/}" ;;
-        *) printf "%s" "$path" ;;
-    esac
-}
 
 confirm() {
     if $YES; then return 0; fi
@@ -172,27 +162,18 @@ unlink_claude_skills() {
     remove_dir_if_empty "$HOME/.claude/skills"
 }
 
-# Remove the upstream-skill symlinks created by
-# scripts/install_claude_skills.sh. Walks every symlink under
-# ~/.claude/skills/ and removes only those whose targets resolve into the
-# external-skills cache directory (~/.local/share/claude-skills/). Skills
-# the user added under their own names — or that point elsewhere — are
-# left untouched. Decoupled from the install script's curated arrays so
-# additions/removals there don't break uninstall.
+# Sweep ~/.claude/skills/* for symlinks into the upstream-skills cache and
+# remove them via unlink_config (which already gates on $EXTERNAL_SKILLS_CACHE
+# being a recognized managed root). Decoupled from
+# scripts/install_claude_skills.sh's curated arrays so additions/removals there
+# don't break uninstall. User-added skills and unrelated symlinks survive.
 unlink_external_claude_skills() {
     local skills_dst="$HOME/.claude/skills"
     [ -d "$skills_dst" ] || return 0
-    local link target ext_canon
-    ext_canon="$(portable_realpath "$EXTERNAL_SKILLS_CACHE" 2>/dev/null || printf '%s' "$EXTERNAL_SKILLS_CACHE")"
+    local link
     for link in "$skills_dst"/*; do
         [ -L "$link" ] || continue
-        target="$(portable_realpath "$link" 2>/dev/null || true)"
-        case "$target" in
-            "$EXTERNAL_SKILLS_CACHE"/*|"$ext_canon"/*)
-                rm -f "$link"
-                echo "  Removed $link"
-                ;;
-        esac
+        unlink_config "$link"
     done
     remove_dir_if_empty "$skills_dst"
 }
