@@ -78,7 +78,7 @@ If it sounds like a Wikipedia lede but the content is technical, rewrite.
 
 ## Markdown conventions
 
-```markdown
+````markdown
 # H1 — only once per doc (the title)
 ## H2 — major sections
 ### H3 — subsections; avoid going deeper
@@ -101,7 +101,7 @@ echo "hi"
 
 > Blockquote for cited material or important asides. Don't use it for
 > general emphasis — that's what bold/italic are for.
-```
+````
 
 Tables for genuinely tabular data (≥2 dimensions). For a 1-D list, use a
 bullet list.

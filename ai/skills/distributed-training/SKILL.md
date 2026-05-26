@@ -116,7 +116,12 @@ that happens.
 
 ```python
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision
+from torch.distributed.fsdp import (
+    FullStateDictConfig,
+    MixedPrecision,
+    ShardingStrategy,
+    StateDictType,
+)
 
 mp_policy = MixedPrecision(
     param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16,
@@ -124,15 +129,21 @@ mp_policy = MixedPrecision(
 )
 model = FSDP(
     model,
-    sharding_strategy="FULL_SHARD",      # or "SHARD_GRAD_OP" (ZeRO-2)
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
     mixed_precision=mp_policy,
     cpu_offload=None,                    # CPUOffload(offload_params=True) if OOM
     device_id=local_rank,
 )
+
+cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+    state = model.state_dict()
+    if rank == 0:
+        torch.save(state, "model.pt")
 ```
 
-Save with `FSDP.state_dict_type(model, FULL_STATE_DICT, ...)` and gather to
-rank 0; never `torch.save(model.state_dict())` directly under FSDP.
+Save through `FSDP.state_dict_type(...)` and gather to rank 0; never
+`torch.save(model.state_dict())` directly under FSDP.
 
 ## Mixed precision & gradient accumulation
 

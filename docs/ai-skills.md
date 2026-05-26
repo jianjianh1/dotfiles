@@ -57,7 +57,7 @@ To force-invoke a skill:
 
 ## Authoring a new skill
 
-1. Create `ai/skills/<name>/SKILL.md` with frontmatter (`name`, `description`, optionally `when_to_use`, `allowed-tools`) plus markdown body. Keep the body under ~150 lines per Anthropic's guidance; move reference material to `ai/skills/<name>/references/*.md` if needed.
+1. Create `ai/skills/<name>/SKILL.md` with frontmatter (`name`, `description`, optionally `when_to_use`, `allowed-tools`) plus markdown body. Keep the body under 500 lines per Claude Code guidance; move bulky reference material to `ai/skills/<name>/references/*.md` if needed.
 2. Re-run `./install.sh` (or just `./install.sh --dry-run` to preview). The new directory gets symlinked automatically; existing skills are idempotent.
 3. `scripts/test_regressions.sh` validates that every `SKILL.md` has the required frontmatter fields, that `name:` matches its directory, and that `description:` is non-empty.
 

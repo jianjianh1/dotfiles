@@ -313,6 +313,7 @@ test_detect_theme_installs_to_local_bin() (
     mkdir -p "$HOME/.dotfiles-generated"
     INSTALL_MANIFEST="$HOME/.dotfiles-generated/install-manifest.txt"
     BIN_DIR="$tmp/not-used"
+    # shellcheck disable=SC2034 # consumed by sourced install.sh helpers
     DRY_RUN=false
 
     # shellcheck source=install.sh
@@ -636,7 +637,9 @@ test_nvim_install_selects_legacy_and_arm_assets() (
 
     # shellcheck source=install.sh
     . "$DIR/install.sh"
+    # shellcheck disable=SC2034 # consumed by install_nvim/install helpers
     FORCE=true
+    # shellcheck disable=SC2034 # consumed by install_nvim/install helpers
     CHPC_USE_MODULES=false
 
     is_macos() { return 1; }
@@ -951,7 +954,7 @@ test_chpc_allocs_python36_compatible() (
 # discovery once symlinked into ~/.claude/skills/.
 test_skill_files_have_valid_frontmatter() (
     local skills_dir="$DIR/ai/skills" skill_dir name skill_file
-    local declared_name declared_description
+    local declared_name declared_description closing_line
 
     [ -d "$skills_dir" ] || fail "ai/skills/ directory is missing"
 
@@ -962,9 +965,13 @@ test_skill_files_have_valid_frontmatter() (
         skill_file="${skill_dir}SKILL.md"
         [ -f "$skill_file" ] || fail "$name: SKILL.md is missing"
 
-        # First non-empty line must be '---' (frontmatter opens)
-        if [ "$(awk 'NF { print; exit }' "$skill_file")" != "---" ]; then
-            fail "$name: SKILL.md does not start with YAML frontmatter (---)"
+        if [ "$(sed -n '1p' "$skill_file")" != "---" ]; then
+            fail "$name: SKILL.md must start with YAML frontmatter on line 1"
+        fi
+
+        closing_line="$(awk 'NR > 1 && /^---$/ { print NR; exit }' "$skill_file")"
+        if [ -z "$closing_line" ]; then
+            fail "$name: SKILL.md frontmatter is missing closing ---"
         fi
 
         declared_name="$(awk '/^---$/{f++; next} f==1 && /^name:/ {sub(/^name:[[:space:]]*/, ""); print; exit}' "$skill_file")"

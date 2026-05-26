@@ -135,4 +135,4 @@ patterns hate striping (every rank's file gets spread, contending on OSTs).
 
 - [[slurm-job]] — `--mem` budget must include I/O buffers
 - [[mpi-openmp]] — parallel HDF5 uses MPI-IO under the hood
-- [[hpc-perf]] — Darshan + Score-P together if I/O is the bottleneck
+- Pair Darshan with Score-P when I/O is only one part of a larger runtime bottleneck.

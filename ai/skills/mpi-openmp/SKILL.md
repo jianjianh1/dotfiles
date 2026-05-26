@@ -131,5 +131,6 @@ for (int i = 0; i < n; ++i) c[i] = a[i] + b[i];
 ## See also
 
 - [[slurm-job]] for sbatch with `--ntasks` / `--cpus-per-task`
-- [[hpc-perf]] for scaling studies (strong vs weak) and profiling MPI apps
+- For scaling studies, collect strong/weak scaling data and profile with Score-P,
+  HPCToolkit, or mpiP.
 - [[scientific-io]] if the bottleneck is I/O rather than compute or comm
