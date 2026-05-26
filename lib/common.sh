@@ -52,10 +52,6 @@ is_macos() {
     [ "$(os_name)" = "Darwin" ]
 }
 
-is_linux() {
-    [ "$(os_name)" = "Linux" ]
-}
-
 is_chpc() {
     # Hostname is the most reliable signal — login/compute nodes always
     # present *.chpc.utah.edu.
@@ -70,19 +66,6 @@ is_chpc() {
     # CHPC-only path AND the `module` command, which are only co-present
     # on actual CHPC systems.
     [ -d "/uufs/chpc.utah.edu/sys" ] && command -v module &>/dev/null && return 0
-    return 1
-}
-
-# True iff the current host is a CHPC login node (Arbiter-capped).
-# Used to gate IntelliSense / heavyweight workspace parsing — login nodes
-# limit each user to 4 cores / 8 GB, which is not enough for cpptools.
-is_chpc_login_node() {
-    is_chpc || return 1
-    local short
-    short="$(hostname -s 2>/dev/null || true)"
-    case "$short" in
-        notchpeak[12]|granite[12]|kingspeak[12]|lonepeak[12]|ash[12]) return 0 ;;
-    esac
     return 1
 }
 

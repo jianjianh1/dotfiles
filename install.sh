@@ -11,10 +11,12 @@ CLAUDE_SETTINGS_SRC=""
 CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
 CODEX_CONFIG_MODE="repo"
+DOTFILES_MODULE_VARS=(NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE CODE_CLI_MODULE)
+
 reset_module_vars() {
     local module_var
 
-    for module_var in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE CODE_CLI_MODULE; do
+    for module_var in "${DOTFILES_MODULE_VARS[@]}"; do
         printf -v "$module_var" '%s' ""
     done
 }
@@ -579,7 +581,7 @@ EOF
     # inherit Lmod state from the job, and an unconditional `module load`
     # here can swap MPI/compiler combos and break job startup.
     local mod_load mod_val _any_module=false
-    for mod_load in NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE; do
+    for mod_load in "${DOTFILES_MODULE_VARS[@]}"; do
         mod_val="${!mod_load:-}"
         if [ -n "$mod_val" ]; then
             if ! "$_any_module"; then
@@ -1110,7 +1112,8 @@ install_uv() {
         return 1
     fi
     mkdir -p "$HOME/.local/bin"
-    if ! mv -f "$uv_dir/uv" "$uv_dir/uvx" "$HOME/.local/bin/"; then
+    if ! install_to "$uv_dir/uv" "$HOME/.local/bin/uv" || \
+       ! install_to "$uv_dir/uvx" "$HOME/.local/bin/uvx"; then
         echo "  Warning: failed to install uv binaries"
         return 1
     fi
@@ -1162,11 +1165,11 @@ install_code_cli() {
         return 1
     fi
     mkdir -p "$HOME/.local/bin"
-    if ! mv -f "$TMP/code" "$HOME/.local/bin/code"; then
+    chmod +x "$TMP/code"
+    if ! install_to "$TMP/code" "$HOME/.local/bin/code"; then
         echo "  Warning: failed to install code binary"
         return 1
     fi
-    chmod +x "$HOME/.local/bin/code"
     hash -r
     manifest_add_path "$HOME/.local/bin/code"
     echo "  code $("$HOME/.local/bin/code" --version 2>/dev/null | head -1) installed"
@@ -1751,7 +1754,7 @@ install_external_claude_skills() {
     local args=()
     [ "$FORCE" = true ]   && args+=(--force)
     [ "$DRY_RUN" = true ] && args+=(--dry-run)
-    bash "$DIR/scripts/install_claude_skills.sh" "${args[@]}"
+    bash "$DIR/scripts/install_claude_skills.sh" ${args[@]+"${args[@]}"}
 }
 
 # Symlink every directory under ai/skills/ into ~/.claude/skills/<name>.
@@ -1871,7 +1874,9 @@ setup_main() {
         # Point this clone at the repo-local git hooks (idempotent; only when
         # run from inside the repo itself).
         if [ -d "$DIR/.git" ] && command -v git &>/dev/null; then
-            git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
+            if [ "$(git -C "$DIR" config --get core.hooksPath 2>/dev/null)" != ".githooks" ]; then
+                git -C "$DIR" config core.hooksPath .githooks 2>/dev/null || true
+            fi
         fi
 
         # Drop the shell-init cache so the next interactive bash regenerates

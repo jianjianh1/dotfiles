@@ -130,7 +130,6 @@ nnoremap * *N
 nnoremap # #N
 
 " Fold toggles
-nnoremap za za
 nnoremap zO zR
 nnoremap zC zM
 nnoremap <leader>fi :setlocal foldmethod=indent<CR>zx
