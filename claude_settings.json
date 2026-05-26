@@ -53,6 +53,7 @@
   "autoUpdatesChannel": "stable",
   "skipDangerousModePermissionPrompt": true,
   "autoConnectIde": true,
+  "theme": "auto",
   "editorMode": "vim",
   "showTurnDuration": true,
   "terminalProgressBarEnabled": true
