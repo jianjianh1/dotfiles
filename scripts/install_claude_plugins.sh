@@ -75,6 +75,17 @@ claude_plugin_cmd() {
     fi
 }
 
+# Best-effort marketplace refresh. Silences output and swallows failure so
+# that a stale-cache check never poisons FAILURES[] — the real signal is
+# in the install step that follows.
+refresh_marketplace() {
+    local market="$1"
+    if ! $CLAUDE_HAS_PLUGIN_MARKETPLACE; then
+        return 0
+    fi
+    claude_plugin_cmd marketplace update "$market" >/dev/null 2>&1 || true
+}
+
 CLAUDE_HAS_MCP=false
 CLAUDE_HAS_PLUGIN_CMD=false
 CLAUDE_HAS_PLUGIN_MARKETPLACE=false
@@ -252,6 +263,11 @@ if ! $CLAUDE_HAS_PLUGIN_CMD; then
     echo "  Skipping marketplace plugins (this Claude Code build has no 'plugin' command)."
 else
 
+# Refresh local marketplace cache so install steps see the latest plugin
+# index — otherwise plugins added upstream after a host's first onboarding
+# fail with "not found" until the cache is bumped.
+refresh_marketplace claude-plugins-official
+
 # Integrations
 install_and_enable_plugin github
 install_and_enable_plugin linear
@@ -263,6 +279,7 @@ install_and_enable_plugin slack
 cleanup_stale_codex_plugin_state
 if $CLAUDE_HAS_PLUGIN_MARKETPLACE; then
     install_plugin "codex-marketplace" claude_plugin_cmd marketplace add openai/codex-plugin-cc
+    refresh_marketplace openai-codex
     install_and_enable_plugin codex openai-codex
 else
     echo "  Skipping Codex marketplace plugin (plugin marketplace subcommand unavailable)"
