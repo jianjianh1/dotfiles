@@ -89,12 +89,6 @@ Engineering-process skills, pure markdown, MIT licensed.
 | `executing-plans` | Following a plan step-by-step; handling drift mid-execution |
 | `verification-before-completion` | Don't claim "done" without running it; what verification looks like |
 | `brainstorming` | Structured idea generation: divergent then convergent |
-| `requesting-code-review` | Prepping a diff so reviewers can give useful feedback |
-| `receiving-code-review` | Integrating reviewer comments without thrash |
-| `finishing-a-development-branch` | Merge/PR hygiene before declaring a branch shippable |
-| `subagent-driven-development` | When and how to delegate to subagents |
-| `dispatching-parallel-agents` | Running multiple agents concurrently without context bleed |
-| `writing-skills` | Authoring new SKILL.md files (complement to `skill-creator`) |
 
 ### From [anthropics/skills](https://github.com/anthropics/skills) — markdown-only
 
@@ -111,29 +105,22 @@ Official Anthropic skills with no external dependencies.
 
 ### From [anthropics/skills](https://github.com/anthropics/skills) — document creators
 
-Official skills that read/write Office formats and PDFs. The bundled scripts use `uv run --with <package>` to fetch Python deps on first invocation, so no `pip install` step is needed at install time. `uv` is wired in by the main `install.sh`.
+One Office/PDF skill is included; the bundled script uses `uv run --with <package>` to fetch Python deps on first invocation, so no `pip install` step is needed at install time. `uv` is wired in by the main `install.sh`.
 
 | Skill | What it covers | First-use deps |
 |---|---|---|
 | `pdf` | Read, extract, split, merge PDF files | `pypdf`, `reportlab` |
-| `xlsx` | Read/write Excel spreadsheets | `openpyxl` |
-| `docx` | Read/write Word documents | `python-docx` |
-| `pptx` | Read/write PowerPoint decks | `python-pptx` |
 
-## Related plugins (installed by `scripts/install_claude_plugins.sh`)
-
-Two MCP/plugin additions complement the skill set above:
+## Related plugin (installed by `scripts/install_claude_plugins.sh`)
 
 - **[context7](https://github.com/upstash/context7)** (marketplace plugin) — live API documentation lookup (PyTorch, NumPy, MPI, CUDA, …). Ships its own skill + `/context7:docs` command + a `docs-researcher` subagent.
-- **[serena](https://github.com/oraios/serena)** (MCP server) — semantic code navigation and refactor across large C/C++/Fortran trees. Installed via `claude mcp add` per Oraios's recommendation (not via the plugin marketplace).
-
-Both honor the existing CHPC gate in `install_claude_plugins.sh` — they require MCP/marketplace approval before installation on CHPC clusters.
 
 ## Not included
 
-- **`anthropics/skills` heavy-deps skills** — `webapp-testing` (Playwright), `slack-gif-creator` (`requirements.txt`), `algorithmic-art` / `canvas-design` / `theme-factory` / `frontend-design` / `internal-comms` / `claude-api` (already bundled) — skipped to keep the install footprint small.
+- **Other `obra/superpowers` skills** — `requesting-code-review`, `receiving-code-review`, `finishing-a-development-branch`, `subagent-driven-development`, `dispatching-parallel-agents`, `writing-skills`. Available in the upstream repo if needed; add the name back to `SUPERPOWERS_SKILLS` in [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh).
+- **Other `anthropics/skills` document creators** — `xlsx`, `docx`, `pptx`. Add to `ANTHROPIC_SKILLS_PYDEPS` if needed.
+- **`anthropics/skills` heavy-deps skills** — `webapp-testing` (Playwright), `slack-gif-creator` (`requirements.txt`), `algorithmic-art` / `canvas-design` / `theme-factory` / `frontend-design` / `internal-comms` / `claude-api` (already bundled).
 - **`anthropics/skills` `using-superpowers`** — meta-readme, not actionable as a skill.
-- **karanb192/awesome-claude-skills entries** — that repo is a curated index, not a skill source; community-requested skills there largely lack implementations.
 - **Project-level skills** (`.claude/skills/` in this repo) — bundled skills are user-level so they apply to every project.
 
 ## Related

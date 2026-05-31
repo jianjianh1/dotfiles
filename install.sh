@@ -253,21 +253,6 @@ claude_supports_permission_mode() {
     command_output_contains '--permission-mode ' claude --help
 }
 
-claude_supports_mcp() {
-    command -v claude &>/dev/null || return 1
-    claude mcp --help >/dev/null 2>&1
-}
-
-claude_supports_plugins() {
-    command -v claude &>/dev/null || return 1
-    claude plugin --help >/dev/null 2>&1 || claude plugins --help >/dev/null 2>&1
-}
-
-claude_supports_plugin_marketplace() {
-    command -v claude &>/dev/null || return 1
-    claude plugin marketplace --help >/dev/null 2>&1 || claude plugins marketplace --help >/dev/null 2>&1
-}
-
 codex_supports_settings() {
     command -v codex &>/dev/null || return 1
     command_output_contains '--ask-for-approval' codex --help &&
@@ -1937,7 +1922,7 @@ setup_main() {
         source "$HOME/.bashrc"
     fi
 
-    run_step "mcp plugins" install_plugins
+    run_step "claude plugins" install_plugins
 
     # --- Summary ---
     echo ""

@@ -77,10 +77,10 @@ verbatim, like `editor/nvim` or `shell/bashrc_aliases`. Upstream skills
 follow the same symlink pattern, but their content lives in a clone cache
 at `~/.local/share/claude-skills/` rather than in this repo. See
 [`docs/ai-skills.md`](docs/ai-skills.md) for the bundled set, the upstream
-set (obra/superpowers, anthropics/skills), and authoring notes. Skills are
-pure markdown — no MCP, no CHPC gate. The two adjacent plugin/MCP additions
-(`context7`, `serena`) live in `scripts/install_claude_plugins.sh` and
-honor the existing CHPC gate.
+curated subset (7 obra + 4 anthropic-markdown + `pdf`), and authoring notes.
+The marketplace-plugin half of `scripts/install_claude_plugins.sh` installs
+`context7`, `commit-commands`, and `pr-review-toolkit`; the MCP half
+registers one server (`fetch`).
 
 Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 
@@ -128,7 +128,6 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates agent settings even if the CLIs are not currently installed or loaded
 - Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC
-- Skips MCP server installation by default (`scripts/install_claude_plugins.sh` — needs CHPC approval first)
 
 **Module name candidates** (used with `--use-modules`) — verified on Notchpeak (2026-05). Re-verify after CHPC adds/removes/renames modules with `./install.sh --probe-modules`:
 
@@ -143,7 +142,7 @@ NVIM_MODULE_CANDIDATES=("nvim/0.11.2" "nvim")     # nvim/0.7.2, nvim/0.11.2 (D)
 TREE_SITTER_MODULE_CANDIDATES=()                  # no module — falls back to binary/cargo
 ```
 
-CHPC uses the same repo `ai/claude_settings.json` / `ai/codex_config.toml` as other hosts; only version-adaptive compat files (tmux/vim/gitconfig/bashrc) land in `~/.dotfiles-generated/`. After MCP approval, run `scripts/install_claude_plugins.sh --allow-chpc` or set `DOTFILES_ALLOW_CHPC_MCP=true`.
+CHPC uses the same repo `ai/claude_settings.json` / `ai/codex_config.toml` as other hosts; only version-adaptive compat files (tmux/vim/gitconfig/bashrc) land in `~/.dotfiles-generated/`.
 
 **`scripts/chpc-allocs.py`** requires Python 3.7+ (it raises `SystemExit` on older interpreters). Some CHPC nodes ship `/usr/bin/python3` as 3.6 — `module load python/3.10.3` before running, or rely on the wrapper installed in `~/.local/bin` to find a usable interpreter.
 

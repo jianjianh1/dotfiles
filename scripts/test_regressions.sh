@@ -561,42 +561,6 @@ test_module_var_reset_clears_stale_values() (
     fi
 )
 
-test_chpc_mcp_skip_and_override() (
-    local tmp output
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-
-    export HOME="$tmp/home"
-    export HOSTNAME="login1.chpc.utah.edu"
-    export PATH="$tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    mkdir -p "$HOME" "$tmp/bin"
-
-    output="$(bash "$DIR/scripts/install_claude_plugins.sh" 2>&1)" ||
-        fail "CHPC MCP default skip should exit successfully"
-    printf '%s\n' "$output" | grep -q 'CHPC detected: skipping MCP server installation.' ||
-        fail "CHPC MCP default run should skip"
-
-    printf '%s\n' \
-        '#!/usr/bin/env bash' \
-        'case "$1" in' \
-        '  --version) printf "fake claude\n"; exit 0 ;;' \
-        '  mcp) [ "${2:-}" = "--help" ] && exit 1; [ "${2:-}" = "list" ] && exit 0; exit 1 ;;' \
-        '  plugin|plugins) [ "${2:-}" = "--help" ] && exit 1; exit 1 ;;' \
-        '  *) exit 1 ;;' \
-        'esac' > "$tmp/bin/claude"
-    chmod +x "$tmp/bin/claude"
-
-    output="$(bash "$DIR/scripts/install_claude_plugins.sh" --allow-chpc 2>&1)" ||
-        fail "CHPC MCP --allow-chpc should continue with fake Claude: $output"
-    printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
-        fail "CHPC MCP --allow-chpc did not continue past CHPC guard"
-
-    output="$(DOTFILES_ALLOW_CHPC_MCP=true bash "$DIR/scripts/install_claude_plugins.sh" 2>&1)" ||
-        fail "CHPC MCP env override should continue with fake Claude: $output"
-    printf '%s\n' "$output" | grep -q 'Installing Claude Code MCP servers...' ||
-        fail "CHPC MCP env override did not continue past CHPC guard"
-)
-
 test_nvim_manifest_records_only_owned_layout() (
     local tmp
     tmp="$(mktemp -d)"
@@ -1040,7 +1004,6 @@ main() {
     run_test test_chpc_config_rendering_uses_repo_files
     run_test test_chpc_module_loads_initialize_module_command
     run_test test_module_var_reset_clears_stale_values
-    run_test test_chpc_mcp_skip_and_override
     run_test test_nvim_manifest_records_only_owned_layout
     run_test test_nvim_install_selects_legacy_and_arm_assets
     run_test test_pre_commit_no_staged_files

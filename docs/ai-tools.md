@@ -150,34 +150,33 @@ trust_level = "trusted"
 
 ---
 
-## MCP Servers (`install_claude_plugins.sh`)
+## MCP Servers & Plugins (`install_claude_plugins.sh`)
 
-The install script sets up Model Context Protocol servers for Claude Code. It detects the installed Claude CLI version and uses the marketplace when available, falling back to manual `npx`/`uvx` registration.
+The install script registers one MCP server and three marketplace plugins. Anything an older version of the script previously installed (`github`/`filesystem`/`memory`/`git`/`serena` MCPs and several extra plugins) is uninstalled defensively on each run so upgrade hosts converge to the curated set.
 
-On CHPC systems, MCP installation is skipped by default because servers need local approval first. After approval, run `install_claude_plugins.sh --allow-chpc` or set `DOTFILES_ALLOW_CHPC_MCP=true`.
+> **Reserved names — do not use locally.** The defensive uninstall runs on every `./install.sh`, so manually adding any of these will get silently undone on the next run. Pick a different name for personal MCPs or plugins.
+>
+> - Reserved MCP names: `github`, `filesystem`, `memory`, `git`, `serena`
+> - Reserved plugin names: `github`, `linear`, `sentry`, `notion`, `slack`, `codex`, `agent-sdk-dev`, `clangd-lsp`, `pyright-lsp`, `typescript-lsp`, `gopls-lsp`, `rust-analyzer-lsp`, `explanatory-output-style`
 
-### Installed Servers
+### Installed MCP server
 
 | Server | Transport | Package | Purpose |
 |--------|-----------|---------|---------|
-| `github` | stdio/npx | `@modelcontextprotocol/server-github` | GitHub API access |
-| `filesystem` | stdio/npx | `@modelcontextprotocol/server-filesystem` | Local filesystem operations |
-| `memory` | stdio/npx | `@modelcontextprotocol/server-memory` | Persistent memory across sessions |
-| `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching |
-| `git` | stdio/uvx | `mcp-server-git` | Git operations |
+| `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching (URLs Claude can't otherwise reach) |
 
-### Marketplace Plugins
+### Installed marketplace plugins
 
-When `claude mcp add --from-marketplace` is available, these are also installed:
+| Plugin | Purpose |
+|--------|---------|
+| `context7` | Live API docs lookup for libraries (PyTorch, NumPy, MPI, CUDA, …) |
+| `commit-commands` | Curated commit + push + PR helpers |
+| `pr-review-toolkit` | PR review workflow + specialized review agents |
 
-`github`, `linear`, `sentry`, `notion`, `slack`, `codex`, `commit-commands`, `pr-review-toolkit`, `agent-sdk-dev`, `clangd-lsp`, `pyright-lsp`, `typescript-lsp`, `gopls-lsp`, `rust-analyzer-lsp`, `explanatory-output-style`
+### Capability handling
 
-### Capability Detection
+Each step is best-effort:
 
-The script checks three capability levels:
-
-1. **MCP support** — Does `claude mcp` exist?
-2. **Plugin command** — Does `claude mcp add` work?
-3. **Marketplace** — Does `claude mcp add --from-marketplace` work?
-
-Falls back gracefully at each level. Skips entirely if `npx` is not available.
+- If `claude mcp` is unavailable the MCP step is skipped.
+- If `claude plugin` is unavailable the marketplace step is skipped.
+- If `uvx` is missing the `fetch` MCP is skipped (`uv` is installed by `install.sh`, so this is rare).
