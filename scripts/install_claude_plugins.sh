@@ -44,11 +44,23 @@ FAILURES=()
 
 # --- MCP servers -----------------------------------------------------------
 
+# Source-of-truth for the curated set. Both the install loop and the final
+# "Installed MCP servers" listing read from this so they stay in sync.
+OUR_MCPS=(fetch time)
+
 # Idempotent MCP add: remove existing entry first so re-runs are clean.
 mcp_add() {
     local name="$1"; shift
     claude mcp remove --scope user "$name" 2>/dev/null || true
     claude mcp add "$@"
+}
+
+# Match a user-scope MCP row by name in `claude mcp list` output. The
+# colon-space anchor distinguishes user-added MCPs ("name: cmd - status")
+# from plugin-installed MCPs ("plugin:foo:bar: ...") and the cloud-managed
+# catalog ("claude.ai Notion ..."), which we don't own.
+match_user_mcp() {
+    grep -E "^$1:[[:space:]]" <<<"$2"
 }
 
 # MCPs we used to register but no longer want. Removed defensively on each
@@ -67,10 +79,7 @@ prune_stale_mcps() {
     listing="$(claude mcp list 2>/dev/null || true)"
     [ -n "$listing" ] || return 0
     for name in "${STALE_MCPS[@]}"; do
-        # Require `name: ` at line start — current Claude prints user-added
-        # MCPs as "name: cmd - status". The colon anchor avoids matching
-        # plugin-installed MCPs ("plugin:foo:name: ..."), which we don't own.
-        if printf '%s\n' "$listing" | grep -qE "^${name}:[[:space:]]"; then
+        if match_user_mcp "$name" "$listing" >/dev/null; then
             claude mcp remove --scope user "$name" >/dev/null 2>&1 \
                 && echo "  Removed stale MCP: $name"
         fi
@@ -86,14 +95,29 @@ elif command -v uvx &>/dev/null; then
     echo "  Adding Fetch MCP server..."
     run_step "mcp:fetch" mcp_add fetch --scope user --transport stdio fetch \
         -- uvx mcp-server-fetch
+    echo "  Adding Time MCP server..."
+    run_step "mcp:time" mcp_add time --scope user --transport stdio time \
+        -- uvx mcp-server-time
 else
-    echo "  Skipping Fetch MCP (uvx not found — install uv first)"
+    echo "  Skipping Fetch/Time MCPs (uvx not found — install uv first)"
 fi
 
 echo ""
-echo "Installed MCP servers:"
+# Show only the MCPs this script owns. `claude mcp list` also prints
+# Anthropic's cloud-managed connector catalog ("claude.ai Notion", etc.),
+# which is account-scoped and not installed by this repo — hiding it here
+# avoids the false impression that the installer added those entries.
+echo "Installed MCP servers (repo-managed):"
 if $CLAUDE_HAS_MCP; then
-    claude mcp list
+    listing="$(claude mcp list 2>/dev/null || true)"
+    for name in "${OUR_MCPS[@]}"; do
+        row="$(match_user_mcp "$name" "$listing" || true)"
+        if [ -n "$row" ]; then
+            echo "  $row"
+        else
+            echo "  $name: (not found)"
+        fi
+    done
 else
     echo "  (skipped)"
 fi

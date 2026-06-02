@@ -159,11 +159,21 @@ The install script registers one MCP server and three marketplace plugins. Anyth
 > - Reserved MCP names: `github`, `filesystem`, `memory`, `git`, `serena`
 > - Reserved plugin names: `github`, `linear`, `sentry`, `notion`, `slack`, `codex`, `agent-sdk-dev`, `clangd-lsp`, `pyright-lsp`, `typescript-lsp`, `gopls-lsp`, `rust-analyzer-lsp`, `explanatory-output-style`
 
-### Installed MCP server
+### Installed MCP servers
 
 | Server | Transport | Package | Purpose |
 |--------|-----------|---------|---------|
 | `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching (URLs Claude can't otherwise reach) |
+| `time` | stdio/uvx | `mcp-server-time` | Current time / timezone conversions (date-stamp memory, reason about SLURM `--time=` budgets) |
+
+### Cloud-managed connector catalog (`claude.ai *`)
+
+`claude mcp list` also surfaces a set of OAuth-gated third-party connectors named `claude.ai Notion`, `claude.ai Linear`, `claude.ai Gmail`, `claude.ai Atlassian`, etc. These are **not installed by this repo** — they come from Anthropic's account-level connector catalog, pushed to every Claude Code session.
+
+- **On disk**: only an auth-state cache at `~/.claude/mcp-needs-auth-cache.json` (entries like `mcpsrv_01BgztWKuyz1pm6auaCzhvv9`). The canonical catalog lives server-side at claude.ai.
+- **Status**: each entry shows `! Needs authentication` and is inert until you OAuth in through claude.ai's web settings.
+- **Installer output**: the final "Installed MCP servers (repo-managed)" block in `install_claude_plugins.sh` is filtered to show only entries this repo owns, so the cloud catalog no longer appears there. Run `claude mcp list` directly to see the catalog alongside repo-managed servers.
+- **To disable individual catalog entries**: do it in claude.ai's connector settings (web UI) — the dotfiles cannot un-publish them.
 
 ### Installed marketplace plugins
 
@@ -179,4 +189,4 @@ Each step is best-effort:
 
 - If `claude mcp` is unavailable the MCP step is skipped.
 - If `claude plugin` is unavailable the marketplace step is skipped.
-- If `uvx` is missing the `fetch` MCP is skipped (`uv` is installed by `install.sh`, so this is rare).
+- If `uvx` is missing the `fetch` and `time` MCPs are skipped (`uv` is installed by `install.sh`, so this is rare).
