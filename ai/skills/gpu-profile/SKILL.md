@@ -116,4 +116,5 @@ ncu --section WarpStateStats ./a.out
 
 - [[cuda-kernels]] for the kernel you'll be optimizing
 - [[slurm-job]] — nsys/ncu both need a GPU node; submit with `--gres=gpu:1`
-- For non-GPU profiling, use perf, gprof, Score-P, or HPCToolkit.
+- [[cpp-profile]] for the host-side C++ that drives the kernels
+- [[python-profile]] when a PyTorch / Python launcher dominates wall time
