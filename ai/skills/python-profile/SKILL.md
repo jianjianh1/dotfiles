@@ -1,6 +1,6 @@
 ---
 name: python-profile
-description: Use when the user is profiling Python code — invoking cProfile, pyinstrument, py-spy, scalene, line_profiler, memray, tracemalloc, snakeviz, or interpreting .prof / .speedscope / .pyspy / .memray reports, call trees, flame graphs, or per-line CPU and memory breakdowns.
+description: Use when the user is profiling Python code — invoking cProfile, pyinstrument, py-spy, scalene, line_profiler, memray, tracemalloc, snakeviz, or interpreting .prof / .speedscope / .memray reports, call trees, flame graphs, or per-line CPU and memory breakdowns.
 ---
 
 # Python profiling (sampling first, then targeted)
@@ -31,8 +31,10 @@ exact call counts, not whole-app triage.
 python -m pyinstrument -o report.html -r html script.py
 
 # py-spy — attach to a running process, no code change
-py-spy record -o flame.svg --pid $(pgrep -f my-app)
-py-spy top  --pid $(pgrep -f my-app)         # live top-style view
+# (-fn = full-cmdline match, newest single PID; plain `pgrep my-app` matches
+# only the 15-char comm and can return multiple PIDs that break `--pid`)
+py-spy record -o flame.svg --pid $(pgrep -fn my-app)
+py-spy top  --pid $(pgrep -fn my-app)        # live top-style view
 py-spy record -o flame.svg --subprocesses --native -- python script.py
 
 # cProfile + snakeviz — when you actually want call counts
@@ -42,48 +44,53 @@ snakeviz run.prof                            # browser-based call tree
 # line_profiler — decorate hot functions with @profile, then:
 kernprof -l -v script.py                     # writes script.py.lprof
 
-# scalene — CPU + memory + GPU in one HTML
-scalene --html --outfile scalene.html script.py
+# scalene — CPU + memory + GPU; modern scalene uses verb subcommands
+scalene run script.py                        # writes scalene-profile.json
+scalene view --html                          # writes scalene-profile.html
 ```
 
 Flags worth knowing:
 
 - `py-spy --subprocesses` — follows `multiprocessing` / `concurrent.futures` workers.
 - `py-spy --native` — unwinds C frames so NumPy / PyTorch / Cython aren't `<built-in>`.
-- `py-spy --idle` — include I/O-blocked threads (filtered by default; needed when wall time is dominated by syscalls). Threads in `time.sleep` are attributed without this flag.
-- `pyinstrument --async-mode=enabled` — attribute time to coroutines, not the event loop.
+- `py-spy --idle` — include threads not actively running Python (filtered by default). Needed when wall time is dominated by `time.sleep` or blocking I/O — py-spy otherwise drops those threads from the sample and the flame graph looks empty.
+- `pyinstrument` async attribution is API-only — call `Profiler(async_mode="strict")` from Python; there is no `--async-mode` CLI flag.
 - `pyinstrument -o profile.speedscope -r speedscope` — open at `speedscope.app` for flame graphs.
 
 ## Memory profiling
 
 ```bash
-memray run -o out.bin script.py
+memray run -f -o out.bin script.py           # -f / --force overwrites; without it the second run aborts
 memray flamegraph out.bin                    # → memray-flamegraph-out.html
 memray tree      out.bin                     # text tree of allocations
 memray stats     out.bin                     # peak / total / call sites
 memray run --live script.py                  # interactive TUI
-memray run --trace-python-allocators -o out.bin script.py   # see PyObject mallocs (heavy — output files 5-20× larger; use only when default mode misses small-object allocations)
+memray run -f --trace-python-allocators -o out.bin script.py   # see PyObject mallocs (heavy — output files 5-20× larger; use only when default mode misses small-object allocations)
 ```
 
 Use `tracemalloc` (stdlib) as the dependency-free fallback for snapshot diffs:
 
 ```python
 import tracemalloc; tracemalloc.start()
-# … workload …
-snap = tracemalloc.take_snapshot()
-for stat in snap.statistics("lineno")[:20]:
+# … warm-up …
+before = tracemalloc.take_snapshot()
+# … suspect workload …
+after = tracemalloc.take_snapshot()
+for stat in after.compare_to(before, "lineno")[:20]:
     print(stat)
 ```
 
-Leak vs high-watermark: a leak's `memray stats` total climbs monotonically
-across iterations of the same workload; a high-watermark workload returns
-to baseline between iterations. Different fixes — eviction policy vs.
-peak-allocation reduction.
+Leak vs high-watermark: a leak's **peak / resident memory** climbs
+monotonically across iterations of the same workload (re-run `memray stats`
+per iteration and compare, or watch RSS); a high-watermark workload returns
+to baseline between iterations. The `total` field in `memray stats` is
+cumulative allocations and always grows — don't use it as the leak signal.
+Different fixes — eviction policy vs. peak-allocation reduction.
 
 ## Async, multiprocess, and native-extension gotchas
 
 - **asyncio**: `cProfile` attributes time to the event-loop machinery, not your
-  coroutine. Use `pyinstrument --async-mode=enabled` or `py-spy`.
+  coroutine. Use `pyinstrument` via the Python API with `Profiler(async_mode="strict")`, or `py-spy`.
 - **multiprocessing / `concurrent.futures`**: `py-spy record --subprocesses`
   follows children; `pyinstrument` needs to be started in each worker via
   `Profiler().start()` / `.stop()`.
@@ -103,32 +110,38 @@ peak-allocation reduction.
 | pyinstrument shows huge time in `select` / `epoll_wait` | I/O wait, not CPU — switch to `pyinstrument --show-all` or `py-spy --idle` |
 | py-spy shows `<unknown>` frames | Missing debug symbols; install `*-dbg` packages or use a non-stripped Python build |
 | cProfile times don't add up to wall time | Blocking I/O outside Python — cProfile only sees Python frames, use a sampling profiler |
-| `memray` total memory grows monotonically across identical iterations | Real leak — caches without eviction, circular refs holding C objects, or `lru_cache` without `maxsize` |
+| `memray` peak (or process RSS) grows across identical iterations | Real leak — caches without eviction, circular refs holding C objects, or `lru_cache` without `maxsize`. Don't read `total` here — it is cumulative and always grows. |
 | `memray` peak huge, returns to baseline | High-watermark workload — load in chunks, use generators, or `dtype=` downcasts in NumPy |
 | Hot frame is `numpy.core._methods._sum` on a small array | Per-call NumPy overhead beats vectorization — batch or switch to plain Python for tiny shapes |
 
 ## Quick-fire cheat sheet
 
 ```bash
-# Attach to whatever's pegging the CPU right now
+# Attach to whatever's pegging the CPU right now (replace `python` with the
+# script name if a pylsp / Jupyter kernel might also be running)
 py-spy top --pid $(pgrep -fn python)
 
-# One-shot flame graph of a SLURM job (run on the compute node — there is no
-# SLURM_JOB_PID; use $SLURM_TASK_PID inside the same task, or pgrep otherwise)
-py-spy record -o flame.svg --subprocesses --native --pid $(pgrep -fn python)
+# One-shot flame graph of a SLURM job: prefer $SLURM_TASK_PID inside the
+# task; fall back to pgrep on the compute node from a parent shell
+py-spy record -o flame.svg --subprocesses --native \
+    --pid "${SLURM_TASK_PID:-$(pgrep -fn python)}"
 
-# Compare two pyinstrument runs side-by-side
-python -m pyinstrument -o a.json -r json before.py
-python -m pyinstrument -o b.json -r json after.py
-# load both in https://speedscope.app/
-
-# Profile only the interesting block, not the whole script
-from pyinstrument import Profiler
-with Profiler() as p: heavy_work()
-print(p.output_text(unicode=True, color=True))
+# Compare two pyinstrument runs side-by-side in speedscope.app
+python -m pyinstrument -o a.speedscope -r speedscope before.py
+python -m pyinstrument -o b.speedscope -r speedscope after.py
+# load both at https://speedscope.app/
 
 # Find which line of which function allocates the most
-memray run -o m.bin script.py && memray flamegraph m.bin
+memray run -f -o m.bin script.py && memray flamegraph m.bin
+```
+
+Profile only the interesting block from inside Python:
+
+```python
+from pyinstrument import Profiler
+with Profiler() as p:
+    heavy_work()
+print(p.output_text(unicode=True, color=True))
 ```
 
 ## See also

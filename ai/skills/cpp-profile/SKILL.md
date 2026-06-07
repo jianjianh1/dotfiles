@@ -92,9 +92,10 @@ Notes:
   `cat /proc/sys/kernel/perf_event_paranoid`. Kernel semantics:
   `-1` = unrestricted, `0` = no raw tracepoints, `1` = no kernel-symbol
   resolution, `2` = no kernel profiling (typical default, **does** allow
-  user-space CPU sampling). Debian and Ubuntu ship a downstream patch with
-  `3` = blocks unprivileged `perf_event_open` entirely — that's the most
-  common EACCES cause on those distros. Don't lower the system value
+  user-space CPU sampling). Debian and Ubuntu ship a downstream patch where
+  `3` (Debian default) or `4` (Ubuntu 22.04+ default) blocks unprivileged
+  `perf_event_open` entirely — that's the most common EACCES cause on those
+  distros. Don't lower the system value
   yourself; ask the sysadmin or run on a less restrictive partition.
 
 ## Callgrind + KCachegrind
@@ -130,9 +131,9 @@ perf c2c report
 
 - **`heaptrack`** — default recommendation for allocation profiling.
   ```bash
-  heaptrack ./a.out                            # writes heaptrack.a.out.<pid>.gz
-  heaptrack_gui    heaptrack.a.out.<pid>.gz    # interactive
-  heaptrack_print --print-flamegraph flame.txt heaptrack.a.out.<pid>.gz
+  heaptrack ./a.out                            # writes heaptrack.a.out.<pid>.zst (or .gz on systems without zstd)
+  heaptrack_gui    heaptrack.a.out.<pid>.zst   # interactive
+  heaptrack_print --print-flamegraph flame.txt heaptrack.a.out.<pid>.zst
   flamegraph.pl < flame.txt > heap-flame.svg
   ```
 - **`valgrind --tool=massif`** — heap snapshots over time, shows peak
@@ -187,7 +188,7 @@ For codes that span MPI ranks, OpenMP threads, or GPU offload, single-node
 | Callgrind hot function never appears in `perf` | Function is fast but called billions of times — perf samples can't catch it; switch to callgrind, uftrace, or Tracy |
 | `perf c2c` reports HITM events | False sharing — pad structs to a cache line (`alignas(64)`) or split per-thread state |
 | `perf stat` shows IPC < 0.5 on compute kernel | Front-end or memory stall — check `perf stat -e stalled-cycles-frontend,stalled-cycles-backend` |
-| MPI program: rank 0 fast, others slow in `MPI_Wait` | Load imbalance — profile each rank with HPCToolkit or per-rank `srun perf record -o perf.${SLURM_PROCID}.data` |
+| MPI program: rank 0 fast, others slow in `MPI_Wait` | Load imbalance — profile each rank with HPCToolkit or per-rank `srun bash -c 'perf record -o perf.${SLURM_PROCID}.data ./a.out'` (the `bash -c` defers `$SLURM_PROCID` expansion until each task's shell) |
 
 ## Quick-fire cheat sheet
 
@@ -195,8 +196,9 @@ For codes that span MPI ranks, OpenMP threads, or GPU offload, single-node
 # Live top of a running PID
 perf top -p $(pgrep -fn my-app)
 
-# Flame graph in one pipeline
-perf record -F 999 -g -- ./a.out && \
+# Flame graph in one pipeline (swap `fp` for `dwarf,16384` on enterprise distros
+# where glibc/libstdc++ lack frame pointers — see "Compile for profiling")
+perf record -F 999 -g --call-graph fp -- ./a.out && \
   perf script | stackcollapse-perf.pl | flamegraph.pl > flame.svg
 
 # Diff before/after an optimization
@@ -204,21 +206,24 @@ perf record -o before.data -- ./a.out-old
 perf record -o after.data  -- ./a.out-new
 perf diff before.data after.data
 
-# Per-rank profile under SLURM
-srun perf record -F 99 -g -o perf.${SLURM_PROCID}.data -- ./a.out
+# Per-rank profile under SLURM (bash -c defers $SLURM_PROCID expansion to each
+# task's shell; without it the parent expands once and every task clobbers the
+# same file)
+srun bash -c 'perf record -F 99 -g -o perf.${SLURM_PROCID}.data -- ./a.out'
 
-# Check whether perf can sample at all
-cat /proc/sys/kernel/perf_event_paranoid       # want ≤ 2
+# Check whether perf can sample at all (≤ 2 on most distros; Debian/Ubuntu
+# ship 3 or 4 — needs a sysadmin to lower)
+cat /proc/sys/kernel/perf_event_paranoid
 
-# Allocation flame graph
+# Allocation flame graph (heaptrack writes .zst on modern distros, .gz otherwise)
 heaptrack ./a.out && \
-  heaptrack_print --print-flamegraph fg.txt heaptrack.*.gz && \
+  heaptrack_print --print-flamegraph fg.txt heaptrack.a.out.*.zst && \
   flamegraph.pl < fg.txt > heap-flame.svg
 ```
 
 ## See also
 
-- [[mpi-openmp]] — for MPI rank profiling, use Score-P or per-rank `perf record -o perf.${SLURM_PROCID}.data`
+- [[mpi-openmp]] — for MPI rank profiling, use Score-P or per-rank `srun bash -c 'perf record -o perf.${SLURM_PROCID}.data ...'`
 - [[gpu-profile]] — `perf` only sees the host; if the C++ binary launches CUDA, hand off to nsys/ncu
 - [[cuda-kernels]] — when the hot spot turns out to be on the device, not in C++
 - [[slurm-job]] — submitting profiling runs; reserve enough memory for `perf.data` and `heaptrack` output (both can hit gigabytes)
