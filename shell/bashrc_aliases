@@ -151,6 +151,20 @@ theme() {
         "${TMUX:+ (tmux repainted; running nvim/vim: :set background=...)}" >&2
 }
 
+# CHPC interactive compute allocation. Login nodes cap each user at 8GB/4cores
+# (one shared cgroup) — exceeding it triggers the kernel OOM-killer, which can
+# reap Claude. Run Claude + heavy analysis here, not on the login node.
+# Usage: cnode [cores] [mem] [hours]   (defaults: 4 cores, 32G, 8h)
+if command -v salloc &>/dev/null; then
+    cnode() {
+        salloc --partition=notchpeak-shared-short \
+               --account=notchpeak-shared-short \
+               --qos=notchpeak-shared-short \
+               --nodes=1 --ntasks="${1:-4}" --mem="${2:-32G}" \
+               --time="${3:-8}:00:00"
+    }
+fi
+
 # Modern tool replacements (guarded)
 # bat as cat is safe — same basic interface. fd/rg are used directly (no alias)
 # since aliasing grep/find breaks scripts that rely on GNU flag syntax.

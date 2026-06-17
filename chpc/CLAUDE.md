@@ -187,6 +187,7 @@ module list                    # see what's loaded
 - **AMD vs Intel**: use `--constraint="skl|csl"` if code needs AVX-512; AMD Rome nodes don't have it
 - **Memory errors**: default is 2GB/core; specify `--mem=XG` explicitly
 - **MKL on AMD**: set `export MKL_DEBUG_CPU_TYPE=5` for better performance
+- **Process killed on a login node (Claude, python, etc.)**: login nodes cap each user at **8GB mem+swap / 4 cores** in one shared cgroup (Arbiter). When your combined login-node processes exceed 8GB, the kernel OOM-killer reaps the largest one -- confirm with `dmesg | grep CONSTRAINT_MEMCG`. This is why Claude sometimes dies, especially alongside a memory-heavy analysis. Per Critical Rule #1, run Claude *and* any heavy analysis in an interactive allocation, not on the login node: `cnode` (shell alias, defaults to 4 cores/32G/8h on `notchpeak-shared-short`) or `salloc --partition=notchpeak-shared-short --account=notchpeak-shared-short --qos=notchpeak-shared-short --ntasks=4 --mem=32G --time=8:00:00`. Check current usage with `cat /sys/fs/cgroup/memory/user.slice/user-$(id -u).slice/memory.usage_in_bytes`.
 
 ## Useful Commands
 
