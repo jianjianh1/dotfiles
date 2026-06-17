@@ -1770,6 +1770,16 @@ link_claude_skills() {
     done
 }
 
+# The Notchpeak HPC agent guide (chpc/CLAUDE.md) is CHPC-specific operational
+# knowledge that should track the repo verbatim (like skills), so symlink it --
+# but only on CHPC, where ~/CLAUDE.md is the guide every agent loads. On first
+# run backup_and_link moves any pre-existing real ~/CLAUDE.md to ~/CLAUDE.md.bak.
+link_chpc_agent_guide() {
+    is_chpc || return 0
+    backup_and_link "$DIR/chpc/CLAUDE.md" "$HOME/CLAUDE.md" || return 1
+    manifest_add_path "$HOME/CLAUDE.md" || return 1
+}
+
 # Zsh parallel of the bashrc wiring above. Always runs on macOS (zsh is the
 # default login shell since Catalina); runs elsewhere only if zsh is
 # installed, so Linux hosts without zsh skip cleanly.
@@ -1916,6 +1926,7 @@ setup_main() {
     run_step "shell config links" link_generated_configs
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
+    run_step "chpc agent guide"   link_chpc_agent_guide
     # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
     if [[ $- == *i* ]] && [ "$DRY_RUN" = false ]; then
         # shellcheck source=/dev/null

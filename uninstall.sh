@@ -171,6 +171,7 @@ remove_external_skills_cache() {
 
 remove_symlinks() {
     echo "Removing config symlinks..."
+    unlink_config "$HOME/CLAUDE.md"
     unlink_config "$HOME/.vimrc"
     unlink_config "$HOME/.tmux.conf"
     unlink_config "$HOME/.tmux-theme.conf"
