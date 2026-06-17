@@ -155,7 +155,10 @@ theme() {
 # (one shared cgroup) — exceeding it triggers the kernel OOM-killer, which can
 # reap Claude. Run Claude + heavy analysis here, not on the login node.
 # Usage: cnode [cores] [mem] [hours]   (defaults: 4 cores, 32G, 8h)
-if command -v salloc &>/dev/null; then
+# Gated on the CHPC-only path (the signal is_chpc() in lib/common.sh falls back
+# to, since login nodes report a short hostname) rather than `command -v salloc`
+# -- so it doesn't shadow non-CHPC SLURM clusters where this triple is wrong.
+if [ -d /uufs/chpc.utah.edu/sys ]; then
     cnode() {
         salloc --partition=notchpeak-shared-short \
                --account=notchpeak-shared-short \
