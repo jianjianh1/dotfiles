@@ -1780,6 +1780,17 @@ link_chpc_agent_guide() {
     manifest_add_path "$HOME/CLAUDE.md" || return 1
 }
 
+# CloudLab nodes are bare-metal experiments with root, no SLURM/Lmod, and
+# ephemeral local disk. cloudlab/CLAUDE.md is the operational guide every agent
+# on a CloudLab node should load; symlink it like the CHPC guide, but only on
+# CloudLab. is_cloudlab and is_chpc never both match on a real host (disjoint
+# hostnames and path markers), so only one links ~/CLAUDE.md.
+link_cloudlab_agent_guide() {
+    is_cloudlab || return 0
+    backup_and_link "$DIR/cloudlab/CLAUDE.md" "$HOME/CLAUDE.md" || return 1
+    manifest_add_path "$HOME/CLAUDE.md" || return 1
+}
+
 # Zsh parallel of the bashrc wiring above. Always runs on macOS (zsh is the
 # default login shell since Catalina); runs elsewhere only if zsh is
 # installed, so Linux hosts without zsh skip cleanly.
@@ -1927,6 +1938,7 @@ setup_main() {
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
     run_step "chpc agent guide"   link_chpc_agent_guide
+    run_step "cloudlab agent guide" link_cloudlab_agent_guide
     # Source bashrc only in interactive shells; non-interactive may lack shopt etc.
     if [[ $- == *i* ]] && [ "$DRY_RUN" = false ]; then
         # shellcheck source=/dev/null

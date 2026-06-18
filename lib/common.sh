@@ -69,6 +69,21 @@ is_chpc() {
     return 1
 }
 
+is_cloudlab() {
+    # FQDN of testbed nodes: <node>.<exp>.<proj>.<cluster>.cloudlab.us
+    # (the federation also uses *.emulab.net / *.apt.emulab.net).
+    case "${HOSTNAME:-$(hostname -f 2>/dev/null)}" in
+        *.cloudlab.us|*.emulab.net|*.apt.emulab.net) return 0 ;;
+    esac
+    # Explicit override (sshfs/NFS mount of a CloudLab home elsewhere).
+    [ "${CLOUDLAB:-}" = 1 ] && return 0
+    # Path markers: the short hostname (e.g. "node3") won't match the case
+    # above, so this is the reliable signal. Both dirs are co-present only on
+    # real Emulab/CloudLab testbed nodes.
+    [ -d /usr/testbed ] && [ -d /var/emulab ] && return 0
+    return 1
+}
+
 machine_arch() {
     local arch
     arch="$(uname -m 2>/dev/null || true)"
