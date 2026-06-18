@@ -71,9 +71,9 @@ is_chpc() {
 
 is_cloudlab() {
     # FQDN of testbed nodes: <node>.<exp>.<proj>.<cluster>.cloudlab.us
-    # (the federation also uses *.emulab.net / *.apt.emulab.net).
-    case "${HOSTNAME:-$(hostname -f 2>/dev/null)}" in
-        *.cloudlab.us|*.emulab.net|*.apt.emulab.net) return 0 ;;
+    # (the federation also uses *.emulab.net, which covers *.apt.emulab.net).
+    case "${HOSTNAME:-$(hostname 2>/dev/null)}" in
+        *.cloudlab.us|*.emulab.net) return 0 ;;
     esac
     # Explicit override (sshfs/NFS mount of a CloudLab home elsewhere).
     [ "${CLOUDLAB:-}" = 1 ] && return 0
