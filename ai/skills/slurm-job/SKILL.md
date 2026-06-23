@@ -95,6 +95,7 @@ task and breaks `srun` inside the session.
 
 ## See also
 
+- [[chpc-job]] for the CHPC find-alloc → modules → write → submit workflow end to end
 - [[gpu-profile]] when the job runs CUDA and the user wants nsys/ncu data
 - [[mpi-openmp]] for multi-node MPI sizing
 - [[distributed-training]] for PyTorch DDP/FSDP launchers wrapped by srun
