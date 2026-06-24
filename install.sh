@@ -1065,6 +1065,30 @@ install_node() {
     echo "  Node.js $NODE_VERSION installed to ~/.local"
 }
 
+# Install a global npm package into the user-writable ~/.local tree and verify
+# the resulting command. Used by install_claude / install_codex.
+npm_global_install() {
+    local pkg="$1" cmd="$2"
+    if ! command -v npm &>/dev/null; then
+        echo "  npm not found — Node.js must be installed first (run_step node)."
+        return 1
+    fi
+    # --prefix keeps the install in ~/.local on every host: the binary lands in
+    # ~/.local/bin (already on PATH and where install.sh puts Node on Linux) and
+    # the package in ~/.local/lib/node_modules. This avoids EACCES when an
+    # active system Node has a root-owned global prefix, and keeps the install
+    # tracked/removable by uninstall.sh.
+    if ! retry npm install -g --prefix "$HOME/.local" "$pkg@latest"; then
+        echo "  Warning: npm install -g $pkg failed"
+        return 1
+    fi
+    hash -r
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "  $cmd not found on PATH after npm install of $pkg"
+        return 1
+    fi
+}
+
 install_uv() {
     if is_macos; then
         brew_install uv uv
@@ -1543,25 +1567,14 @@ install_claude() {
         echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
         return 0
     fi
-    echo "Installing Claude Code..."
-    local TMP
-    TMP="$(mktemp -d)"
-    trap 'rm -rf "${TMP:-}"' RETURN
-    if ! retry curl -fsSL -o "$TMP/install.sh" https://claude.ai/install.sh; then
-        echo "  Warning: failed to download Claude Code installer"
-        return 1
-    fi
-    if ! bash "$TMP/install.sh"; then
-        echo "  Warning: Claude Code installer exited with an error"
-        return 1
-    fi
-    hash -r
-    if ! command -v claude &>/dev/null; then
-        echo "  Claude Code install failed - 'claude' not found after installer ran"
+    echo "Installing Claude Code via npm (@anthropic-ai/claude-code)..."
+    if ! npm_global_install "@anthropic-ai/claude-code" claude; then
+        echo "  Claude Code install failed"
         return 1
     fi
     record_command_if_managed claude || true
-    echo "  Run 'claude' to authenticate and get started."
+    manifest_add_path "$HOME/.local/lib/node_modules/@anthropic-ai/claude-code"
+    echo "  Claude Code $(claude --version 2>&1 | head -1) installed. Run 'claude' to authenticate."
 }
 
 install_codex() {
@@ -1575,69 +1588,14 @@ install_codex() {
         echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
-    echo "Installing Codex CLI..."
-    # gh_latest returns the full tag (e.g. "rust-v0.120.0") since the tag isn't a plain "v*"
-    local CODEX_TAG
-    CODEX_TAG="$(gh_latest openai/codex)" || return 1
-    local ARCH TARGET
-    ARCH="$(machine_arch)"
-    case "$ARCH" in
-        x86_64|aarch64) ;;
-        *) echo "  Skipping Codex CLI (unsupported arch: $ARCH)"; return 1 ;;
-    esac
-    if is_macos; then
-        TARGET="apple-darwin"
-    else
-        TARGET="unknown-linux-musl"
-    fi
-    local TMP
-    TMP="$(mktemp -d)"
-    trap 'rm -rf "${TMP:-}"' RETURN
-
-    # Resolve the asset URL from the release JSON when possible, so
-    # OpenAI changing the asset filename pattern doesn't silently break
-    # installs. Fall back to the historical pattern if jq is missing or
-    # the API lookup fails.
-    local CODEX_ASSET_URL=""
-    if command -v jq &>/dev/null; then
-        CODEX_ASSET_URL="$(retry curl -sfL "https://api.github.com/repos/openai/codex/releases/tags/${CODEX_TAG}" 2>/dev/null \
-            | jq -r --arg arch "$ARCH" --arg target "$TARGET" '
-                .assets[]
-                | select(.name | test("codex-" + $arch + "-" + $target + "\\.tar\\.gz$"))
-                | .browser_download_url' 2>/dev/null \
-            | head -1)"
-    fi
-    if [ -z "$CODEX_ASSET_URL" ]; then
-        CODEX_ASSET_URL="https://github.com/openai/codex/releases/download/${CODEX_TAG}/codex-${ARCH}-${TARGET}.tar.gz"
-    fi
-
-    if ! retry curl -sfL -o "$TMP/archive.tar.gz" "$CODEX_ASSET_URL"; then
-        echo "  Warning: failed to download Codex CLI from $CODEX_ASSET_URL"
+    echo "Installing Codex CLI via npm (@openai/codex)..."
+    if ! npm_global_install "@openai/codex" codex; then
+        echo "  Codex CLI install failed"
         return 1
     fi
-    if ! tar xz -C "$TMP" -f "$TMP/archive.tar.gz"; then
-        echo "  Warning: failed to extract Codex archive"
-        return 1
-    fi
-    # Locate the codex binary in the extracted tree by name pattern, so
-    # we don't depend on the exact filename layout inside the tarball.
-    local codex_bin
-    codex_bin="$(find "$TMP" -maxdepth 2 -type f -name 'codex*' ! -name '*.tar.gz' | head -1)"
-    if [ -z "$codex_bin" ]; then
-        echo "  Warning: Codex archive did not contain a codex binary"
-        return 1
-    fi
-    chmod +x "$codex_bin"
-    if ! install_to "$codex_bin" "$BIN_DIR/codex"; then
-        echo "  Warning: failed to install Codex CLI to $BIN_DIR/codex"
-        return 1
-    fi
-    if ! codex --version &>/dev/null; then
-        echo "  Codex CLI install failed — binary not working"
-        return 1
-    fi
-    manifest_add_path "$BIN_DIR/codex"
-    echo "  Codex CLI $(codex --version 2>&1 | head -1) installed to $BIN_DIR"
+    record_command_if_managed codex || true
+    manifest_add_path "$HOME/.local/lib/node_modules/@openai/codex"
+    echo "  Codex CLI $(codex --version 2>&1 | head -1) installed. Run 'codex' to authenticate."
 }
 
 install_tpm() {

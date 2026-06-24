@@ -127,7 +127,7 @@ Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.
 
 `is_chpc()` in `lib/common.sh` detects CHPC systems via hostname (`*.chpc.utah.edu`) or path (`/uufs/chpc.utah.edu`). When on CHPC, `install.sh` automatically:
 
-- Installs gh, Node.js, uv, btop, Neovim, Claude Code, and Codex via direct binary download (same as non-CHPC)
+- Installs gh, Node.js, uv, btop, and Neovim via direct binary download, and Claude Code + Codex from npm (`@anthropic-ai/claude-code`, `@openai/codex`) — same as non-CHPC
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates agent settings even if the CLIs are not currently installed or loaded
 - Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC
