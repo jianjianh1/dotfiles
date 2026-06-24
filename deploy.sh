@@ -179,23 +179,15 @@ copy_local_file_to_remote() {
         return 1
     fi
 
+    # Computed once: drives both the idempotency pre-check and the
+    # post-transfer content verification below.
+    local local_sum
+    local_sum="$(sha256_file "$local_path" 2>/dev/null || true)"
+
     # Idempotency: skip copy if remote file is byte-identical. FORCE_COPY=1
-    # bypasses this (e.g. to rewrite permissions). The sha256 sum is compared
-    # over the remote path using the same shell expansion the write uses below.
-    if [ "${FORCE_COPY:-0}" != 1 ]; then
-        local local_sum remote_sum
-        local_sum="$(sha256_file "$local_path" 2>/dev/null || true)"
-        remote_sum="$(remote_exec "
-            dest=\"$remote_path\"
-            if [ -f \"\$dest\" ]; then
-                if command -v sha256sum >/dev/null 2>&1; then
-                    sha256sum \"\$dest\" 2>/dev/null | awk '{print \$1}'
-                elif command -v shasum >/dev/null 2>&1; then
-                    shasum -a 256 \"\$dest\" 2>/dev/null | awk '{print \$1}'
-                fi
-            fi
-        " 2>/dev/null || true)"
-        if [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ]; then
+    # bypasses this (e.g. to rewrite permissions).
+    if [ "${FORCE_COPY:-0}" != 1 ] && [ -n "$local_sum" ]; then
+        if [ "$local_sum" = "$(remote_file_sha256 "$remote_path")" ]; then
             echo "    (unchanged — skipping)"
             return 0
         fi
@@ -239,15 +231,32 @@ copy_local_file_to_remote() {
         trap - EXIT HUP INT TERM
         exit \$status
     "
+    # Run the write in a non-login shell: a login shell sources ~/.bash_logout
+    # on the `exit` builtin, and on some hosts its trailing command fails with
+    # no tty, which under the remote `set -e` masks an otherwise-successful
+    # copy with a non-zero exit (see remote_exec_nologin).
     if [ -n "$remote_log" ]; then
-        base64 < "$local_path" | remote_exec "$remote_cmd" >"$remote_log" 2>&1 || rc=$?
+        base64 < "$local_path" | remote_exec_nologin "$remote_cmd" >"$remote_log" 2>&1 || rc=$?
     else
-        base64 < "$local_path" | remote_exec "$remote_cmd" || rc=$?
+        base64 < "$local_path" | remote_exec_nologin "$remote_cmd" || rc=$?
     fi
 
-    # Always say *something* on failure. If we have captured output, replay
-    # it; otherwise print rc/host/dest so the user has a starting point.
-    if [ "$rc" -ne 0 ]; then
+    # Trust the bytes on disk, not the exit code. The non-login shell above
+    # makes rc reliable, but verifying the destination by sha256 is the
+    # durable guarantee: a benign non-zero from any remote-shell quirk can
+    # never mask a copy that landed, and a real failure is still caught.
+    local verify_sum ok=0
+    verify_sum="$(remote_file_sha256 "$remote_path")"
+    if [ -n "$local_sum" ] && [ -n "$verify_sum" ]; then
+        [ "$local_sum" = "$verify_sum" ] && ok=1
+    elif [ "$rc" -eq 0 ]; then
+        # No sha tool to compare with; fall back to the (now reliable) rc.
+        ok=1
+    fi
+
+    # On genuine failure, replay captured remote output if any, else print
+    # rc/host/dest so the user has a starting point.
+    if [ "$ok" -ne 1 ]; then
         if [ -n "$remote_log" ] && [ -s "$remote_log" ]; then
             sed 's/^/    [remote] /' "$remote_log" >&2
         else
@@ -256,7 +265,8 @@ copy_local_file_to_remote() {
         fi
     fi
     [ -n "$remote_log" ] && rm -f "$remote_log"
-    return "$rc"
+    [ "$ok" -eq 1 ] && return 0
+    return 1
 }
 
 ensure_remote_env_keys_loader() {
@@ -318,14 +328,45 @@ SSH_SOCKET=""
 SSH_SOCKET_DIR=""
 REMOTE_HOST=""
 
-remote_exec() {
+_remote_exec() {
+    local shellflag="$1" cmd="$2" quoted_cmd
     if [ -n "$SSH_SOCKET" ] && ! ssh -O check -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" </dev/null &>/dev/null; then
         error "SSH connection dropped. Try re-running the script."
         return 1
     fi
-    local cmd="$1" quoted_cmd
     quoted_cmd="$(quote_for_bash_lc "$cmd")"
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash -lc $quoted_cmd"
+    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "export TERM=dumb PATH=\"\$HOME/.local/bin:/usr/local/bin:\$PATH\"; bash $shellflag $quoted_cmd"
+}
+
+# Run a remote command in a login shell. Login shells source the user's
+# profile, so PATH picks up tools like claude/codex/gh. This is the default
+# for almost every caller.
+remote_exec() { _remote_exec -lc "$1"; }
+
+# Run a remote command in a NON-login shell. Use for self-contained commands
+# that only need coreutils (already on the default sshd PATH) and must not
+# inherit the login shell's exit-time behavior: a login shell sources
+# ~/.bash_logout when the `exit` builtin runs, and on some hosts (e.g.
+# Ubuntu/CloudLab) its trailing `clear_console -q` returns non-zero with no
+# tty. Under `set -e` that logout status becomes the command's exit status
+# and masks an otherwise-successful run (see copy_local_file_to_remote).
+remote_exec_nologin() { _remote_exec -c "$1"; }
+
+# Echo the sha256 of a file on the remote, or nothing if it is absent or no
+# sha tool is available. Runs in a non-login shell (sha256sum/shasum/awk are
+# all on the default PATH) so its exit status stays trustworthy.
+remote_file_sha256() {
+    local remote_path="$1"
+    remote_exec_nologin "
+        dest=\"$remote_path\"
+        if [ -f \"\$dest\" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                sha256sum \"\$dest\" 2>/dev/null | awk '{print \$1}'
+            elif command -v shasum >/dev/null 2>&1; then
+                shasum -a 256 \"\$dest\" 2>/dev/null | awk '{print \$1}'
+            fi
+        fi
+    " 2>/dev/null || true
 }
 
 # Like remote_exec, but captures stdout reliably even when the remote's login
