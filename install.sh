@@ -851,9 +851,18 @@ install_gh_cli() {
         return
     fi
     if command -v gh &>/dev/null && ! $FORCE; then
-        record_command_if_managed gh || true
-        echo "gh already installed: $(gh --version | head -1)"
-        return 0
+        local gh_path
+        gh_path="$(command -v gh)"
+        if [[ "$gh_path" == /snap/* ]]; then
+            # A confined snap gh cannot exec ssh (git@github.com clones fail with
+            # "cannot exec 'ssh': Permission denied"). Fall through to install the
+            # unconfined binary, which ~/.local/bin shadows ahead of /snap/bin.
+            echo "  gh is a confined snap ($gh_path); installing unconfined binary to shadow it..."
+        else
+            record_command_if_managed gh || true
+            echo "gh already installed: $(gh --version | head -1)"
+            return 0
+        fi
     fi
     echo "Installing GitHub CLI..."
     local GH_VERSION
