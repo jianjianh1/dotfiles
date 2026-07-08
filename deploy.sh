@@ -498,6 +498,117 @@ bootstrap_remote_gh_cli() {
     '
 }
 
+# --- Remote git health ---
+#
+# On some remotes the login shell exports a stale GIT_EXEC_PATH/GIT_TEMPLATE_DIR
+# (conda hooks, `module load`, a manual export) that no longer matches the git
+# binary actually on PATH, or git itself is a partial install missing its
+# git-core helpers. Either way `git-remote-https` can't be found and every
+# HTTPS clone/pull dies with "git: 'remote-https' is not a git command". These
+# helpers detect a git that can actually do HTTPS, and bootstrap one when none
+# can.
+
+# Print a self-contained POSIX-sh snippet that echoes the first git whose
+# git-remote-https helper resolves (after clearing GIT_EXEC_PATH/
+# GIT_TEMPLATE_DIR), or exits non-zero if none work. Kept as a string so it can
+# run on the remote via remote_capture AND be eval'd locally by the test suite.
+# The candidate list is overridable via DOTFILES_GIT_CANDIDATES purely as a
+# test seam; production leaves it unset and uses the default list.
+remote_git_probe_snippet() {
+    cat <<'SNIPPET'
+unset GIT_EXEC_PATH GIT_TEMPLATE_DIR
+candidates="${DOTFILES_GIT_CANDIDATES:-$(command -v git 2>/dev/null) /usr/bin/git /usr/local/bin/git $HOME/.local/bin/git /bin/git}"
+for g in $candidates; do
+    [ -n "$g" ] && [ -x "$g" ] || continue
+    ep="$("$g" --exec-path 2>/dev/null)" || continue
+    if [ -n "$ep" ] && [ -x "$ep/git-remote-https" ]; then
+        printf '%s\n' "$g"
+        exit 0
+    fi
+    if command -v git-remote-https >/dev/null 2>&1; then
+        printf '%s\n' "$g"
+        exit 0
+    fi
+done
+exit 1
+SNIPPET
+}
+
+# Echo the remote git that can do HTTPS (or empty). remote_capture strips any
+# login banner so the returned path is clean.
+remote_usable_git() {
+    remote_capture "$(remote_git_probe_snippet)" 2>/dev/null || true
+}
+
+# Best-effort, no-root portable git install for Debian/Ubuntu remotes whose git
+# is missing its git-core files. Downloads the .debs, extracts them under
+# ~/.local/git-portable, and drops a ~/.local/bin/git wrapper that points
+# GIT_EXEC_PATH/GIT_TEMPLATE_DIR at the extracted tree. Returns non-zero on any
+# non-Debian host or if the result still can't resolve git-remote-https, so the
+# caller can fall back to a clear diagnostic.
+bootstrap_remote_git() {
+    remote_exec '
+        set -u
+        if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+            echo "portable git bootstrap only supports Debian/Ubuntu remotes" >&2
+            exit 1
+        fi
+
+        prefix="$HOME/.local/git-portable"
+        wrapper="$HOME/.local/bin/git"
+        tmp="$(mktemp -d)" || exit 1
+        trap '\''rm -rf "$tmp"'\'' EXIT
+
+        rm -rf "$prefix"
+        mkdir -p "$prefix" "$HOME/.local/bin"
+
+        ( cd "$tmp" && apt-get download git git-man liberror-perl >/dev/null 2>&1 ) || {
+            echo "apt-get download failed (no package index or offline?)" >&2
+            exit 1
+        }
+        found=0
+        for deb in "$tmp"/*.deb; do
+            [ -f "$deb" ] || continue
+            found=1
+            dpkg -x "$deb" "$prefix" || { echo "dpkg -x failed for $deb" >&2; exit 1; }
+        done
+        [ "$found" = 1 ] || { echo "no .deb files downloaded" >&2; exit 1; }
+
+        [ -x "$prefix/usr/bin/git" ] || { echo "extracted tree has no usr/bin/git" >&2; exit 1; }
+
+        cat > "$wrapper" <<WRAP
+#!/bin/sh
+export GIT_EXEC_PATH="$prefix/usr/lib/git-core"
+export GIT_TEMPLATE_DIR="$prefix/usr/share/git-core/templates"
+exec "$prefix/usr/bin/git" "\$@"
+WRAP
+        chmod 755 "$wrapper"
+
+        ep="$("$wrapper" --exec-path 2>/dev/null)" || { echo "bootstrapped git failed to run" >&2; exit 1; }
+        [ -n "$ep" ] && [ -x "$ep/git-remote-https" ] || {
+            echo "bootstrapped git still lacks git-remote-https" >&2
+            exit 1
+        }
+    '
+}
+
+# Dump remote git state so an unrecoverable failure is actionable instead of an
+# opaque "exit status 128".
+remote_git_diagnose() {
+    remote_exec '
+        echo "git on PATH: $(command -v git 2>/dev/null || echo none)"
+        git --version 2>&1 | head -1
+        echo "exec-path:   $(git --exec-path 2>/dev/null || echo unknown)"
+        ep="$(git --exec-path 2>/dev/null || true)"
+        if [ -n "$ep" ] && [ -x "$ep/git-remote-https" ]; then
+            echo "git-remote-https: present"
+        else
+            echo "git-remote-https: MISSING"
+        fi
+        echo "os: $(uname -srm 2>/dev/null || echo unknown)"
+    ' 2>&1 | sed 's/^/    /'
+}
+
 cleanup() {
     if [ -n "$SSH_SOCKET" ]; then
         ssh -O exit -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null || true
@@ -1145,6 +1256,28 @@ step_clone_setup() {
 
     local REMOTE_DIR='$HOME/.dotfiles'
 
+    # Make sure the remote git can actually do HTTPS before we lean on it. A
+    # stale GIT_EXEC_PATH/GIT_TEMPLATE_DIR (inherited from the remote login
+    # profile) or a partial git install makes every HTTPS clone/pull die with
+    # "git: 'remote-https' is not a git command". Pick a git whose
+    # git-remote-https helper resolves, bootstrapping a portable one if none
+    # does, and run all git/gh commands below with the env sanitized.
+    local GOOD_GIT GDIR
+    local GIT_ENV='unset GIT_EXEC_PATH GIT_TEMPLATE_DIR;'
+    GOOD_GIT="$(remote_usable_git)"
+    if [ -z "$GOOD_GIT" ]; then
+        echo "  Remote git can't run HTTPS operations — bootstrapping a portable git..."
+        bootstrap_remote_git && GOOD_GIT="$(remote_usable_git)"
+    fi
+    if [ -z "$GOOD_GIT" ]; then
+        error "No usable git on remote (git-remote-https helper missing)"
+        remote_git_diagnose
+        echo "    Remedy: install a complete git (e.g. 'sudo apt install git',"
+        echo "    'module load git') and re-run."
+        return 1
+    fi
+    GDIR="$(dirname "$GOOD_GIT")"
+
     if remote_exec "[ -d $REMOTE_DIR/.git ]"; then
         echo "  Repo exists — pulling latest..."
         # If the remote working tree is dirty, list what's dirty so the user
@@ -1153,12 +1286,12 @@ step_clone_setup() {
         # conflict on pop leaves the changes in `git stash list` for the
         # user to recover with `git stash pop` after SSHing in.
         local dirty
-        dirty="$(remote_exec "cd $REMOTE_DIR && git status --porcelain" 2>/dev/null || true)"
+        dirty="$(remote_exec "$GIT_ENV cd $REMOTE_DIR && '$GOOD_GIT' status --porcelain" 2>/dev/null || true)"
         if [ -n "$dirty" ]; then
             warn "Remote $REMOTE_DIR has local changes — stashing for the pull:"
             printf "%s\n" "$dirty" | sed 's/^/    /'
         fi
-        if ! remote_exec "cd $REMOTE_DIR && git pull --autostash --ff-only"; then
+        if ! remote_exec "$GIT_ENV cd $REMOTE_DIR && '$GOOD_GIT' pull --autostash --ff-only"; then
             error "git pull --autostash --ff-only failed on $REMOTE_DIR"
             echo "    The remote branch likely diverged. SSH in and reconcile,"
             echo "    then re-run. Any auto-stashed changes are in 'git stash list'."
@@ -1167,14 +1300,15 @@ step_clone_setup() {
     else
         echo "  Cloning $REPO_SLUG..."
         if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
-            # Prefer gh repo clone (uses gh's own auth)
-            if ! remote_exec "cd \$HOME && gh repo clone $REPO_SLUG .dotfiles"; then
+            # Prefer gh repo clone (uses gh's own auth). Prepend the chosen
+            # git's dir so gh's child git process is the healthy one.
+            if ! remote_exec "$GIT_ENV PATH='$GDIR':\$PATH; cd \$HOME && gh repo clone $REPO_SLUG .dotfiles"; then
                 error "gh repo clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
                 return 1
             fi
         else
             # Fallback to git clone over HTTPS
-            if ! remote_exec "git clone $REPO_URL $REMOTE_DIR"; then
+            if ! remote_exec "$GIT_ENV '$GOOD_GIT' clone $REPO_URL $REMOTE_DIR"; then
                 error "git clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
                 return 1
             fi

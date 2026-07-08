@@ -104,6 +104,8 @@ Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc
 
 Claude and Codex copy only known auth files (`~/.claude/.credentials.json`, `~/.codex/auth.json`) from the local machine to the remote. GitHub CLI auth is recreated from the local `gh auth token` before cloning, with `hosts.yml` used only as a plaintext-token fallback. Keychain-backed Claude auth is reported as non-transferable and must be set up on the remote with `claude auth login` or `claude setup-token`. Auth material is **never** committed to this repo (see `.gitignore`).
 
+Before cloning, `step_clone_setup` sanitizes the remote git env (`unset GIT_EXEC_PATH GIT_TEMPLATE_DIR`, which a stale login profile can leave pointing at the wrong location) and probes for a `git` whose `git-remote-https` helper actually resolves — falling back to bootstrapping a portable git into `~/.local/bin` (no root, Debian/Ubuntu via `apt-get download` + `dpkg -x`) when the system git can't do HTTPS. If no usable git can be produced, the step fails with a diagnostic instead of an opaque `git: 'remote-https' is not a git command`.
+
 ## Vim & Neovim
 
 - **editor/vimrc** is plugin-free (uses only built-in vim features + netrw). Don't add plugin managers or plugin dependencies.

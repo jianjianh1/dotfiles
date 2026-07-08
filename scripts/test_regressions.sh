@@ -341,6 +341,52 @@ test_deploy_sources_without_prompting() (
     command -v deploy_main >/dev/null || fail "deploy_main missing after source"
 )
 
+test_remote_git_probe_snippet() (
+    local tmp snippet out good_exec good_git bad_exec bad_git
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME" "$tmp/bin"
+    # Keep git-core off PATH so `command -v git-remote-https` only sees what we
+    # plant here, making the cases deterministic on any host.
+    export PATH="$tmp/bin:/usr/bin:/bin"
+
+    # shellcheck source=deploy.sh
+    . "$DIR/deploy.sh"
+    snippet="$(remote_git_probe_snippet)"
+
+    # Case 1: a git whose --exec-path holds an executable git-remote-https.
+    good_exec="$tmp/good-exec"
+    mkdir -p "$good_exec"
+    printf '#!/bin/sh\ntrue\n' > "$good_exec/git-remote-https"
+    chmod +x "$good_exec/git-remote-https"
+    good_git="$tmp/good-git"
+    printf '#!/bin/sh\n[ "$1" = "--exec-path" ] && echo "%s"\nexit 0\n' "$good_exec" > "$good_git"
+    chmod +x "$good_git"
+    out="$(DOTFILES_GIT_CANDIDATES="$good_git" bash -c "$snippet")" ||
+        fail "probe rejected a healthy git"
+    [ "$out" = "$good_git" ] || fail "probe returned '$out', expected '$good_git'"
+
+    # Case 2: a git whose --exec-path lacks git-remote-https, none on PATH.
+    bad_exec="$tmp/bad-exec"
+    mkdir -p "$bad_exec"
+    bad_git="$tmp/bad-git"
+    printf '#!/bin/sh\n[ "$1" = "--exec-path" ] && echo "%s"\nexit 0\n' "$bad_exec" > "$bad_git"
+    chmod +x "$bad_git"
+    if out="$(DOTFILES_GIT_CANDIDATES="$bad_git" bash -c "$snippet")"; then
+        fail "probe accepted a git with no git-remote-https (returned '$out')"
+    fi
+    [ -z "$out" ] || fail "probe emitted '$out' for an unusable git"
+
+    # Case 3: broken --exec-path but git-remote-https present on PATH.
+    printf '#!/bin/sh\ntrue\n' > "$tmp/bin/git-remote-https"
+    chmod +x "$tmp/bin/git-remote-https"
+    out="$(DOTFILES_GIT_CANDIDATES="$bad_git" bash -c "$snippet")" ||
+        fail "probe rejected a git whose helper is on PATH"
+    [ "$out" = "$bad_git" ] || fail "probe returned '$out', expected '$bad_git'"
+)
+
 test_auth_state_helpers() (
     local tmp state quoted quoted_value
     tmp="$(mktemp -d)"
@@ -999,6 +1045,7 @@ main() {
     run_test test_detect_theme_installs_to_local_bin
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
+    run_test test_remote_git_probe_snippet
     run_test test_auth_state_helpers
     run_test test_setup_dry_run_is_non_mutating
     run_test test_chpc_config_rendering_uses_repo_files
