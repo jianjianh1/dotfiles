@@ -341,6 +341,67 @@ test_deploy_sources_without_prompting() (
     command -v deploy_main >/dev/null || fail "deploy_main missing after source"
 )
 
+test_remote_dotfiles_preflight_snippet() (
+    local tmp snippet
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME"
+
+    # shellcheck source=deploy.sh
+    . "$DIR/deploy.sh"
+    snippet="$(remote_dotfiles_preflight_snippet)"
+
+    mkdir -p "$HOME/.dotfiles"
+    DOTFILES_REMOTE_DIR="$HOME/.dotfiles" bash -c "$snippet" >/dev/null ||
+        fail "preflight rejected an empty non-git dotfiles directory"
+    [ ! -e "$HOME/.dotfiles" ] ||
+        fail "preflight did not remove an empty non-git dotfiles directory"
+
+    mkdir -p "$HOME/.dotfiles"
+    printf 'keep\n' > "$HOME/.dotfiles/file"
+    if DOTFILES_REMOTE_DIR="$HOME/.dotfiles" bash -c "$snippet" >/dev/null 2>&1; then
+        fail "preflight accepted a non-empty non-git dotfiles directory"
+    fi
+    [ -f "$HOME/.dotfiles/file" ] ||
+        fail "preflight removed user content from a non-empty dotfiles directory"
+)
+
+test_git_clone_command_uses_gh_only_for_credentials() (
+    local tmp good_git cmd fallback_cmd
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME" "$tmp/bin"
+    good_git="$tmp/bin/git"
+    printf '#!/bin/sh\nexit 0\n' > "$good_git"
+    chmod +x "$good_git"
+
+    # shellcheck source=deploy.sh
+    . "$DIR/deploy.sh"
+
+    cmd="$(remote_git_clone_cmd 'unset GIT_EXEC_PATH GIT_TEMPLATE_DIR;' "$tmp/bin" "$good_git" "https://github.com/jianjianh1/dotfiles.git" '$HOME/.dotfiles' true)"
+    printf '%s\n' "$cmd" | grep -Fq "'$good_git'" ||
+        fail "gh-authenticated clone command did not use the selected git: $cmd"
+    printf '%s\n' "$cmd" | grep -Fq "credential.https://github.com.helper='!gh auth git-credential'" ||
+        fail "gh-authenticated clone command did not use gh credential helper: $cmd"
+    printf '%s\n' "$cmd" | grep -Fq "clone https://github.com/jianjianh1/dotfiles.git" ||
+        fail "gh-authenticated clone command did not clone the repo URL: $cmd"
+    printf '%s\n' "$cmd" | grep -Fq '$HOME/.dotfiles' ||
+        fail "gh-authenticated clone command did not target remote dotfiles dir: $cmd"
+    if printf '%s\n' "$cmd" | grep -q 'gh repo clone'; then
+        fail "gh-authenticated clone command still uses gh repo clone"
+    fi
+
+    fallback_cmd="$(remote_git_clone_cmd 'unset GIT_EXEC_PATH GIT_TEMPLATE_DIR;' "$tmp/bin" "$good_git" "https://github.com/jianjianh1/dotfiles.git" '$HOME/.dotfiles' false)"
+    printf '%s\n' "$fallback_cmd" | grep -Fq "'$good_git' clone https://github.com/jianjianh1/dotfiles.git" ||
+        fail "fallback clone command did not use plain git clone: $fallback_cmd"
+    printf '%s\n' "$fallback_cmd" | grep -Fq '$HOME/.dotfiles' ||
+        fail "fallback clone command did not target remote dotfiles dir: $fallback_cmd"
+)
+
 test_remote_git_probe_snippet() (
     local tmp snippet out good_exec good_git bad_exec bad_git
     tmp="$(mktemp -d)"
@@ -1045,6 +1106,8 @@ main() {
     run_test test_detect_theme_installs_to_local_bin
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
+    run_test test_remote_dotfiles_preflight_snippet
+    run_test test_git_clone_command_uses_gh_only_for_credentials
     run_test test_remote_git_probe_snippet
     run_test test_auth_state_helpers
     run_test test_setup_dry_run_is_non_mutating

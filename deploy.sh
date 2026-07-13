@@ -609,6 +609,77 @@ remote_git_diagnose() {
     ' 2>&1 | sed 's/^/    /'
 }
 
+remote_dotfiles_preflight_snippet() {
+    cat <<'SNIPPET'
+set -u
+target="${DOTFILES_REMOTE_DIR:-$HOME/.dotfiles}"
+if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
+    echo "Remote HOME is not writable: $HOME" >&2
+    ls -ld "$HOME" >&2 || true
+    exit 1
+fi
+if [ -e "$target" ] && [ ! -d "$target" ]; then
+    echo "Remote $target exists but is not a directory" >&2
+    ls -la "$target" >&2 || true
+    exit 1
+fi
+if [ -d "$target" ] && [ ! -d "$target/.git" ]; then
+    if rmdir "$target" 2>/dev/null; then
+        echo "  Removed empty non-git $target"
+    else
+        echo "Remote $target exists but is not a git repo and is not empty" >&2
+        ls -la "$target" >&2 || true
+        exit 1
+    fi
+fi
+SNIPPET
+}
+
+remote_prepare_dotfiles_dir() {
+    local remote_dir="$1"
+
+    remote_exec "DOTFILES_REMOTE_DIR=\"$remote_dir\"; $(remote_dotfiles_preflight_snippet)"
+}
+
+remote_git_clone_cmd() {
+    local git_env="$1" gdir="$2" good_git="$3" repo_url="$4" remote_dir="$5" use_gh="${6:-false}"
+
+    if [ "$use_gh" = true ]; then
+        printf "%s PATH='%s':\$PATH; '%s' -c credential.helper= -c credential.https://github.com.helper='!gh auth git-credential' clone %s %s" \
+            "$git_env" "$gdir" "$good_git" "$repo_url" "$remote_dir"
+    else
+        printf "%s '%s' clone %s %s" "$git_env" "$good_git" "$repo_url" "$remote_dir"
+    fi
+}
+
+remote_clone_diagnose() {
+    local remote_dir="$1" good_git="$2"
+
+    remote_exec "
+        target=\"$remote_dir\"
+        echo 'Remote clone diagnostics:'
+        printf 'HOME=%s\n' \"\$HOME\"
+        printf 'PWD=%s\n' \"\$PWD\"
+        ls -ld \"\$HOME\" \"\$target\" 2>&1 || true
+        stat -c '%U:%G %a %n' \"\$HOME\" \"\$target\" 2>/dev/null || \
+            stat -f '%Su:%Sg %p %N' \"\$HOME\" \"\$target\" 2>/dev/null || true
+        df -h \"\$HOME\" 2>/dev/null || true
+        echo \"git: $good_git\"
+        '$good_git' --version 2>&1 | head -1 || true
+        if command -v gh >/dev/null 2>&1; then
+            gh_path=\$(command -v gh)
+            echo \"gh: \$gh_path\"
+            gh --version 2>&1 | head -1 || true
+            gh auth status 2>&1 | sed -n '1,8p' || true
+            case \"\$gh_path\" in
+                /snap/bin/*) echo 'note: gh is installed via Snap; deploy uses git clone to avoid Snap filesystem restrictions.' ;;
+            esac
+        else
+            echo 'gh: none'
+        fi
+    " 2>&1 | sed 's/^/    /'
+}
+
 cleanup() {
     if [ -n "$SSH_SOCKET" ]; then
         ssh -O exit -o "ControlPath=$SSH_SOCKET" "$REMOTE_HOST" &>/dev/null || true
@@ -1299,17 +1370,25 @@ step_clone_setup() {
         fi
     else
         echo "  Cloning $REPO_SLUG..."
+        if ! remote_prepare_dotfiles_dir "$REMOTE_DIR"; then
+            error "Remote clone destination is not usable: $REMOTE_DIR"
+            remote_clone_diagnose "$REMOTE_DIR" "$GOOD_GIT"
+            return 1
+        fi
         if remote_exec "command -v gh &>/dev/null && gh auth status &>/dev/null"; then
-            # Prefer gh repo clone (uses gh's own auth). Prepend the chosen
-            # git's dir so gh's child git process is the healthy one.
-            if ! remote_exec "$GIT_ENV PATH='$GDIR':\$PATH; cd \$HOME && gh repo clone $REPO_SLUG .dotfiles"; then
-                error "gh repo clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
+            # Use git for the filesystem write and gh only as an ephemeral
+            # credential helper. Snap-packaged gh can authenticate fine but
+            # may be confined away from hidden HOME paths like ~/.dotfiles.
+            if ! remote_exec "$(remote_git_clone_cmd "$GIT_ENV" "$GDIR" "$GOOD_GIT" "$REPO_URL" "$REMOTE_DIR" true)"; then
+                error "git clone failed using GitHub CLI credentials"
+                remote_clone_diagnose "$REMOTE_DIR" "$GOOD_GIT"
                 return 1
             fi
         else
             # Fallback to git clone over HTTPS
-            if ! remote_exec "$GIT_ENV '$GOOD_GIT' clone $REPO_URL $REMOTE_DIR"; then
+            if ! remote_exec "$(remote_git_clone_cmd "$GIT_ENV" "$GDIR" "$GOOD_GIT" "$REPO_URL" "$REMOTE_DIR" false)"; then
                 error "git clone failed — verify GitHub auth (run 'gh auth login' on the remote)"
+                remote_clone_diagnose "$REMOTE_DIR" "$GOOD_GIT"
                 return 1
             fi
         fi
