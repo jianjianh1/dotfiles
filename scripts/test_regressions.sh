@@ -1084,6 +1084,75 @@ test_install_claude_skills_dry_run() (
     return 0
 )
 
+test_update_guard_decisions() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home"; mkdir -p "$HOME"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    # shellcheck disable=SC2034 # consumed by update_guard
+    FORCE=false
+    # shellcheck disable=SC2034 # consumed by update_guard
+    NO_UPDATE=false
+
+    # A present tool reporting version 1.2.3 (a shell function is resolvable by
+    # command -v and callable as "$cmd --version", so it stands in for a binary).
+    ftool() { echo "ftool 1.2.3"; }
+
+    [ "$(tool_version ftool)" = "1.2.3" ] || fail "tool_version did not extract 1.2.3"
+
+    # Missing command -> (re)install (return 1).
+    if update_guard nope nope-missing-cmd 9.9.9 >/dev/null; then
+        fail "update_guard skipped a missing tool"
+    fi
+    # Present and current -> skip (return 0).
+    update_guard ftool ftool 1.2.3 >/dev/null || fail "update_guard did not skip a current tool"
+    # Installed newer than 'latest' -> skip.
+    update_guard ftool ftool 1.0.0 >/dev/null || fail "update_guard did not skip a newer-than-latest tool"
+    # Outdated -> install (return 1).
+    if update_guard ftool ftool 2.0.0 >/dev/null; then
+        fail "update_guard skipped an outdated tool"
+    fi
+    # Latest unknown (empty) -> keep current (return 0), never churn.
+    update_guard ftool ftool "" >/dev/null || fail "update_guard did not keep tool on unknown latest"
+    # Non-numeric / v-prefixed tag is normalized ("v2.0.0" -> outdated -> install).
+    if update_guard ftool ftool v2.0.0 >/dev/null; then
+        fail "update_guard did not normalize a v-prefixed latest"
+    fi
+    # A jq-style tag ("jq-1.7.1") equal to current -> skip.
+    ftool() { echo "ftool 1.7.1"; }
+    update_guard ftool ftool jq-1.7.1 >/dev/null || fail "update_guard did not normalize a jq-style tag"
+
+    # --force always (re)installs, even when current.
+    ftool() { echo "ftool 1.2.3"; }
+    # shellcheck disable=SC2034
+    FORCE=true
+    if update_guard ftool ftool 1.2.3 >/dev/null; then
+        fail "update_guard skipped despite --force"
+    fi
+    # shellcheck disable=SC2034
+    FORCE=false
+    # --no-update skips even when outdated.
+    # shellcheck disable=SC2034
+    NO_UPDATE=true
+    update_guard ftool ftool 99.0.0 >/dev/null || fail "update_guard did not honor --no-update"
+)
+
+test_install_accepts_no_update_flag() (
+    local out
+    # --no-update is parsed (sets the flag) before --help short-circuits, so this
+    # exits 0 with usage text and must never fall through to "Unknown option".
+    out="$(bash "$DIR/install.sh" --no-update --help 2>&1)" ||
+        fail "install.sh --no-update --help did not exit 0"
+    printf '%s\n' "$out" | grep -q -- '--no-update' ||
+        fail "install.sh --help does not document --no-update"
+    if printf '%s\n' "$out" | grep -q 'Unknown option'; then
+        fail "install.sh treated --no-update as an unknown option"
+    fi
+)
+
 run_test() {
     local name="$1"
 
@@ -1126,6 +1195,8 @@ main() {
     run_test test_chpc_allocs_python36_compatible
     run_test test_skill_files_have_valid_frontmatter
     run_test test_install_claude_skills_dry_run
+    run_test test_update_guard_decisions
+    run_test test_install_accepts_no_update_flag
     echo "All regression tests passed."
 }
 

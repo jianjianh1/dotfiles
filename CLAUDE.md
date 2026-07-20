@@ -90,10 +90,16 @@ Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc
 ## Setup
 
 ```bash
-./install.sh               # idempotent — re-run is safe
-./install.sh --force       # reinstall CLI tools even if present
+./install.sh               # idempotent — re-run auto-updates outdated CLI tools
+./install.sh --no-update   # keep already-installed tools as-is (offline / fast path)
+./install.sh --force       # reinstall CLI tools even if present and current
 ./install.sh --use-modules # on CHPC, prefer module load over binary install
 ```
+
+Re-running is version-aware: each present tool is compared against its latest release
+(`gh_latest` for GitHub binaries, `npm view` for `claude`/`codex`, the Node LTS index,
+`brew outdated` on macOS) via the shared `update_guard`/`tool_version` helpers and
+upgraded only when outdated. A failed version lookup leaves the tool untouched.
 
 ## Remote deploy
 

@@ -9,10 +9,13 @@ Personal dotfiles + multi-host bootstrap. One repo to set up a fresh local machi
 ```bash
 git clone <this-repo> ~/.dotfiles
 cd ~/.dotfiles
-./install.sh               # idempotent — re-run is safe
-./install.sh --force       # reinstall CLI tools even if present
+./install.sh               # idempotent — re-run auto-updates outdated CLI tools
+./install.sh --no-update   # keep already-installed tools as-is (offline / fast path)
+./install.sh --force       # reinstall CLI tools even if present and current
 ./install.sh --dry-run     # show planned steps without changing files
 ```
+
+Re-running `install.sh` keeps every managed CLI tool current: each present tool's version is compared against the latest release (GitHub releases, npm for `claude`/`codex`, the Node LTS index, or `brew outdated` on macOS) and upgraded only when outdated. A failed version lookup (offline, rate-limited) leaves the installed tool untouched. Use `--no-update` (or `NO_UPDATE=1`) to skip the checks entirely.
 
 On macOS, `install.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
 

@@ -55,6 +55,13 @@ Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not 
 | `autoUpdatesChannel` | `stable` | Auto-update channel |
 | `cleanupPeriodDays` | `30` | Clean old data after 30 days |
 
+`autoUpdatesChannel` is Claude Code's own in-app updater. Independently, re-running
+`install.sh` keeps the installed `@anthropic-ai/claude-code` and `@openai/codex` npm
+packages current: it compares the installed version against `npm view <pkg> version`
+and reinstalls `<pkg>@latest` only when outdated (skipped under `--no-update`, and on
+CHPC when the tools come from `module load`). See the [README](../README.md#quickstart)
+for the full auto-update behavior across all managed CLI tools.
+
 ### Attribution
 
 | Setting | Value | Purpose |

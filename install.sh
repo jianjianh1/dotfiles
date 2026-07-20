@@ -38,6 +38,7 @@ TREE_SITTER_MODULE_CANDIDATES=()
 CODE_CLI_MODULE_CANDIDATES=()
 FORCE="${FORCE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+NO_UPDATE="${NO_UPDATE:-false}"
 CHPC_USE_MODULES="${CHPC_USE_MODULES:-false}"
 FAILURES=()
 
@@ -95,7 +96,18 @@ brew_install() {
         return 1
     fi
     if command -v "$cmd" &>/dev/null && ! $FORCE; then
-        echo "$cmd already installed: $("$cmd" --version 2>&1 | head -1)"
+        if $NO_UPDATE; then
+            echo "$cmd present (update check skipped)"
+            return 0
+        fi
+        # brew knows outdated state; only upgrade formulae it actually manages.
+        if brew outdated "$formula" 2>/dev/null | grep -q .; then
+            echo "Updating $formula with Homebrew..."
+            brew upgrade "$formula" || return 1
+            hash -r
+            return 0
+        fi
+        echo "$cmd up to date: $("$cmd" --version 2>&1 | head -1)"
         return 0
     fi
     echo "Installing $formula with Homebrew..."
@@ -180,6 +192,40 @@ version_at_least() {
             exit 0
         }
     '
+}
+
+# First dotted numeric version token from `<cmd> --version` (handles
+# "gh version 2.63.0", "jq-1.7.1", "NVIM v0.11.2", "uv 0.5.0", "2.1.83", ...).
+tool_version() {
+    "$1" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1
+}
+
+# Decide whether a caller's install body must run.
+#   returns 1 => (re)install: missing, --force, or installed < latest
+#   returns 0 => skip: present and current, --no-update, or latest unknown
+# Never churns on a failed version fetch (empty $latest => keep what we have).
+update_guard() {
+    local name="$1" cmd="$2" latest="$3" cur
+    command -v "$cmd" &>/dev/null || return 1
+    $FORCE && return 1
+    if $NO_UPDATE; then
+        echo "$name present (update check skipped)"
+        return 0
+    fi
+    # Normalize latest to a bare dotted-numeric version (tags like "jq-1.7.1"
+    # or "v2.63.0" -> "1.7.1" / "2.63.0") so version_at_least compares cleanly.
+    latest="$(printf '%s' "$latest" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+    cur="$(tool_version "$cmd")"
+    if [ -z "$latest" ]; then
+        echo "  $name: latest version unknown; keeping ${cur:-current}"
+        return 0
+    fi
+    if [ -n "$cur" ] && version_at_least "$cur" "$latest"; then
+        echo "$name up to date ($cur)"
+        return 0
+    fi
+    echo "Updating $name ${cur:-?} -> $latest..."
+    return 1
 }
 
 tmux_version() {
@@ -781,10 +827,9 @@ except Exception:
 
 # Install a binary from a GitHub release tarball
 install_gh_binary() {
-    local name="$1" url="$2" bin_name="${3:-$1}"
-    if command -v "$bin_name" &>/dev/null && ! $FORCE; then
+    local name="$1" url="$2" bin_name="${3:-$1}" latest="${4:-}"
+    if update_guard "$bin_name" "$bin_name" "$latest"; then
         record_command_if_managed "$bin_name" || true
-        echo "$bin_name already installed"
         return 0
     fi
     echo "Installing $name..."
@@ -816,10 +861,9 @@ install_gh_binary() {
 
 # Install a bare binary (no archive) from a GitHub release
 install_gh_bare_binary() {
-    local name="$1" url="$2" bin_name="${3:-$1}"
-    if command -v "$bin_name" &>/dev/null && ! $FORCE; then
+    local name="$1" url="$2" bin_name="${3:-$1}" latest="${4:-}"
+    if update_guard "$bin_name" "$bin_name" "$latest"; then
         record_command_if_managed "$bin_name" || true
-        echo "$bin_name already installed"
         return 0
     fi
     echo "Installing $name..."
@@ -850,6 +894,8 @@ install_gh_cli() {
         try_chpc_module_load gh "GitHub CLI" GH_MODULE "${GH_MODULE_CANDIDATES[@]}"
         return
     fi
+    local GH_VERSION
+    GH_VERSION="$(gh_latest cli/cli)" || GH_VERSION=""
     if command -v gh &>/dev/null && ! $FORCE; then
         local gh_path
         gh_path="$(command -v gh)"
@@ -858,15 +904,13 @@ install_gh_cli() {
             # "cannot exec 'ssh': Permission denied"). Fall through to install the
             # unconfined binary, which ~/.local/bin shadows ahead of /snap/bin.
             echo "  gh is a confined snap ($gh_path); installing unconfined binary to shadow it..."
-        else
+        elif update_guard gh gh "$GH_VERSION"; then
             record_command_if_managed gh || true
-            echo "gh already installed: $(gh --version | head -1)"
             return 0
         fi
     fi
     echo "Installing GitHub CLI..."
-    local GH_VERSION
-    GH_VERSION="$(gh_latest cli/cli)" || return 1
+    [ -n "$GH_VERSION" ] || { echo "  Warning: could not determine latest gh version"; return 1; }
     local ARCH GH_ARCH
     ARCH="$(machine_arch)"
     case "$ARCH" in
@@ -905,14 +949,14 @@ install_glow() {
         brew_install glow glow
         return $?
     fi
-    if command -v glow &>/dev/null && ! $FORCE; then
+    local GLOW_VERSION
+    GLOW_VERSION="$(gh_latest charmbracelet/glow)" || GLOW_VERSION=""
+    if update_guard glow glow "$GLOW_VERSION"; then
         record_command_if_managed glow || true
-        echo "glow already installed: $(glow --version)"
         return 0
     fi
     echo "Installing glow..."
-    local GLOW_VERSION
-    GLOW_VERSION="$(gh_latest charmbracelet/glow)" || return 1
+    [ -n "$GLOW_VERSION" ] || { echo "  Warning: could not determine latest glow version"; return 1; }
     local ARCH GLOW_ARCH
     ARCH="$(machine_arch)"
     case "$ARCH" in
@@ -941,14 +985,14 @@ install_gum() {
         brew_install gum gum
         return $?
     fi
-    if command -v gum &>/dev/null && ! $FORCE; then
+    local GUM_VERSION
+    GUM_VERSION="$(gh_latest charmbracelet/gum)" || GUM_VERSION=""
+    if update_guard gum gum "$GUM_VERSION"; then
         record_command_if_managed gum || true
-        echo "gum already installed: $(gum --version)"
         return 0
     fi
     echo "Installing gum..."
-    local GUM_VERSION
-    GUM_VERSION="$(gh_latest charmbracelet/gum)" || return 1
+    [ -n "$GUM_VERSION" ] || { echo "  Warning: could not determine latest gum version"; return 1; }
     local ARCH GUM_ARCH
     ARCH="$(machine_arch)"
     case "$ARCH" in
@@ -998,7 +1042,21 @@ install_jq() {
         return 1
     fi
     install_gh_bare_binary jq \
-        "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}"
+        "https://github.com/jqlang/jq/releases/download/${V}/jq-linux-${DEB_ARCH}" jq "$V"
+}
+
+# Latest Node.js LTS version string (e.g. "v22.4.0"), or empty on failure.
+# Prefer jq, then python3. No grep fallback — the nodejs.org JSON layout is
+# compact but not stable enough for regex, and python3 is effectively always
+# available on our target systems.
+node_latest_lts() {
+    if command -v jq &>/dev/null; then
+        retry curl -sfL https://nodejs.org/dist/index.json \
+            | jq -r '[.[] | select(.lts != false)] | .[0].version'
+    elif command -v python3 &>/dev/null; then
+        retry curl -sfL https://nodejs.org/dist/index.json \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(e['version'] for e in d if e.get('lts')))"
+    fi
 }
 
 install_node() {
@@ -1012,14 +1070,18 @@ install_node() {
         return
     fi
     if command -v node &>/dev/null && ! $FORCE; then
-        local cur_major
+        local cur_major NODE_LATEST
         cur_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+        NODE_LATEST="$(node_latest_lts)" || NODE_LATEST=""
         if [ -n "$cur_major" ] && [ "$cur_major" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
-            record_node_manifest
-            echo "Node.js already installed: $(node --version)"
-            return 0
+            # Meets the floor; defer to the version check for LTS upgrades.
+            if update_guard "Node.js" node "$NODE_LATEST"; then
+                record_node_manifest
+                return 0
+            fi
+        else
+            echo "Node.js $(node --version 2>/dev/null) is below the v${MIN_NODE_MAJOR} floor. Upgrading..."
         fi
-        echo "Node.js $(node --version) is too old (need >= v${MIN_NODE_MAJOR}). Upgrading..."
     fi
     echo "Installing Node.js..."
     local ARCH NODE_ARCH
@@ -1029,23 +1091,11 @@ install_node() {
         aarch64) NODE_ARCH="arm64" ;;
         *)       echo "  Skipping Node.js (unsupported arch: $ARCH)"; return 1 ;;
     esac
-    # Get latest LTS version. Prefer jq, then python3. No grep fallback —
-    # the nodejs.org JSON layout is compact but not stable enough for regex,
-    # and python3 is effectively always available on our target systems.
     local NODE_VERSION
-    if command -v jq &>/dev/null; then
-        NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
-            | jq -r '[.[] | select(.lts != false)] | .[0].version')"
-    elif command -v python3 &>/dev/null; then
-        NODE_VERSION="$(retry curl -sfL https://nodejs.org/dist/index.json \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(e['version'] for e in d if e.get('lts')))")"
-    else
-        echo "  Cannot determine latest Node LTS: neither jq nor python3 is available."
-        echo "  Install one of them and re-run, or pass --force after installing Node manually."
-        return 1
-    fi
+    NODE_VERSION="$(node_latest_lts)"
     if [ -z "$NODE_VERSION" ]; then
-        echo "  Failed to determine latest Node LTS version (empty response)"
+        echo "  Cannot determine latest Node LTS: fetch failed, or neither jq nor python3 is available."
+        echo "  Install one of them and re-run, or pass --force after installing Node manually."
         return 1
     fi
     local TMP
@@ -1107,10 +1157,11 @@ install_uv() {
         try_chpc_module_load uv "uv" UV_MODULE "${UV_MODULE_CANDIDATES[@]}"
         return
     fi
-    if command -v uv &>/dev/null && ! $FORCE; then
+    local UV_VERSION
+    UV_VERSION="$(gh_latest astral-sh/uv)" || UV_VERSION=""
+    if update_guard uv uv "$UV_VERSION"; then
         record_command_if_managed uv || true
         record_command_if_managed uvx || true
-        echo "uv already installed: $(uv --version)"
         return 0
     fi
     echo "Installing uv..."
@@ -1303,14 +1354,16 @@ install_nvim() {
         return
     fi
     if command -v nvim &>/dev/null && ! $FORCE; then
-        local current_version
+        local current_version NVIM_LATEST
         current_version="$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//')"
-        if version_at_least "${current_version}" "0.9.0"; then
+        NVIM_LATEST="$(gh_latest neovim/neovim)" || NVIM_LATEST=""
+        if ! version_at_least "${current_version}" "0.9.0"; then
+            # Below the hard floor: reinstall regardless of latest-version fetch.
+            echo "Upgrading nvim from v${current_version} (below 0.9.0 floor)..."
+        elif update_guard nvim nvim "$NVIM_LATEST"; then
             record_nvim_manifest || true
-            echo "nvim already installed: NVIM v${current_version}"
             return 0
         fi
-        echo "Upgrading nvim from v${current_version}..."
     fi
 
     echo "Installing Neovim..."
@@ -1416,25 +1469,28 @@ install_tree_sitter() {
             return 0
         fi
     fi
-    if command -v tree-sitter &>/dev/null && ! $FORCE; then
-        record_command_if_managed tree-sitter || true
-        echo "tree-sitter already installed: $(tree-sitter --version | head -1)"
-        return 0
-    fi
-    echo "Installing tree-sitter CLI..."
+    # Resolve the target version BEFORE the update check so we compare against
+    # what we would actually install, not raw latest.
     # tree-sitter prebuilts >= 0.25.x are linked against glibc 2.36+. On hosts
     # with older glibc (e.g. Ubuntu 22.04 = glibc 2.35), the prebuilt aborts at
     # load time. 0.24.7 is the last release built on Ubuntu 22.04 / glibc 2.35
     # and is still accepted by nvim-treesitter for parser builds. Bump this pin
     # when an even-newer glibc cutoff is needed.
     local TS_FALLBACK_VERSION="0.24.7"
-    local TS_VERSION detected_glibc
-    TS_VERSION="$(gh_latest tree-sitter/tree-sitter)" || return 1
+    local TS_VERSION detected_glibc ts_pinned=false
+    TS_VERSION="$(gh_latest tree-sitter/tree-sitter)" || TS_VERSION=""
     detected_glibc="$(glibc_version 2>/dev/null || true)"
-    if [ -n "$detected_glibc" ] && ! version_at_least "$detected_glibc" "2.36"; then
-        echo "  glibc $detected_glibc detected; pinning tree-sitter to $TS_FALLBACK_VERSION (last release built on glibc 2.35)."
+    if [ -n "$TS_VERSION" ] && [ -n "$detected_glibc" ] && ! version_at_least "$detected_glibc" "2.36"; then
         TS_VERSION="$TS_FALLBACK_VERSION"
+        ts_pinned=true
     fi
+    if update_guard tree-sitter tree-sitter "$TS_VERSION"; then
+        record_command_if_managed tree-sitter || true
+        return 0
+    fi
+    echo "Installing tree-sitter CLI..."
+    [ -n "$TS_VERSION" ] || { echo "  Warning: could not determine latest tree-sitter version"; return 1; }
+    $ts_pinned && echo "  glibc $detected_glibc detected; pinning tree-sitter to $TS_VERSION (last release built on glibc 2.35)."
     local ARCH TS_ARCH
     ARCH="$(machine_arch)"
     case "$ARCH" in
@@ -1510,58 +1566,58 @@ install_gh_tools() {
 
     if V="$(gh_latest junegunn/fzf)"; then
         run_step "fzf" install_gh_binary fzf \
-            "https://github.com/junegunn/fzf/releases/download/v${V}/fzf-${V}-linux_${DEB_ARCH}.tar.gz"
+            "https://github.com/junegunn/fzf/releases/download/v${V}/fzf-${V}-linux_${DEB_ARCH}.tar.gz" fzf "$V"
     else FAILURES+=("fzf"); fi
 
     if V="$(gh_latest BurntSushi/ripgrep)"; then
         run_step "ripgrep" install_gh_binary ripgrep \
-            "https://github.com/BurntSushi/ripgrep/releases/download/${V}/ripgrep-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" rg
+            "https://github.com/BurntSushi/ripgrep/releases/download/${V}/ripgrep-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" rg "$V"
     else FAILURES+=("ripgrep"); fi
 
     if V="$(gh_latest sharkdp/fd)"; then
         run_step "fd" install_gh_binary fd \
-            "https://github.com/sharkdp/fd/releases/download/v${V}/fd-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+            "https://github.com/sharkdp/fd/releases/download/v${V}/fd-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" fd "$V"
     else FAILURES+=("fd"); fi
 
     if V="$(gh_latest sharkdp/bat)"; then
         run_step "bat" install_gh_binary bat \
-            "https://github.com/sharkdp/bat/releases/download/v${V}/bat-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+            "https://github.com/sharkdp/bat/releases/download/v${V}/bat-v${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" bat "$V"
     else FAILURES+=("bat"); fi
 
     if V="$(gh_latest dandavison/delta)"; then
         local DELTA_LIBC="musl"
         [ "$GH_ARCH" = "aarch64" ] && DELTA_LIBC="gnu"
         run_step "delta" install_gh_binary delta \
-            "https://github.com/dandavison/delta/releases/download/${V}/delta-${V}-${GH_ARCH}-unknown-linux-${DELTA_LIBC}.tar.gz"
+            "https://github.com/dandavison/delta/releases/download/${V}/delta-${V}-${GH_ARCH}-unknown-linux-${DELTA_LIBC}.tar.gz" delta "$V"
     else FAILURES+=("delta"); fi
 
     if V="$(gh_latest ajeetdsouza/zoxide)"; then
         run_step "zoxide" install_gh_binary zoxide \
-            "https://github.com/ajeetdsouza/zoxide/releases/download/v${V}/zoxide-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz"
+            "https://github.com/ajeetdsouza/zoxide/releases/download/v${V}/zoxide-${V}-${GH_ARCH}-unknown-linux-musl.tar.gz" zoxide "$V"
     else FAILURES+=("zoxide"); fi
 
     local LAZYGIT_ARCH="$GH_ARCH"
     [ "$LAZYGIT_ARCH" = "aarch64" ] && LAZYGIT_ARCH="arm64"
     if V="$(gh_latest jesseduffield/lazygit)"; then
         run_step "lazygit" install_gh_binary lazygit \
-            "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz"
+            "https://github.com/jesseduffield/lazygit/releases/download/v${V}/lazygit_${V}_Linux_${LAZYGIT_ARCH}.tar.gz" lazygit "$V"
     else FAILURES+=("lazygit"); fi
 
     if is_chpc && $CHPC_USE_MODULES; then
         run_step "btop" try_chpc_module_load btop "btop" BTOP_MODULE "${BTOP_MODULE_CANDIDATES[@]}"
     elif V="$(gh_latest aristocratos/btop)"; then
         run_step "btop" install_gh_binary btop \
-            "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tar.gz" btop
+            "https://github.com/aristocratos/btop/releases/download/v${V}/btop-${GH_ARCH}-unknown-linux-musl.tar.gz" btop "$V"
     else FAILURES+=("btop"); fi
 
     if V="$(gh_latest starship/starship)"; then
         run_step "starship" install_gh_binary starship \
-            "https://github.com/starship/starship/releases/download/v${V}/starship-${GH_ARCH}-unknown-linux-musl.tar.gz"
+            "https://github.com/starship/starship/releases/download/v${V}/starship-${GH_ARCH}-unknown-linux-musl.tar.gz" starship "$V"
     else FAILURES+=("starship"); fi
 
     if V="$(gh_latest atuinsh/atuin)"; then
         run_step "atuin" install_gh_binary atuin \
-            "https://github.com/atuinsh/atuin/releases/download/v${V}/atuin-${GH_ARCH}-unknown-linux-musl.tar.gz"
+            "https://github.com/atuinsh/atuin/releases/download/v${V}/atuin-${GH_ARCH}-unknown-linux-musl.tar.gz" atuin "$V"
     else FAILURES+=("atuin"); fi
 }
 
@@ -1571,9 +1627,10 @@ install_claude() {
         return
     fi
 
-    if command -v claude &>/dev/null && ! $FORCE; then
+    local CLAUDE_LATEST
+    CLAUDE_LATEST="$(retry npm view @anthropic-ai/claude-code version 2>/dev/null)" || CLAUDE_LATEST=""
+    if update_guard "Claude Code" claude "$CLAUDE_LATEST"; then
         record_command_if_managed claude || true
-        echo "Claude Code already installed: $(claude --version 2>&1 | head -1)"
         return 0
     fi
     echo "Installing Claude Code via npm (@anthropic-ai/claude-code)..."
@@ -1592,9 +1649,10 @@ install_codex() {
         return
     fi
 
-    if command -v codex &>/dev/null && ! $FORCE; then
+    local CODEX_LATEST
+    CODEX_LATEST="$(retry npm view @openai/codex version 2>/dev/null)" || CODEX_LATEST=""
+    if update_guard "Codex CLI" codex "$CODEX_LATEST"; then
         record_command_if_managed codex || true
-        echo "Codex CLI already installed: $(codex --version 2>&1 | head -1)"
         return 0
     fi
     echo "Installing Codex CLI via npm (@openai/codex)..."
@@ -1806,15 +1864,17 @@ setup_main() {
         case "$arg" in
             --force|-f) FORCE=true ;;
             --dry-run|-n) DRY_RUN=true ;;
+            --no-update) NO_UPDATE=true ;;
             --use-modules|-m) CHPC_USE_MODULES=true ;;
             --probe-modules)
                 probe_chpc_modules
                 return $?
                 ;;
             -h|--help)
-                echo "Usage: install.sh [--force|-f] [--dry-run|-n] [--use-modules|-m] [--probe-modules] [--help|-h]"
-                echo "  -f, --force        Reinstall CLI tools even if already present"
+                echo "Usage: install.sh [--force|-f] [--dry-run|-n] [--no-update] [--use-modules|-m] [--probe-modules] [--help|-h]"
+                echo "  -f, --force        Reinstall CLI tools even if already present and current"
                 echo "  -n, --dry-run      Show install steps without changing files"
+                echo "      --no-update    Skip the latest-version check; keep already-installed tools as-is"
                 echo "  -m, --use-modules  On CHPC, prefer module load over binary install"
                 echo "      --probe-modules  Report which CHPC module candidates resolve, then exit"
                 echo "  -h, --help         Show this help"
