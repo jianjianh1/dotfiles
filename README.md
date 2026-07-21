@@ -15,7 +15,7 @@ cd ~/.dotfiles
 ./install.sh --dry-run     # show planned steps without changing files
 ```
 
-Re-running `install.sh` keeps every managed CLI tool current: each present tool's version is compared against the latest release (GitHub releases, npm for `claude`/`codex`, the Node LTS index, or `brew outdated` on macOS) and upgraded only when outdated. A failed version lookup (offline, rate-limited) leaves the installed tool untouched. Use `--no-update` (or `NO_UPDATE=1`) to skip the checks entirely.
+Re-running `install.sh` keeps every managed CLI tool current: each present tool's version is compared against the latest release (GitHub releases, `npm view` version signal for `claude`/`codex`, the Node LTS index, or `brew outdated` on macOS) and upgraded only when outdated — Claude Code updates via its native `claude update`, codex reinstalls from npm. A failed version lookup (offline, rate-limited) leaves the installed tool untouched. Use `--no-update` (or `NO_UPDATE=1`) to skip the checks entirely.
 
 On macOS, `install.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
 

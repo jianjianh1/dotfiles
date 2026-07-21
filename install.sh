@@ -1627,19 +1627,43 @@ install_claude() {
         return
     fi
 
+    # Claude Code ships a native, self-updating binary (~/.local/bin/claude ->
+    # ~/.local/share/claude/versions/<v>), no longer an npm package. We still read
+    # the npm-published version as the "latest" signal for update_guard (it tracks
+    # the native release stream), but install/update via the native tooling — never
+    # npm, which would collide with the native ~/.local/bin/claude symlink (EEXIST).
     local CLAUDE_LATEST
     CLAUDE_LATEST="$(retry npm view @anthropic-ai/claude-code version 2>/dev/null)" || CLAUDE_LATEST=""
     if update_guard "Claude Code" claude "$CLAUDE_LATEST"; then
         record_command_if_managed claude || true
         return 0
     fi
-    echo "Installing Claude Code via npm (@anthropic-ai/claude-code)..."
-    if ! npm_global_install "@anthropic-ai/claude-code" claude; then
-        echo "  Claude Code install failed"
+    if command -v claude &>/dev/null; then
+        # Existing install: use the native self-updater. --force reinstalls the
+        # latest native build (also migrates a legacy npm install to native).
+        if $FORCE; then
+            echo "Reinstalling Claude Code (native: claude install latest)..."
+            claude install latest
+        else
+            echo "Updating Claude Code (native: claude update)..."
+            claude update
+        fi
+    else
+        # Fresh host: bootstrap via the official native installer. Installs to
+        # ~/.local/bin/claude + ~/.local/share/claude/versions/<v>.
+        echo "Installing Claude Code via the native installer..."
+        if ! retry bash -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
+            echo "  Claude Code install failed"
+            return 1
+        fi
+    fi
+    hash -r
+    if ! command -v claude &>/dev/null; then
+        echo "  Claude Code install failed — binary not found on PATH"
         return 1
     fi
     record_command_if_managed claude || true
-    manifest_add_path "$HOME/.local/lib/node_modules/@anthropic-ai/claude-code"
+    manifest_add_path "$HOME/.local/share/claude"
     echo "  Claude Code $(claude --version 2>&1 | head -1) installed. Run 'claude' to authenticate."
 }
 

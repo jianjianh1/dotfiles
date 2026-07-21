@@ -97,7 +97,8 @@ Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc
 ```
 
 Re-running is version-aware: each present tool is compared against its latest release
-(`gh_latest` for GitHub binaries, `npm view` for `claude`/`codex`, the Node LTS index,
+(`gh_latest` for GitHub binaries, `npm view` for the `claude`/`codex` version signal
+(Claude then updates via its native `claude update`; codex reinstalls from npm), the Node LTS index,
 `brew outdated` on macOS) via the shared `update_guard`/`tool_version` helpers and
 upgraded only when outdated. A failed version lookup leaves the tool untouched.
 
@@ -135,7 +136,7 @@ Before cloning, `step_clone_setup` sanitizes the remote git env (`unset GIT_EXEC
 
 `is_chpc()` in `lib/common.sh` detects CHPC systems via hostname (`*.chpc.utah.edu`) or path (`/uufs/chpc.utah.edu`). When on CHPC, `install.sh` automatically:
 
-- Installs gh, Node.js, uv, btop, and Neovim via direct binary download, and Claude Code + Codex from npm (`@anthropic-ai/claude-code`, `@openai/codex`) — same as non-CHPC
+- Installs gh, Node.js, uv, btop, and Neovim via direct binary download, Codex from npm (`@openai/codex`), and Claude Code via its native installer / `claude update` (`~/.local/share/claude`, no longer an npm package) — same as non-CHPC
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates agent settings even if the CLIs are not currently installed or loaded
 - Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC

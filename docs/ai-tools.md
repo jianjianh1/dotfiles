@@ -56,11 +56,15 @@ Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not 
 | `cleanupPeriodDays` | `30` | Clean old data after 30 days |
 
 `autoUpdatesChannel` is Claude Code's own in-app updater. Independently, re-running
-`install.sh` keeps the installed `@anthropic-ai/claude-code` and `@openai/codex` npm
-packages current: it compares the installed version against `npm view <pkg> version`
-and reinstalls `<pkg>@latest` only when outdated (skipped under `--no-update`, and on
-CHPC when the tools come from `module load`). See the [README](../README.md#quickstart)
-for the full auto-update behavior across all managed CLI tools.
+`install.sh` keeps both CLIs current. **Claude Code** is a native, self-updating binary
+(`~/.local/bin/claude` → `~/.local/share/claude/versions/<v>`), no longer an npm package:
+`install.sh` reads `npm view @anthropic-ai/claude-code version` only as the "latest" signal,
+then updates via the native `claude update` (or the official install script on a fresh host)
+— never `npm install`, which would collide with the native symlink. **Codex** remains an
+npm-managed package (`@openai/codex`): `install.sh` compares the installed version against
+`npm view @openai/codex version` and reinstalls `@latest` only when outdated. Both are skipped
+under `--no-update`, and on CHPC when the tools come from `module load`. See the
+[README](../README.md#quickstart) for the full auto-update behavior across all managed CLI tools.
 
 ### Attribution
 
