@@ -43,8 +43,8 @@ Restores `.bak` backups of any files that were replaced.
 ### Validation
 
 ```bash
-bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
 bash scripts/test_regressions.sh
 HOME="$(mktemp -d)" ./install.sh --dry-run
 ```
@@ -74,6 +74,8 @@ HOME="$(mktemp -d)" ./install.sh --dry-run
 | `git/gitconfig` | `~/.gitconfig` | symlink |
 | `ai/claude_settings.json` | `~/.claude/settings.json` | copy |
 | `ai/codex_config.toml` | `~/.codex/config.toml` | copy |
+| `ai/skills/<name>/` | `~/.claude/skills/<name>` | symlink |
+| _mirrored_ `~/.claude/skills/<name>` | `~/.agents/skills/<name>` | symlink (for Codex, by `scripts/sync_agent_skills.sh`) |
 | `scripts/detect-theme.sh` | `~/.local/bin/detect-theme` | symlink |
 | `scripts/chpc-allocs.py` | `~/.local/bin/chpc-allocs` | symlink |
 
@@ -119,7 +121,9 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │   ├── common.sh               # Shared helpers (run_step, retry, backup_and_link, ...)
 │   └── vscode-tunnel.sh        # `vscode-tunnel` shell helper sourced by aliases
 ├── scripts/
-│   ├── install_claude_plugins.sh   # MCP servers for Claude Code
+│   ├── install_claude_plugins.sh   # MCP servers (fetch, time, codex) + marketplace plugins for Claude Code
+│   ├── install_claude_skills.sh    # Upstream skill repos → ~/.claude/skills/
+│   ├── sync_agent_skills.sh        # Mirror skills between Claude Code and Codex
 │   ├── detect-theme.sh             # Terminal background detector
 │   ├── chpc-allocs.py              # CHPC SLURM allocations CLI
 │   └── test_regressions.sh         # Regression test suite
@@ -146,7 +150,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 ├── ai/
 │   ├── claude_settings.json    # Claude Code settings
 │   ├── codex_config.toml       # Codex CLI settings
-│   └── skills/                 # Claude Code skills (HPC, CUDA, LaTeX, …) — symlinked into ~/.claude/skills/
+│   └── skills/                 # Claude Code skills (HPC, CUDA, LaTeX, …) — symlinked into ~/.claude/skills/, mirrored to ~/.agents/skills/ for Codex
 ├── .githooks/
 │   └── pre-commit              # bash -n + shellcheck + secret scan on staged files
 ├── .gitignore
@@ -219,5 +223,5 @@ Comprehensive lookup tables for every keybinding, alias, option, and setting:
 | [docs/misc-configs.md](docs/misc-configs.md) | Readline settings, dircolors |
 | [docs/ai-tools.md](docs/ai-tools.md) | Claude Code settings, Codex config, MCP servers |
 | [docs/google-drive.md](docs/google-drive.md) | rclone installation, Google Drive OAuth, deploy behavior |
-| [docs/ai-skills.md](docs/ai-skills.md) | Claude Code skills under `ai/skills/` (HPC, CUDA, MPI, LaTeX, paper review, …) |
+| [docs/ai-skills.md](docs/ai-skills.md) | Claude Code skills under `ai/skills/` (HPC, CUDA, MPI, LaTeX, paper review, …), upstream skills (paper writing, deslop), Claude ↔ Codex skill sync |
 | [docs/chpc-allocs.md](docs/chpc-allocs.md) | `chpc-allocs` SLURM allocations & wait predictions |

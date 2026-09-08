@@ -1882,14 +1882,25 @@ link_generated_configs() {
 }
 
 # Run scripts/install_claude_skills.sh to clone upstream skill repos
-# (obra/superpowers, anthropics/skills) into ~/.local/share/claude-skills/
-# and symlink the curated set into ~/.claude/skills/. Forwards --force and
-# --dry-run so a top-level `./install.sh --force` re-clones upstream too.
+# (obra/superpowers, anthropics/skills, Master-cai/Research-Paper-Writing-Skills,
+# stephenturner/skill-deslop) into ~/.local/share/claude-skills/ and symlink
+# the curated set into ~/.claude/skills/. Forwards --force and --dry-run so a
+# top-level `./install.sh --force` re-clones upstream too.
 install_external_claude_skills() {
     local args=()
     [ "$FORCE" = true ]   && args+=(--force)
     [ "$DRY_RUN" = true ] && args+=(--dry-run)
     bash "$DIR/scripts/install_claude_skills.sh" ${args[@]+"${args[@]}"}
+}
+
+# Mirror the assembled ~/.claude/skills set into ~/.agents/skills for Codex
+# and pull Codex-installed ~/.codex/skills/<name> back into ~/.claude/skills.
+# Ordered after both skill steps so every Claude-side entry exists first.
+# Forwards --dry-run only; the script has no --force (it only adds links).
+sync_agent_skills() {
+    local args=()
+    [ "$DRY_RUN" = true ] && args+=(--dry-run)
+    bash "$DIR/scripts/sync_agent_skills.sh" ${args[@]+"${args[@]}"}
 }
 
 # Symlink every directory under ai/skills/ into ~/.claude/skills/<name>.
@@ -2090,6 +2101,7 @@ setup_main() {
     run_step "shell config links" link_generated_configs
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
+    run_step "agent skills sync"  sync_agent_skills
     run_step "chpc agent guide"   link_chpc_agent_guide
     run_step "cloudlab agent guide" link_cloudlab_agent_guide
     # Source bashrc only in interactive shells; non-interactive may lack shopt etc.

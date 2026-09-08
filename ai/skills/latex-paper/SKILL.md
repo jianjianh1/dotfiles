@@ -143,3 +143,5 @@ entries.
 - [[bibtex-fetch]] for DOI/arXiv → BibTeX entries
 - [[paper-review]] when reviewing someone else's paper draft
 - [[technical-writing]] for the prose itself (active voice, etc.)
+- [[research-paper-writing]] for section structure and argument flow
+  (abstract → introduction → method → experiments → conclusion)

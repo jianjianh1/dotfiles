@@ -9,7 +9,7 @@ Personal dotfiles + multi-host bootstrap. Two entry points:
 - **`install.sh`** — run locally to symlink configs into `$HOME` and install CLI tools (glow, nvim, node, uv, Claude Code, Codex, VS Code `code` tunnel CLI, etc.). The shell aliases also define a `vscode-tunnel` helper — see `shell/bashrc_aliases`.
 - **`deploy.sh`** — run locally to bootstrap a remote server over SSH (authorize SSH key, copy `gh`/Claude/Codex auth, clone this repo on the remote, then invoke `install.sh` there).
 
-Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live in `lib/common.sh` and are sourced by both entry points plus `scripts/install_claude_plugins.sh`.
+Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live in `lib/common.sh` and are sourced by both entry points plus `scripts/install_claude_plugins.sh`, `scripts/install_claude_skills.sh`, and `scripts/sync_agent_skills.sh`.
 
 ## Architecture
 
@@ -65,11 +65,17 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
              mutually exclusive, gated by is_chpc() / is_cloudlab())
 
 ~/.claude/skills/<name>   (symlink → ai/skills/<name>, one per subdir)
-                          (also: symlink → ~/.local/share/claude-skills/<repo>/skills/<name>
+                          (also: symlink → ~/.local/share/claude-skills/<repo>/…/<name>
                                  for upstream skills cloned by
                                  scripts/install_claude_skills.sh)
-~/.local/share/claude-skills/   (clone cache for obra/superpowers and
-                                 anthropics/skills; refreshed on install
+                          (also: symlink → ~/.codex/skills/<name> for skills Codex
+                                 installed itself, by scripts/sync_agent_skills.sh)
+~/.agents/skills/<name>   (symlink → the resolved ~/.claude/skills/<name> target;
+                           Codex's user-skill dir, kept in sync by
+                           scripts/sync_agent_skills.sh; removable via uninstall.sh)
+~/.local/share/claude-skills/   (clone cache for obra/superpowers, anthropics/skills,
+                                 Master-cai/Research-Paper-Writing-Skills, and
+                                 stephenturner/skill-deslop; refreshed on install
                                  --force; removable via uninstall.sh)
 ```
 
@@ -80,10 +86,17 @@ verbatim, like `editor/nvim` or `shell/bashrc_aliases`. Upstream skills
 follow the same symlink pattern, but their content lives in a clone cache
 at `~/.local/share/claude-skills/` rather than in this repo. See
 [`docs/ai-skills.md`](docs/ai-skills.md) for the bundled set, the upstream
-curated subset (7 obra + 4 anthropic-markdown + `pdf`), and authoring notes.
+curated subset (7 obra + 4 anthropic-markdown + `pdf` + `research-paper-writing`
++ `deslop`), the Codex skill sync, and authoring notes.
 The marketplace-plugin half of `scripts/install_claude_plugins.sh` installs
 `context7`, `commit-commands`, and `pr-review-toolkit`; the MCP half
-registers one server (`fetch`).
+registers three servers (`fetch`, `time`, and `codex` — Codex CLI's own
+`codex mcp-server`, so Claude can delegate to Codex mid-session; the
+`ai/skills/agent-delegate` skill says when and how). Codex reaches Claude the
+other way with headless `claude -p`, taught by the same skill, which
+`scripts/sync_agent_skills.sh` mirrors into `~/.agents/skills/`. There is no
+`[mcp_servers.claude-code]` in `ai/codex_config.toml` on purpose: `claude mcp
+serve` exposes Claude Code's tools, not the model.
 
 Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 

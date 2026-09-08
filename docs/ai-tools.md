@@ -155,6 +155,12 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 trust_level = "trusted"
 ```
 
+### Skills and delegation
+
+Codex reads user skills from `~/.agents/skills/` and `~/.codex/skills/`. [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh) (run by `install.sh`) mirrors every `~/.claude/skills/<name>` into `~/.agents/skills/<name>` and links Codex-installed `~/.codex/skills/<name>` back into `~/.claude/skills/`, so both CLIs see one skill set — see [ai-skills.md](ai-skills.md#codex-skill-sync).
+
+There is deliberately **no** `[mcp_servers.claude-code]` entry: `claude mcp serve` exposes Claude Code's file and shell tools, not the Claude model, and Codex already has equivalents. Codex asks Claude for a second opinion with headless `claude -p "<prompt>" --output-format text`, as described in the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill. The opposite direction (Claude calling Codex) is the `codex` MCP server below.
+
 ### CHPC behavior
 
 `install.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.dotfiles-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
@@ -163,12 +169,14 @@ trust_level = "trusted"
 
 ## MCP Servers & Plugins (`install_claude_plugins.sh`)
 
-The install script registers one MCP server and three marketplace plugins. Anything an older version of the script previously installed (`github`/`filesystem`/`memory`/`git`/`serena` MCPs and several extra plugins) is uninstalled defensively on each run so upgrade hosts converge to the curated set.
+The install script registers three MCP servers (`fetch`, `time`, `codex`) and three marketplace plugins. Anything an older version of the script previously installed (`github`/`filesystem`/`memory`/`git`/`serena` MCPs and several extra plugins) is uninstalled defensively on each run so upgrade hosts converge to the curated set.
 
 > **Reserved names — do not use locally.** The defensive uninstall runs on every `./install.sh`, so manually adding any of these will get silently undone on the next run. Pick a different name for personal MCPs or plugins.
 >
 > - Reserved MCP names: `github`, `filesystem`, `memory`, `git`, `serena`
 > - Reserved plugin names: `github`, `linear`, `sentry`, `notion`, `slack`, `codex`, `agent-sdk-dev`, `clangd-lsp`, `pyright-lsp`, `typescript-lsp`, `gopls-lsp`, `rust-analyzer-lsp`, `explanatory-output-style`
+>
+> `codex` is reserved only as a *plugin* name (the retired marketplace plugin). The `codex` *MCP server* below is repo-managed and lives in a different store (`claude mcp`, not `claude plugin`).
 
 ### Installed MCP servers
 
@@ -176,6 +184,7 @@ The install script registers one MCP server and three marketplace plugins. Anyth
 |--------|-----------|---------|---------|
 | `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching (URLs Claude can't otherwise reach) |
 | `time` | stdio/uvx | `mcp-server-time` | Current time / timezone conversions (date-stamp memory, reason about SLURM `--time=` budgets) |
+| `codex` | stdio | `codex mcp-server` (Codex CLI itself) | Delegate to Codex mid-session: tools `codex` (prompt, cwd, sandbox, approval-policy, model, …) and `codex-reply` (threadId, prompt). When and how: the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill |
 
 ### Cloud-managed connector catalog (`claude.ai *`)
 
@@ -201,3 +210,4 @@ Each step is best-effort:
 - If `claude mcp` is unavailable the MCP step is skipped.
 - If `claude plugin` is unavailable the marketplace step is skipped.
 - If `uvx` is missing the `fetch` and `time` MCPs are skipped (`uv` is installed by `install.sh`, so this is rare).
+- If `codex` is missing the `codex` MCP is skipped; re-run `./install.sh` after Codex is installed and it registers.

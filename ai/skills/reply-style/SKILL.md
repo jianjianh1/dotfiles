@@ -216,3 +216,6 @@ Each row below combines several rules above.
   writing, switch from this skill to that one.
 - [[paper-review]] — reviewing someone else's prose.
 - [[doc-coauthoring]] — multi-pass document drafting.
+- [[deslop]] — heavier de-AI-ing pass for prose the user is editing, not
+  for Claude's replies. It bans em dashes where this skill allows them; it
+  wins when the user asks to deslop.

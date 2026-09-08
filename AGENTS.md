@@ -7,7 +7,7 @@ Configs are grouped by topic into subdirectories:
 - `shell/` — bash/zsh rc files, readline, dircolors, starship prompt
 - `editor/` — `vimrc` and the `nvim/` Neovim tree (one plugin spec per file in `lua/plugins/`)
 - `tmux/`, `git/`, `ai/` — single-tool configs
-- `scripts/` — `install_claude_plugins.sh`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
+- `scripts/` — `install_claude_plugins.sh`, `install_claude_skills.sh`, `sync_agent_skills.sh`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
 - `lib/` — shared shell helpers (`common.sh`, `vscode-tunnel.sh`)
 - `docs/` — per-tool reference tables
 
@@ -20,7 +20,7 @@ Operational logic lives in three top-level scripts: `install.sh` (local install 
 | Config files under `shell/`, `editor/`, `tmux/`, `git/`, `ai/` | Yes | Test with `install.sh` after changes |
 | `editor/nvim/lua/plugins/*.lua` | Yes | Each file = one plugin spec. Add new plugins as new files. Run `:Lazy! sync` after |
 | `editor/nvim/lua/config/*.lua` | Yes | Options, keymaps, autocmds. Changes affect all nvim users |
-| `lib/common.sh` | Careful | Shared by all scripts — changes affect `install.sh`, `deploy.sh`, `scripts/install_claude_plugins.sh`, `uninstall.sh` |
+| `lib/common.sh` | Careful | Shared by all scripts — changes affect `install.sh`, `deploy.sh`, `scripts/install_claude_plugins.sh`, `scripts/install_claude_skills.sh`, `scripts/sync_agent_skills.sh`, `uninstall.sh` |
 | `install.sh` `render_*()` functions | Careful | Changes affect all generated compat files in `~/.dotfiles-generated/` |
 | `deploy.sh` auth/copy steps | Careful | Test with `--help` and `--yes` flags. Auth logic is security-sensitive |
 | `~/.dotfiles-generated/*` | Never | Overwritten by `install.sh` on every run |
@@ -36,7 +36,7 @@ Use the scripts directly from the repo root.
 - `./deploy.sh --help` shows deploy options for remote server setup.
 - `./deploy.sh --yes` skips confirmation prompts during deploy.
 - `./uninstall.sh --yes` removes symlinks and tool installs non-interactively.
-- `bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases` runs a syntax check.
+- `bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases` runs a syntax check.
 
 ## Script Flag Conventions
 
@@ -79,8 +79,8 @@ shellcheck --severity=warning --exclude=SC1091 shell/bashrc_exports shell/bashrc
 ### Script changes (`install.sh`, `deploy.sh`, `uninstall.sh`)
 
 ```bash
-bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
 bash scripts/test_regressions.sh
 # Run affected script to smoke test
 ./install.sh --dry-run          # after install.sh changes (safe, no side effects)

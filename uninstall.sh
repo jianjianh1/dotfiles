@@ -31,9 +31,14 @@ restore_backup() {
 unlink_config() {
     local dst="$1"
     local target="" dir_canon="" gen_canon="" ext_canon=""
+    local claude_canon="" codex_canon=""
 
     if [ -L "$dst" ]; then
         target="$(portable_realpath "$dst" 2>/dev/null || true)"
+        # Dangling links (clone cache or Codex skill dir removed by hand)
+        # defeat portable_realpath; fall back to the literal target so they
+        # are still classified and cleaned up.
+        [ -n "$target" ] || target="$(readlink "$dst" 2>/dev/null || true)"
         # macOS resolves /var → /private/var (and similar /tmp → /private/tmp)
         # via portable_realpath, but $DIR / $GENERATED_DIR are kept in their
         # logical (pre-resolve) form. Match against both so the comparison
@@ -41,11 +46,18 @@ unlink_config() {
         dir_canon="$(portable_realpath "$DIR" 2>/dev/null || printf '%s' "$DIR")"
         gen_canon="$(portable_realpath "$GENERATED_DIR" 2>/dev/null || printf '%s' "$GENERATED_DIR")"
         ext_canon="$(portable_realpath "$EXTERNAL_SKILLS_CACHE" 2>/dev/null || printf '%s' "$EXTERNAL_SKILLS_CACHE")"
+        claude_canon="$(portable_realpath "$CLAUDE_SKILLS_DIR" 2>/dev/null || printf '%s' "$CLAUDE_SKILLS_DIR")"
+        codex_canon="$(portable_realpath "$CODEX_HOME_SKILLS_DIR" 2>/dev/null || printf '%s' "$CODEX_HOME_SKILLS_DIR")"
+        # Skill-sync links (scripts/sync_agent_skills.sh) resolve *into*
+        # ~/.claude/skills or ~/.codex/skills; a link to either root itself is
+        # never ours, hence no bare-dir forms for those two.
         case "$target" in
             "$DIR"|"$DIR"/*|"$GENERATED_DIR"|"$GENERATED_DIR"/*|\
             "$EXTERNAL_SKILLS_CACHE"|"$EXTERNAL_SKILLS_CACHE"/*|\
             "$dir_canon"|"$dir_canon"/*|"$gen_canon"|"$gen_canon"/*|\
-            "$ext_canon"|"$ext_canon"/*)
+            "$ext_canon"|"$ext_canon"/*|\
+            "$CLAUDE_SKILLS_DIR"/*|"$claude_canon"/*|\
+            "$CODEX_HOME_SKILLS_DIR"/*|"$codex_canon"/*)
                 rm -f "$dst"
                 echo "  Removed $dst"
                 restore_backup "$dst"
@@ -158,6 +170,25 @@ unlink_external_claude_skills() {
     remove_dir_if_empty "$skills_dst"
 }
 
+# Remove ~/.agents/skills/<name> links created by scripts/sync_agent_skills.sh.
+# Root sweep, not manifest: the sync script also runs standalone, where
+# INSTALL_MANIFEST is unavailable, so "target resolves into a managed root"
+# ($DIR, the clone cache, ~/.claude/skills, ~/.codex/skills — see
+# unlink_config) is the only invariant that holds everywhere. Links into other
+# places (Codex skills the user wired up by hand) survive. Direction-B links
+# in ~/.claude/skills -> ~/.codex/skills are swept by unlink_external_claude_skills.
+unlink_agent_skills() {
+    local root="$CODEX_AGENT_SKILLS_DIR" link
+    if [ -d "$root" ]; then
+        for link in "$root"/*; do
+            [ -L "$link" ] || continue
+            unlink_config "$link"
+        done
+    fi
+    remove_dir_if_empty "$root"
+    remove_dir_if_empty "$(dirname "$root")"
+}
+
 # Remove the upstream-skills clone cache. Separate from the symlink
 # cleanup above because the cache may also be used by other tools the
 # user wires up, and because it's larger / slower to recreate.
@@ -189,6 +220,7 @@ remove_symlinks() {
     unlink_config "$HOME/.zshrc_aliases"
     unlink_claude_skills
     unlink_external_claude_skills
+    unlink_agent_skills
     # Only remove ~/.zshrc when it's our symlink. A pre-existing user
     # ~/.zshrc with our source lines appended is handled by remove_bashrc_lines.
     unlink_config "$HOME/.zshrc"
@@ -264,6 +296,8 @@ remove_dirs() {
     remove_dir_if_empty "$HOME/.vim"
     remove_dir_if_empty "$HOME/.claude"
     remove_dir_if_empty "$HOME/.codex"
+    remove_dir_if_empty "$HOME/.agents/skills"
+    remove_dir_if_empty "$HOME/.agents"
     remove_dir_if_empty "$HOME/.local/share/man/man1"
     remove_dir_if_empty "$HOME/.local/share/man"
     remove_dir_if_empty "$HOME/.local/share/doc"

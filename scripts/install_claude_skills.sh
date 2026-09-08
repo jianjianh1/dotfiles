@@ -5,6 +5,10 @@ set -uo pipefail
 # directory under ~/.local/share/claude-skills/ and symlinking individual
 # skills into ~/.claude/skills/ alongside the repo's custom skills.
 #
+# Upstream repos: obra/superpowers and anthropics/skills (multi-skill layout
+# <clone>/skills/<name>/), Master-cai/Research-Paper-Writing-Skills (one skill
+# in a named subdir), stephenturner/skill-deslop (SKILL.md at the clone root).
+#
 # Mirrors install_claude_plugins.sh in spirit but does NOT touch MCP or the
 # plugin marketplace — skills are pure markdown and CHPC-safe.
 
@@ -26,6 +30,8 @@ Usage: install_claude_skills.sh [--force] [--dry-run] [--help|-h]
 
 Cache dir:   ~/.local/share/claude-skills/
 Symlink dir: ~/.claude/skills/
+Upstream:    obra/superpowers, anthropics/skills,
+             Master-cai/Research-Paper-Writing-Skills, stephenturner/skill-deslop
 EOF
 }
 
@@ -43,7 +49,7 @@ for arg in "$@"; do
 done
 
 CACHE_DIR="$EXTERNAL_SKILLS_CACHE"   # from lib/common.sh
-SKILLS_DIR="$HOME/.claude/skills"
+SKILLS_DIR="$CLAUDE_SKILLS_DIR"      # from lib/common.sh
 CACHE_CANON=""                       # filled in main() after mkdir
 
 # --- Curated skill lists (canonical source of truth) -----------------------
@@ -75,6 +81,19 @@ ANTHROPIC_SKILLS_PYDEPS=(
     pdf
 )
 
+# Single-skill repos. The first arg to link_skill_path is the directory that
+# holds SKILL.md — a named subdir for Research-Paper-Writing-Skills, the clone
+# root for skill-deslop. Both MIT.
+RPW_REPO="https://github.com/Master-cai/Research-Paper-Writing-Skills.git"
+RPW_DIR="$CACHE_DIR/research-paper-writing-skills"
+RPW_SKILL_NAME="research-paper-writing"
+RPW_SKILL_SRC="$RPW_DIR/research-paper-writing"   # SKILL.md + references/ + agents/openai.yaml
+
+DESLOP_REPO="https://github.com/stephenturner/skill-deslop.git"
+DESLOP_DIR="$CACHE_DIR/skill-deslop"
+DESLOP_SKILL_NAME="deslop"
+DESLOP_SKILL_SRC="$DESLOP_DIR"                    # SKILL.md at the repo root
+
 # --- Operations ------------------------------------------------------------
 
 # All upstream skill <name>s the curated lists own. Used by prune_orphans()
@@ -82,7 +101,8 @@ ANTHROPIC_SKILLS_PYDEPS=(
 kept_skill_names() {
     printf '%s\n' "${SUPERPOWERS_SKILLS[@]}" \
                  "${ANTHROPIC_SKILLS_MARKDOWN[@]}" \
-                 "${ANTHROPIC_SKILLS_PYDEPS[@]}"
+                 "${ANTHROPIC_SKILLS_PYDEPS[@]}" \
+                 "$RPW_SKILL_NAME" "$DESLOP_SKILL_NAME"
 }
 
 # Remove ~/.claude/skills/<name> symlinks that point into the upstream
@@ -151,11 +171,12 @@ clone_or_update() {
     fi
 }
 
+# Link one skill directory into ~/.claude/skills/<name>. $src must hold
+# SKILL.md and live under $CACHE_DIR; the repo layout is the caller's concern.
 # Logs and continues (does not fail) when an upstream skill no longer
 # exists in the clone — keeps the curated lists tolerant to upstream renames.
-link_skill() {
-    local cache_root="$1" name="$2"
-    local src="$cache_root/skills/$name"
+link_skill_path() {
+    local src="$1" name="$2"
     local dst="$SKILLS_DIR/$name"
 
     if [ "$DRY_RUN" = true ]; then
@@ -164,7 +185,7 @@ link_skill() {
     fi
 
     if [ ! -d "$src" ] || [ ! -f "$src/SKILL.md" ]; then
-        echo "  Skipping $name — not present in $(display_path "$cache_root")"
+        echo "  Skipping $name — no SKILL.md at $(display_path "$src")"
         return 0
     fi
 
@@ -193,6 +214,12 @@ link_skill() {
     fi
 
     backup_and_link "$src" "$dst"
+}
+
+# Conventional multi-skill layout <clone>/skills/<name>/SKILL.md
+# (obra/superpowers, anthropics/skills).
+link_skill() {
+    link_skill_path "$1/skills/$2" "$2"
 }
 
 main() {
@@ -229,6 +256,14 @@ main() {
     for name in "${ANTHROPIC_SKILLS_PYDEPS[@]}"; do
         run_step "link anthropic:$name" link_skill "$ANTHROPIC_DIR" "$name"
     done
+
+    # --- Master-cai/Research-Paper-Writing-Skills (one skill, in a subdir) ---
+    run_step "clone research-paper-writing-skills" clone_or_update "$RPW_REPO" "$RPW_DIR"
+    run_step "link $RPW_SKILL_NAME" link_skill_path "$RPW_SKILL_SRC" "$RPW_SKILL_NAME"
+
+    # --- stephenturner/skill-deslop (SKILL.md at the repo root) ---
+    run_step "clone skill-deslop" clone_or_update "$DESLOP_REPO" "$DESLOP_DIR"
+    run_step "link $DESLOP_SKILL_NAME" link_skill_path "$DESLOP_SKILL_SRC" "$DESLOP_SKILL_NAME"
 
     echo ""
     if [ ${#FAILURES[@]} -gt 0 ]; then

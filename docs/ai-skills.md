@@ -1,6 +1,6 @@
 # Claude Code Skills Reference
 
-Sources: [`ai/skills/`](../ai/skills/), wired by [`install.sh::link_claude_skills`](../install.sh).
+Sources: [`ai/skills/`](../ai/skills/), wired by [`install.sh::link_claude_skills`](../install.sh); upstream clones by [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh); mirrored to Codex by [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh).
 
 Each subdirectory of [`ai/skills/`](../ai/skills/) is a [Claude Code skill](https://code.claude.com/docs/en/skills) — a folder containing a `SKILL.md` whose YAML frontmatter declares when Claude should load it. `install.sh` symlinks every skill directory into `~/.claude/skills/<name>` so that:
 
@@ -47,6 +47,12 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 | [`technical-writing`](../ai/skills/technical-writing/SKILL.md) | READMEs, docs, paper sections, blog posts, markdown style, active voice, AI-tell removal |
 | [`reply-style`](../ai/skills/reply-style/SKILL.md) | Assistant-side counterpart to `technical-writing` — governs Claude's own conversational tone: brief, AmE, no AI-tells, no idioms or sports metaphors, single verbs over phrasal verbs |
 
+### Agent orchestration
+
+| Skill | Triggers on |
+|---|---|
+| [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) | "ask codex", "have codex review this", "second opinion", "delegate this", "run it in parallel" — how Claude calls Codex through the `codex` MCP tool (`codex` / `codex-reply`), and how Codex calls Claude with headless `claude -p`; sandbox/approval choices, prompt hygiene, what not to delegate |
+
 Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase. The style triad `reply-style` ↔ `explain-concepts` ↔ `technical-writing` works the same way: each defers to the others rather than restating shared rules.
 
 ## How skills are discovered
@@ -56,7 +62,8 @@ When you type `/` in Claude Code, all enabled skills appear in the menu. When yo
 To list skills explicitly:
 
 ```bash
-ls -l ~/.claude/skills/         # → 10 symlinks into ai/skills/
+ls -l ~/.claude/skills/         # → one symlink per ai/skills/ subdir, plus upstream and Codex-mirrored links
+ls -l ~/.agents/skills/         # → the same set, mirrored for Codex (see "Codex skill sync")
 ```
 
 To force-invoke a skill:
@@ -75,7 +82,7 @@ Use the existing skills as templates — particularly [`slurm-job`](../ai/skills
 
 ## Upstream skills (cloned at install time)
 
-In addition to the in-tree skills under `ai/skills/`, [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh) clones two upstream skill repos to `~/.local/share/claude-skills/` and symlinks a curated set into `~/.claude/skills/` alongside the custom ones. They appear under their natural names (e.g. `/systematic-debugging`, not `/superpowers:systematic-debugging`).
+In addition to the in-tree skills under `ai/skills/`, [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh) clones four upstream skill repos to `~/.local/share/claude-skills/` and symlinks a curated set into `~/.claude/skills/` alongside the custom ones. They appear under their natural names (e.g. `/systematic-debugging`, not `/superpowers:systematic-debugging`).
 
 The cache and symlinks are refreshed on every `./install.sh` run; pass `--force` to re-clone from upstream.
 
@@ -114,9 +121,38 @@ One Office/PDF skill is included; the bundled script uses `uv run --with <packag
 |---|---|---|
 | `pdf` | Read, extract, split, merge PDF files | `pypdf`, `reportlab` |
 
-## Related plugin (installed by `scripts/install_claude_plugins.sh`)
+### From [Master-cai/Research-Paper-Writing-Skills](https://github.com/Master-cai/Research-Paper-Writing-Skills)
+
+One skill, MIT licensed, adapted from Prof. Peng Sida's paper-writing notes. Lives in the clone's `research-paper-writing/` subdir, with `references/` section guides and an `agents/openai.yaml` that Codex reads for display metadata.
+
+| Skill | What it covers |
+|---|---|
+| `research-paper-writing` | Section-by-section structure for ML/CV/NLP papers (abstract, introduction, related work, method, experiments, conclusion), paragraph flow, claim–evidence alignment, pre-submission self-review. Complements [`technical-writing`](../ai/skills/technical-writing/SKILL.md) (prose rules) and [`latex-paper`](../ai/skills/latex-paper/SKILL.md) (LaTeX mechanics). |
+
+### From [stephenturner/skill-deslop](https://github.com/stephenturner/skill-deslop)
+
+One skill, MIT licensed, synthesizing [hardikpandya/stop-slop](https://github.com/hardikpandya/stop-slop) and tropes.fyi. `SKILL.md` sits at the clone root (with `references/` beside it), so the symlink target is the clone directory itself.
+
+| Skill | What it covers |
+|---|---|
+| `deslop` | Final editing pass that strips AI-writing tells from a draft: filler openers, formulaic contrasts, vague declaratives, "delve" / "quietly" / invented labels, bold-bullet formatting, plus a 5-dimension score (revise below 35/50). Tuned for scientific prose — passive voice is allowed in methods, domain terms are not slop, "we" for own work. It bans em dashes, which `reply-style` / `technical-writing` permit; `deslop` wins when the user asks to deslop. |
+
+## Codex skill sync
+
+[`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh) (run by `install.sh` right after the two skill steps) keeps Claude Code and Codex CLI on one skill set with per-skill symlinks. Both CLIs follow symlinked skill directories and load a skill once even when it is reachable from two places.
+
+- **Claude → Codex**: every `~/.claude/skills/<name>/SKILL.md` gets `~/.agents/skills/<name>` → its resolved directory. Codex reads `~/.agents/skills/` as its user-scope skill dir.
+- **Codex → Claude**: every real `~/.codex/skills/<name>/SKILL.md` (where Codex's `$skill-installer` writes) gets `~/.claude/skills/<name>` → that directory. `~/.codex/skills/.system/` (Codex's built-ins) is skipped.
+- **Never clobbers**: an existing real directory, or a symlink pointing elsewhere, is reported and left alone. Skills already under `~/.codex/skills` are not mirrored back into `~/.agents/skills` (Codex would load them twice), and `~/.claude/skills/synced/` (claude.ai synced skills) is ignored.
+- **Prune**: only *broken* links whose target is under a root this repo manages are removed; a broken link the user made by hand survives.
+- `--dry-run` prints the planned links without creating anything. `uninstall.sh` removes the `~/.agents/skills/*` links and the Codex-sourced links in `~/.claude/skills/` (root sweep via `unlink_config`), leaving real directories untouched.
+
+Check the result with `ls -l ~/.agents/skills/`; in Codex, type `$` to see the merged list, or `$deslop` to invoke one explicitly.
+
+## Related plugin and MCP (installed by `scripts/install_claude_plugins.sh`)
 
 - **[context7](https://github.com/upstash/context7)** (marketplace plugin) — live API documentation lookup (PyTorch, NumPy, MPI, CUDA, …). Ships its own skill + `/context7:docs` command + a `docs-researcher` subagent.
+- **`codex`** (MCP server) — Codex CLI's own `codex mcp-server`, registered at user scope so Claude can delegate mid-session. The [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill says when and how; [`docs/ai-tools.md`](ai-tools.md) documents the registration.
 
 ## Not included
 
@@ -125,6 +161,7 @@ One Office/PDF skill is included; the bundled script uses `uv run --with <packag
 - **`anthropics/skills` heavy-deps skills** — `webapp-testing` (Playwright), `slack-gif-creator` (`requirements.txt`), `algorithmic-art` / `canvas-design` / `theme-factory` / `frontend-design` / `internal-comms` / `claude-api` (already bundled).
 - **`anthropics/skills` `using-superpowers`** — meta-readme, not actionable as a skill.
 - **Project-level skills** (`.claude/skills/` in this repo) — bundled skills are user-level so they apply to every project.
+- **Other paper-writing / deslop skills** evaluated but not installed — [SNL-UCSB/paper-writing-skill](https://github.com/SNL-UCSB/paper-writing-skill) (five-stage systems-paper pipeline; heavier, triggers on every `.tex` file), [hardikpandya/stop-slop](https://github.com/hardikpandya/stop-slop) (generic prose; `deslop` already folds in its rules), [adamdunkels/deslop-text](https://github.com/adamdunkels/deslop-text) (32-check review/fix modes). To add one, define `<X>_REPO` / `<X>_DIR` / `<X>_SKILL_SRC` in [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh), add the name to `kept_skill_names()`, and add a `clone_or_update` + `link_skill_path` pair in `main()`.
 
 ## Related
 

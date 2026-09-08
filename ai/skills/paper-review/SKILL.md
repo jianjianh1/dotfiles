@@ -132,3 +132,5 @@ authors, and **scoped to the actual concern**.
 - [[bibtex-fetch]] when verifying that cited works exist and say what the
   authors claim
 - [[technical-writing]] for prose-level critique
+- [[research-paper-writing]] when turning review findings into a rewrite of
+  a section's structure or claim–evidence mapping

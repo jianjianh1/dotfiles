@@ -3,8 +3,8 @@ set -uo pipefail
 
 # Install a curated set of Claude Code plugins.
 #
-# Scope: one MCP server (`fetch`) plus three marketplace plugins
-# (`context7`, `commit-commands`, `pr-review-toolkit`).
+# Scope: three MCP servers (`fetch`, `time`, `codex`) plus three marketplace
+# plugins (`context7`, `commit-commands`, `pr-review-toolkit`).
 #
 # Anything previously installed by older versions of this script
 # (github/filesystem/memory/git/serena MCPs, and several marketplace
@@ -46,7 +46,7 @@ FAILURES=()
 
 # Source-of-truth for the curated set. Both the install loop and the final
 # "Installed MCP servers" listing read from this so they stay in sync.
-OUR_MCPS=(fetch time)
+OUR_MCPS=(fetch time codex)
 
 # Idempotent MCP add: remove existing entry first so re-runs are clean.
 mcp_add() {
@@ -91,15 +91,30 @@ prune_stale_mcps
 
 if ! $CLAUDE_HAS_MCP; then
     echo "  Skipping MCP setup (this Claude Code build has no 'mcp' subcommand)."
-elif command -v uvx &>/dev/null; then
-    echo "  Adding Fetch MCP server..."
-    run_step "mcp:fetch" mcp_add fetch --scope user --transport stdio fetch \
-        -- uvx mcp-server-fetch
-    echo "  Adding Time MCP server..."
-    run_step "mcp:time" mcp_add time --scope user --transport stdio time \
-        -- uvx mcp-server-time
 else
-    echo "  Skipping Fetch/Time MCPs (uvx not found — install uv first)"
+    if command -v uvx &>/dev/null; then
+        echo "  Adding Fetch MCP server..."
+        run_step "mcp:fetch" mcp_add fetch --scope user --transport stdio fetch \
+            -- uvx mcp-server-fetch
+        echo "  Adding Time MCP server..."
+        run_step "mcp:time" mcp_add time --scope user --transport stdio time \
+            -- uvx mcp-server-time
+    else
+        echo "  Skipping Fetch/Time MCPs (uvx not found — install uv first)"
+    fi
+    # Codex CLI as an MCP server so Claude can delegate to it mid-session.
+    # Tools: `codex` (prompt, cwd, sandbox, approval-policy, model, config,
+    # base-instructions, developer-instructions) and `codex-reply` (threadId,
+    # prompt). Usage guidance lives in ai/skills/agent-delegate. Not the same
+    # namespace as `codex` in STALE_PLUGINS below — that is the retired
+    # marketplace plugin (`claude plugin`); this is `claude mcp`.
+    if command -v codex &>/dev/null; then
+        echo "  Adding Codex MCP server..."
+        run_step "mcp:codex" mcp_add codex --scope user --transport stdio codex \
+            -- codex mcp-server
+    else
+        echo "  Skipping Codex MCP (codex not found — re-run ./install.sh once it is installed)"
+    fi
 fi
 
 echo ""
@@ -154,7 +169,8 @@ install_and_enable_plugin() {
 #
 # WARNING: these names are *reserved* by the installer (see STALE_MCPS).
 # Don't `claude plugin install` any of them locally — they get uninstalled
-# on every ./install.sh run.
+# on every ./install.sh run. (`codex` here is the retired marketplace plugin;
+# the `codex` MCP server registered above is a different store and stays.)
 STALE_PLUGINS=(
     github linear sentry notion slack
     codex

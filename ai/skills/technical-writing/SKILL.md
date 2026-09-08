@@ -292,6 +292,13 @@ meets code.
 - [[brand-guidelines]] — Anthropic visual identity if the artifact is for
   Anthropic-branded surfaces
 - [[skill-creator]] — for editing skills (including this one)
+- [[deslop]] — final editing pass that strips AI tells from a finished draft;
+  a broader catalog than the inline list in "Removing AI-tells" above. It
+  bans em dashes outright where this skill allows them; it wins when the user
+  asks to deslop
+- [[research-paper-writing]] — section-by-section structure for ML/CV/NLP
+  papers (abstract, intro, related work, method, experiments), claim–evidence
+  alignment, pre-submission self-review; pairs with [[latex-paper]]
 
 **Style canon** — reach for these when the model needs a tiebreaker on a
 style judgment call:

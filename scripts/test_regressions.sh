@@ -1254,8 +1254,18 @@ test_install_claude_skills_dry_run() (
 
     bash -n "$script" || fail "install_claude_skills.sh syntax error"
 
-    HOME="$tmp" bash "$script" --dry-run >/dev/null || \
+    local output step
+    output="$(HOME="$tmp" bash "$script" --dry-run 2>&1)" || \
         fail "install_claude_skills.sh --dry-run returned non-zero"
+
+    # Every curated repo must be planned, including the single-skill repos
+    # that go through link_skill_path rather than link_skill.
+    for step in "clone superpowers" "clone anthropic-skills" \
+                "clone research-paper-writing-skills" "link research-paper-writing" \
+                "clone skill-deslop" "link deslop"; do
+        printf '%s\n' "$output" | grep -qF "Would run: $step" ||
+            fail "install_claude_skills.sh --dry-run did not plan '$step'"
+    done
 
     if [ -d "$tmp/.local/share/claude-skills" ]; then
         fail "install_claude_skills.sh --dry-run created cache directory"
@@ -1264,6 +1274,110 @@ test_install_claude_skills_dry_run() (
         fail "install_claude_skills.sh --dry-run created skills directory"
     fi
     return 0
+)
+
+# sync_agent_skills.sh --dry-run must create nothing under a throwaway HOME
+# while still reporting the links it would make in both directions.
+test_sync_agent_skills_dry_run() (
+    local tmp script output
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    script="$DIR/scripts/sync_agent_skills.sh"
+    bash -n "$script" || fail "sync_agent_skills.sh syntax error"
+
+    mkdir -p "$tmp/.claude/skills/foo" "$tmp/.codex/skills/bar"
+    : > "$tmp/.claude/skills/foo/SKILL.md"
+    : > "$tmp/.codex/skills/bar/SKILL.md"
+
+    output="$(HOME="$tmp" CODEX_HOME="$tmp/.codex" bash "$script" --dry-run 2>&1)" ||
+        fail "sync_agent_skills.sh --dry-run returned non-zero: $output"
+    printf '%s\n' "$output" | grep -q 'Would run: agents/skills:foo' ||
+        fail "dry-run did not report the Claude -> Codex link"
+    printf '%s\n' "$output" | grep -q 'Would run: claude/skills:bar' ||
+        fail "dry-run did not report the Codex -> Claude link"
+    [ ! -e "$tmp/.agents" ] || fail "dry-run created ~/.agents"
+    [ ! -e "$tmp/.claude/skills/bar" ] || fail "dry-run created ~/.claude/skills/bar"
+)
+
+# Real run under a throwaway HOME: links both ways, skips what it must, is
+# idempotent (no .bak), and prunes only its own broken links.
+test_sync_agent_skills_links_both_ways() (
+    local tmp script out
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    script="$DIR/scripts/sync_agent_skills.sh"
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+
+    mkdir -p "$HOME/.claude/skills/foo" "$HOME/.claude/skills/synced/s" \
+             "$HOME/.claude/skills/taken" "$HOME/.agents/skills/taken" \
+             "$HOME/.codex/skills/bar" "$HOME/.codex/skills/.system/sys" \
+             "$HOME/.codex/skills/nodoc" "$tmp/elsewhere"
+    : > "$HOME/.claude/skills/foo/SKILL.md"
+    : > "$HOME/.claude/skills/synced/s/SKILL.md"
+    : > "$HOME/.claude/skills/taken/SKILL.md"
+    : > "$HOME/.codex/skills/bar/SKILL.md"
+    : > "$HOME/.codex/skills/.system/sys/SKILL.md"
+    ln -s "$tmp/elsewhere/gone" "$HOME/.agents/skills/alien"   # broken, not ours
+
+    bash "$script" >/dev/null || fail "first sync run failed"
+
+    [ -L "$HOME/.agents/skills/foo" ] || fail "foo not mirrored to ~/.agents/skills"
+    [ "$(portable_realpath "$HOME/.agents/skills/foo")" = "$(portable_realpath "$HOME/.claude/skills/foo")" ] ||
+        fail ".agents/skills/foo points at the wrong target"
+    [ -L "$HOME/.claude/skills/bar" ] || fail "bar not mirrored to ~/.claude/skills"
+    [ "$(portable_realpath "$HOME/.claude/skills/bar")" = "$(portable_realpath "$HOME/.codex/skills/bar")" ] ||
+        fail ".claude/skills/bar points at the wrong target"
+    [ ! -e "$HOME/.agents/skills/bar" ] || fail "Codex-native skill was mirrored back into ~/.agents/skills"
+    [ ! -e "$HOME/.agents/skills/synced" ] || fail "synced dir was mirrored"
+    [ ! -e "$HOME/.claude/skills/.system" ] || fail ".system was mirrored"
+    [ ! -e "$HOME/.claude/skills/nodoc" ] || fail "dir without SKILL.md was mirrored"
+    if [ ! -d "$HOME/.agents/skills/taken" ] || [ -L "$HOME/.agents/skills/taken" ]; then
+        fail "real directory at destination was clobbered"
+    fi
+    [ -L "$HOME/.agents/skills/alien" ] || fail "broken link outside managed roots was removed"
+
+    out="$(bash "$script" 2>&1)" || fail "second sync run failed"
+    if printf '%s\n' "$out" | grep -q 'Backing up'; then
+        fail "second run backed something up"
+    fi
+    [ -z "$(find "$HOME/.agents" "$HOME/.claude/skills" -name '*.bak*' 2>/dev/null)" ] ||
+        fail "second run produced .bak files"
+
+    rm -rf "$HOME/.codex/skills/bar" "$HOME/.claude/skills/foo"
+    bash "$script" >/dev/null || fail "prune run failed"
+    [ ! -L "$HOME/.claude/skills/bar" ] || fail "broken Codex -> Claude link not pruned"
+    [ ! -L "$HOME/.agents/skills/foo" ] || fail "broken Claude -> Codex link not pruned"
+)
+
+# uninstall.sh must remove the sync links (root sweep through unlink_config)
+# while leaving the real skill directories on both sides alone.
+test_uninstall_removes_agent_skill_links() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    mkdir -p "$HOME/.claude/skills/foo" "$HOME/.codex/skills/bar" "$HOME/.dotfiles-generated"
+    : > "$HOME/.claude/skills/foo/SKILL.md"
+    : > "$HOME/.codex/skills/bar/SKILL.md"
+    bash "$DIR/scripts/sync_agent_skills.sh" >/dev/null || fail "sync failed"
+    [ -L "$HOME/.agents/skills/foo" ] || fail "precondition: ~/.agents/skills/foo missing"
+    [ -L "$HOME/.claude/skills/bar" ] || fail "precondition: ~/.claude/skills/bar missing"
+
+    # shellcheck source=uninstall.sh
+    . "$DIR/uninstall.sh"
+    # lib/common.sh was sourced at the top of this file with the real $HOME
+    # and is guarded against re-sourcing, so re-point the roots at the
+    # throwaway HOME (uninstall.sh reads them at call time).
+    CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+    CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
+    CODEX_HOME_SKILLS_DIR="$HOME/.codex/skills"
+
+    remove_symlinks >/dev/null
+    [ ! -L "$HOME/.agents/skills/foo" ] || fail ".agents/skills/foo survived uninstall"
+    [ ! -L "$HOME/.claude/skills/bar" ] || fail ".claude/skills/bar survived uninstall"
+    [ -d "$HOME/.claude/skills/foo" ] || fail "uninstall removed a real Claude skill dir"
+    [ -d "$HOME/.codex/skills/bar" ] || fail "uninstall removed a real Codex skill dir"
+    [ ! -d "$HOME/.agents" ] || fail "empty ~/.agents was not removed"
 )
 
 test_update_guard_decisions() (
@@ -1380,6 +1494,9 @@ main() {
     run_test test_chpc_allocs_python36_compatible
     run_test test_skill_files_have_valid_frontmatter
     run_test test_install_claude_skills_dry_run
+    run_test test_sync_agent_skills_dry_run
+    run_test test_sync_agent_skills_links_both_ways
+    run_test test_uninstall_removes_agent_skill_links
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     echo "All regression tests passed."

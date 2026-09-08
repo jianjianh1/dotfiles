@@ -430,6 +430,17 @@ backup_and_copy() {
 # shellcheck disable=SC2034  # used by sourcing scripts
 EXTERNAL_SKILLS_CACHE="$HOME/.local/share/claude-skills"
 
+# Skill roots shared by scripts/sync_agent_skills.sh (writer) and uninstall.sh
+# (cleaner). Codex CLI reads user skills from ~/.agents/skills (the cross-agent
+# location) and from $CODEX_HOME/skills, where its skill-installer writes and
+# its .system/ skills live.
+# shellcheck disable=SC2034  # used by sourcing scripts
+CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+# shellcheck disable=SC2034
+CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
+# shellcheck disable=SC2034
+CODEX_HOME_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
+
 # Collapse $HOME to a leading ~ for display. The ~ is a literal character
 # in the output, never a shell tilde-expansion.
 display_path() {
