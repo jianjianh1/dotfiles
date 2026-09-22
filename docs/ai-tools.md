@@ -1,8 +1,30 @@
 # AI Tool Configuration Reference
 
-Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh)
+Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
 > **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The "Denied Patterns" table below documents a **recommended hardening pattern**, not what the shipped JSON contains (the shipped `permissions.deny` array is empty). Before deploying these configs to a shared host, copy that table's patterns into `permissions.deny` and consider flipping `defaultMode` to `default`.
+
+---
+
+## Writing guidance shared by both agents
+
+[`ai/writing-guidance.md`](../ai/writing-guidance.md) gives Claude and Codex
+the same default for human-facing prose: lead with the point, connect ideas in
+paragraphs, define unfamiliar terms, and keep the context a new reader needs.
+It covers documents, plans, PR text, explanations, and chat replies. Explicit
+user requests and established document styles take precedence.
+
+`install.sh` links the guide to `~/.claude/rules/writing.md`, which Claude
+loads for every project without replacing an existing `~/.claude/CLAUDE.md`.
+For Codex, it links the guide as `~/.codex/AGENTS.md` when that file is absent;
+otherwise it updates a marked section in the existing file. If
+`~/.codex/AGENTS.override.md` exists, it updates that file too, because Codex
+reads the override in preference to `AGENTS.md`. An existing external symlink
+is backed up and its instructions are copied into a merged file; uninstall
+restores the link when that content is unchanged. `CODEX_HOME` replaces
+`~/.codex` for these instruction files when set. Re-running the installer
+refreshes managed sections. These instructions guide writing but cannot
+guarantee prose quality.
 
 ---
 

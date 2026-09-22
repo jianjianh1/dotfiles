@@ -1,6 +1,6 @@
 # Claude Code Skills Reference
 
-Sources: [`ai/skills/`](../ai/skills/), wired by [`install.sh::link_claude_skills`](../install.sh); upstream clones by [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh); mirrored to Codex by [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh).
+Sources: [`ai/skills/`](../ai/skills/) and the [shared writing guide](../ai/writing-guidance.md), wired by [`install.sh`](../install.sh); upstream clones by [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh); mirrored to Codex by [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh).
 
 Each subdirectory of [`ai/skills/`](../ai/skills/) is a [Claude Code skill](https://code.claude.com/docs/en/skills) — a folder containing a `SKILL.md` whose YAML frontmatter declares when Claude should load it. `install.sh` symlinks every skill directory into `~/.claude/skills/<name>` so that:
 
@@ -53,7 +53,7 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 |---|---|
 | [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) | "ask codex", "have codex review this", "second opinion", "delegate this", "run it in parallel" — how Claude calls Codex through the `codex` MCP tool (`codex` / `codex-reply`), and how Codex calls Claude with headless `claude -p`; sandbox/approval choices, prompt hygiene, what not to delegate |
 
-Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase. The style triad `reply-style` ↔ `explain-concepts` ↔ `technical-writing` works the same way: each defers to the others rather than restating shared rules.
+Skills cross-link (`[[other-name]]`) so chaining several stays cheap — invoking `cuda-kernels` reminds Claude that `gpu-profile` exists for the optimization phase. The style triad `reply-style` ↔ `explain-concepts` ↔ `technical-writing` works the same way: each defers to the others rather than restating shared rules. The short [shared writing guide](../ai/writing-guidance.md) loads in every Claude and Codex session; these skills add task-specific detail when needed.
 
 ## How skills are discovered
 

@@ -9,6 +9,8 @@ YES=false
 
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
+# shellcheck source=lib/agent-writing.sh
+. "$DIR/lib/agent-writing.sh"
 # EXTERNAL_SKILLS_CACHE and display_path come from lib/common.sh.
 
 # --- Helpers ---
@@ -200,6 +202,19 @@ remove_external_skills_cache() {
     fi
 }
 
+remove_agent_writing_guidance() {
+    unlink_config "$HOME/.claude/rules/writing.md"
+    remove_dir_if_empty "$HOME/.claude/rules"
+    local codex_dir="${CODEX_HOME:-$HOME/.codex}" codex_file
+    for codex_file in "$codex_dir/AGENTS.md" "$codex_dir/AGENTS.override.md"; do
+        if [ -L "$codex_file" ]; then
+            unlink_config "$codex_file"
+        else
+            remove_codex_writing_file "$codex_file"
+        fi
+    done
+}
+
 remove_symlinks() {
     echo "Removing config symlinks..."
     unlink_config "$HOME/CLAUDE.md"
@@ -219,6 +234,7 @@ remove_symlinks() {
     unlink_config "$HOME/.zshrc_exports"
     unlink_config "$HOME/.zshrc_aliases"
     unlink_config "$HOME/.claude/statusline.sh"
+    remove_agent_writing_guidance
     unlink_claude_skills
     unlink_external_claude_skills
     unlink_agent_skills

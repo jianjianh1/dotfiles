@@ -22,7 +22,7 @@ Active voice is shorter, attributes responsibility, and is easier to scan.
 Passive is appropriate when the actor is unknown, irrelevant, or the topic
 is the object ("The samples were stored at 4°C" in a methods section).
 
-## Concision: cut 30% on the second pass
+## Concision: remove what does not help the reader
 
 Edit by deletion. A draft is overlong because writing-to-think emits filler.
 Lines that almost always cost more than they earn:
@@ -34,8 +34,8 @@ Lines that almost always cost more than they earn:
 - "due to the fact that" → "because"
 - "a number of" → "several" or the actual number
 
-The 30% rule: after the first draft, count words; the second draft should be
-30% shorter without losing content.
+On the second pass, remove repetition and filler. Keep the context, evidence,
+examples, and limitations a reader needs to understand the point.
 
 ## Structure: lead with the answer
 
@@ -244,21 +244,22 @@ For evaluating someone else's citations during review, see [[paper-review]].
 
 ## Lists vs prose
 
-- **Use a list when**: items are parallel, ≥3 items, the order doesn't
-  carry argument-of-the-form-A-therefore-B.
-- **Use prose when**: items are 1-2, you're making an argument, or the items
-  need connective tissue.
+- **Use a list when**: presenting steps, parallel items, or a comparison that
+  readers need to scan.
+- **Use prose when**: developing a claim, explaining why something happens,
+  or connecting one idea to the next.
 
-A list of two items is almost always two sentences in disguise.
+Give each item enough context to stand on its own. Do not turn a connected
+explanation into a list of fragments.
 
-## Section length
+## Section and paragraph length
 
 For docs and READMEs:
 
-- **Sections of 100-300 words.** If a section is longer, split. If shorter,
-  merge.
-- **Paragraphs of 2-5 sentences.** A one-sentence paragraph is fine for
-  emphasis; an eight-sentence paragraph is unread.
+- Split a section when its topic changes or readers need a new navigation
+  point. Merge headings that divide one short explanation into fragments.
+- Give each paragraph one main idea. Use as many sentences as the idea needs,
+  then start a new paragraph when the focus changes.
 
 ## Comments in code
 
@@ -309,7 +310,7 @@ style judgment call:
   single source on subject-verb-object discipline and "characters as
   subjects."
 - William Zinsser, *On Writing Well* — nonfiction prose; the chapter on
-  clutter is the canonical reference for the "cut 30%" rule above.
+  clutter is a useful reference for editing by deletion.
 - *The Chicago Manual of Style* (17th ed.) for hyphenation, capitalization,
   and serial-comma edge cases. For STEM, the IEEE Style Manual and
   ACM Style Guide override CMOS where they differ.

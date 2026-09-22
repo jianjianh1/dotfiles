@@ -1532,6 +1532,88 @@ test_uninstall_removes_agent_skill_links() (
     [ ! -d "$HOME/.agents" ] || fail "empty ~/.agents was not removed"
 )
 
+test_agent_writing_guidance_preserves_global_instructions() (
+    local tmp codex_dir
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home" CODEX_HOME="$tmp/codex-profile"
+    codex_dir="$CODEX_HOME"
+    mkdir -p "$HOME/.claude/rules" "$codex_dir"
+    printf '# Local storage rules\nKeep large files off root.\n' > "$HOME/.claude/CLAUDE.md"
+    printf '# Existing Claude writing rule\nKeep this style.\n' > "$HOME/.claude/rules/writing.md"
+    printf '# Existing Codex guidance\n\nKeep this instruction.\n' > "$codex_dir/AGENTS.md"
+    printf '# Temporary override\nKeep this too.\n' > "$codex_dir/AGENTS.override.md"
+    cp "$codex_dir/AGENTS.md" "$tmp/original-agents"
+    cp "$codex_dir/AGENTS.override.md" "$tmp/original-override"
+    cp "$HOME/.claude/CLAUDE.md" "$tmp/original-claude"
+    cp "$HOME/.claude/rules/writing.md" "$tmp/original-claude-rule"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    link_agent_writing_guidance >/dev/null || fail "writing guidance install failed"
+    link_agent_writing_guidance >/dev/null || fail "writing guidance reinstall failed"
+
+    [ -L "$HOME/.claude/rules/writing.md" ] || fail "Claude writing rule not linked"
+    [ "$(portable_realpath "$HOME/.claude/rules/writing.md")" = "$DIR/ai/writing-guidance.md" ] ||
+        fail "Claude writing rule points at the wrong source"
+    [ "$(grep -Fxc "$WRITING_BLOCK_BEGIN" "$codex_dir/AGENTS.md")" -eq 1 ] ||
+        fail "Codex guidance duplicated in AGENTS.md"
+    [ "$(grep -Fxc "$WRITING_BLOCK_BEGIN" "$codex_dir/AGENTS.override.md")" -eq 1 ] ||
+        fail "Codex guidance duplicated in AGENTS.override.md"
+    grep -Fq 'Keep this instruction.' "$codex_dir/AGENTS.md" ||
+        fail "Codex install removed existing instructions"
+
+    bash -c '. "$1/uninstall.sh"; remove_agent_writing_guidance' _ "$DIR" >/dev/null ||
+        fail "writing guidance uninstall failed"
+    cmp -s "$HOME/.claude/rules/writing.md" "$tmp/original-claude-rule" ||
+        fail "existing Claude writing rule was not restored"
+    cmp -s "$codex_dir/AGENTS.md" "$tmp/original-agents" || fail "Codex instructions changed after uninstall"
+    cmp -s "$codex_dir/AGENTS.override.md" "$tmp/original-override" || fail "Codex override changed after uninstall"
+    cmp -s "$HOME/.claude/CLAUDE.md" "$tmp/original-claude" || fail "Claude user guidance changed"
+
+    printf '%s\n%s\n' "$WRITING_BLOCK_END" "$WRITING_BLOCK_BEGIN" >> "$codex_dir/AGENTS.md"
+    cp "$codex_dir/AGENTS.md" "$tmp/malformed-agents"
+    if link_agent_writing_guidance >/dev/null 2>&1; then
+        fail "writing guidance accepted misordered markers"
+    fi
+    cmp -s "$codex_dir/AGENTS.md" "$tmp/malformed-agents" ||
+        fail "writing guidance changed a file with misordered markers"
+)
+
+test_agent_writing_guidance_restores_global_symlink() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    mkdir -p "$CODEX_HOME" "$tmp/external"
+    printf '# External guidance\n' > "$tmp/external/AGENTS.md"
+    ln -s "$tmp/external/AGENTS.md" "$CODEX_HOME/AGENTS.md"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    link_agent_writing_guidance >/dev/null || fail "writing guidance link install failed"
+    [ -L "$CODEX_HOME/AGENTS.md.bak" ] || fail "existing Codex link was not backed up"
+    [ -f "$CODEX_HOME/AGENTS.md" ] && [ ! -L "$CODEX_HOME/AGENTS.md" ] ||
+        fail "Codex guidance did not become a merged file"
+    grep -Fq '# External guidance' "$CODEX_HOME/AGENTS.md" ||
+        fail "existing linked instructions were not kept active"
+    grep -Fq "$WRITING_BLOCK_BEGIN" "$CODEX_HOME/AGENTS.md" ||
+        fail "new writing guidance was not merged"
+
+    bash -c '. "$1/uninstall.sh"; remove_agent_writing_guidance' _ "$DIR" >/dev/null ||
+        fail "writing guidance link uninstall failed"
+    [ "$(readlink "$CODEX_HOME/AGENTS.md")" = "$tmp/external/AGENTS.md" ] ||
+        fail "original Codex link was not restored"
+    [ ! -e "$CODEX_HOME/AGENTS.md.bak" ] || fail "Codex backup remained after restore"
+
+    rm "$CODEX_HOME/AGENTS.md"
+    link_agent_writing_guidance >/dev/null || fail "writing guidance fresh install failed"
+    [ -L "$CODEX_HOME/AGENTS.md" ] || fail "fresh Codex AGENTS.md was not linked"
+    bash -c '. "$1/uninstall.sh"; remove_agent_writing_guidance' _ "$DIR" >/dev/null ||
+        fail "writing guidance fresh uninstall failed"
+    [ ! -e "$CODEX_HOME/AGENTS.md" ] || fail "fresh Codex guidance survived uninstall"
+)
+
 test_update_guard_decisions() (
     local tmp
     tmp="$(mktemp -d)"
@@ -1653,6 +1735,8 @@ main() {
     run_test test_sync_agent_skills_dry_run
     run_test test_sync_agent_skills_links_both_ways
     run_test test_uninstall_removes_agent_skill_links
+    run_test test_agent_writing_guidance_preserves_global_instructions
+    run_test test_agent_writing_guidance_restores_global_symlink
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     echo "All regression tests passed."

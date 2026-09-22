@@ -59,7 +59,9 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
   └── includes ~/.dotfiles-generated/gitconfig.compat
 
 ~/.claude/settings.json   (copy of ai/claude_settings.json)
+~/.claude/rules/writing.md (symlink → ai/writing-guidance.md; all projects)
 ~/.codex/config.toml      (copy of ai/codex_config.toml)
+~/.codex/AGENTS.md        (ai/writing-guidance.md, linked or merged; all projects)
 
 ~/CLAUDE.md  (symlink → chpc/CLAUDE.md on CHPC, or cloudlab/CLAUDE.md on CloudLab;
              mutually exclusive, gated by is_chpc() / is_cloudlab())

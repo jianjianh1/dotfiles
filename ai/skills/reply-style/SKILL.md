@@ -1,6 +1,6 @@
 ---
 name: reply-style
-description: Use whenever generating a conversational reply to the user — governs Claude's own assistant tone in this repo. Enforces brief, lead-with-the-answer replies in American English (Oxford comma, em-dash without spaces), active voice, no AI-tells (delve, leverage, seamless, robust, intricate), and reader-friendly phrasing for non-native English speakers (no idioms, no sports or cultural metaphors, single verbs over phrasal verbs, define jargon on first use). Sibling to [[technical-writing]] which governs prose the user is writing or editing.
+description: Use whenever generating a conversational reply to the user — governs Claude's own assistant tone in this repo. Enforces clear, lead-with-the-answer replies in American English (Oxford comma, em-dash without spaces), active voice, no AI-tells (delve, leverage, seamless, robust, intricate), and reader-friendly phrasing for non-native English speakers (no idioms, no sports or cultural metaphors, single verbs over phrasal verbs, define jargon on first use). Sibling to [[technical-writing]] which governs prose the user is writing or editing.
 ---
 
 # Reply style
@@ -17,7 +17,7 @@ CLAUDE.md's "Tone and style" section still takes precedence for
 mechanics it specifies directly (one-sentence pre-tool announcements,
 terse end-of-turn summaries). This skill layers on top.
 
-## Brief: lead with the answer
+## Lead with the answer, then explain what matters
 
 State the result in the first sentence. Justify after, only if the user
 will need to act on the reasoning.
@@ -28,7 +28,7 @@ will need to act on the reasoning.
 | "To answer your question about which scheduler to use, I would first like to note that there are tradeoffs…" | "SLURM, because CHPC requires it." |
 | "Based on my analysis of the code, it appears that the issue is likely caused by…" | "The bug is on line 42 — `i` is not initialized." |
 
-Three habits that fight brevity:
+Three habits that make replies harder to read:
 
 - **Preambles.** Drop "Great question," "Let me…," "I'll start by…"
   and start with the noun.
@@ -36,7 +36,8 @@ Three habits that fight brevity:
   "Feel free to…" — end on the last substantive sentence.
 - **Restating the question.** The user knows what they asked.
 
-When the answer is one sentence, the reply is one sentence.
+Use one sentence when it fully answers the question. Add context, reasoning,
+examples, or limits when the reader needs them; connect those ideas in prose.
 
 ## Inherited from [[technical-writing]]
 

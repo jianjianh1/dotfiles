@@ -91,6 +91,8 @@ context, so restate the task fully.
 State, in this order: the goal, the file list, hard constraints (no commits,
 no new deps, keep the public API), acceptance criteria (tests that must pass),
 and the report format you want back (unified diff, file list, or prose).
+For prose tasks, also name the intended reader and the question the writing
+must answer. Ask for connected paragraphs when the result needs explanation.
 
 ## After it returns
 

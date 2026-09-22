@@ -49,6 +49,8 @@ _setup_cleanup() {
 # --- Shared helpers (run_step, retry, backup_and_link, backup_and_copy) ---
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
+# shellcheck source=lib/agent-writing.sh
+. "$DIR/lib/agent-writing.sh"
 
 # --- Helpers ---
 
@@ -1947,6 +1949,22 @@ link_claude_skills() {
     done
 }
 
+# User-level rules are loaded in every Claude session. Codex reads its global
+# AGENTS.md; an AGENTS.override.md, when present, shadows that file.
+link_agent_writing_guidance() {
+    local source="$DIR/ai/writing-guidance.md"
+    local claude_rule="$HOME/.claude/rules/writing.md"
+    local codex_dir="${CODEX_HOME:-$HOME/.codex}"
+
+    mkdir -p "$HOME/.claude/rules" "$codex_dir" || return 1
+    backup_and_link "$source" "$claude_rule" || return 1
+    manifest_add_path "$claude_rule" || return 1
+    install_codex_writing_file "$codex_dir/AGENTS.md" || return 1
+    if [ -e "$codex_dir/AGENTS.override.md" ] || [ -L "$codex_dir/AGENTS.override.md" ]; then
+        install_codex_writing_file "$codex_dir/AGENTS.override.md" || return 1
+    fi
+}
+
 # The Notchpeak HPC agent guide (chpc/CLAUDE.md) is CHPC-specific operational
 # knowledge that should track the repo verbatim (like skills), so symlink it --
 # but only on CHPC, where ~/CLAUDE.md is the guide every agent loads. On first
@@ -2116,6 +2134,7 @@ setup_main() {
 
     # Link remaining configs
     run_step "shell config links" link_generated_configs
+    run_step "agent writing guidance" link_agent_writing_guidance
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
     run_step "agent skills sync"  sync_agent_skills
