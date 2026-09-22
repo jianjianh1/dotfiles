@@ -41,6 +41,7 @@ claude mcp --help >/dev/null 2>&1 && CLAUDE_HAS_MCP=true
 claude plugin --help >/dev/null 2>&1 && CLAUDE_HAS_PLUGIN_CMD=true
 
 FAILURES=()
+CODEX_MCP_EXPECTED=false
 
 # --- MCP servers -----------------------------------------------------------
 
@@ -102,18 +103,17 @@ else
     else
         echo "  Skipping Fetch/Time MCPs (uvx not found — install uv first)"
     fi
-    # Codex CLI as an MCP server so Claude can delegate to it mid-session.
-    # Tools: `codex` (prompt, cwd, sandbox, approval-policy, model, config,
-    # base-instructions, developer-instructions) and `codex-reply` (threadId,
-    # prompt). Usage guidance lives in ai/skills/agent-delegate. Not the same
-    # namespace as `codex` in STALE_PLUGINS below — that is the retired
-    # marketplace plugin (`claude plugin`); this is `claude mcp`.
-    if command -v codex &>/dev/null; then
+    # Repo-owned adapter around `codex exec`. Current Codex releases removed
+    # the deprecated `codex mcp-server` command, so the stable bridge exposes
+    # the same two delegation tools without pinning an obsolete Codex build.
+    # This MCP is separate from the retired marketplace plugin named codex.
+    if command -v codex &>/dev/null && [ -x "$HOME/.local/bin/codex-mcp-bridge" ]; then
         echo "  Adding Codex MCP server..."
         run_step "mcp:codex" mcp_add codex --scope user --transport stdio codex \
-            -- codex mcp-server
+            -- "$HOME/.local/bin/codex-mcp-bridge"
+        CODEX_MCP_EXPECTED=true
     else
-        echo "  Skipping Codex MCP (codex not found — re-run ./install.sh once it is installed)"
+        echo "  Skipping Codex MCP (codex or codex-mcp-bridge not found — re-run ./install.sh)"
     fi
 fi
 
@@ -131,6 +131,12 @@ if $CLAUDE_HAS_MCP; then
             echo "  $row"
         else
             echo "  $name: (not found)"
+        fi
+        if [ "$name" = codex ] && $CODEX_MCP_EXPECTED; then
+            if [ -z "$row" ] || ! printf '%s\n' "$row" | grep -q 'Connected'; then
+                FAILURES+=("mcp:codex health check")
+                echo "  Warning: Codex MCP did not report Connected." >&2
+            fi
         fi
     done
 else

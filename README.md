@@ -43,8 +43,9 @@ Restores `.bak` backups of any files that were replaced.
 ### Validation
 
 ```bash
-bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+bash -n install.sh deploy.sh uninstall.sh ai/claude_statusline.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh ai/claude_statusline.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+node --check scripts/codex-mcp-bridge.mjs
 bash scripts/test_regressions.sh
 HOME="$(mktemp -d)" ./install.sh --dry-run
 ```
@@ -73,10 +74,12 @@ HOME="$(mktemp -d)" ./install.sh --dry-run
 | _generated_ `tmux-theme.conf` | `~/.tmux-theme.conf` | symlink (rendered by `install.sh`) |
 | `git/gitconfig` | `~/.gitconfig` | symlink |
 | `ai/claude_settings.json` | `~/.claude/settings.json` | copy |
+| `ai/claude_statusline.sh` | `~/.claude/statusline.sh` | symlink |
 | `ai/codex_config.toml` | `~/.codex/config.toml` | copy |
 | `ai/skills/<name>/` | `~/.claude/skills/<name>` | symlink |
 | _mirrored_ `~/.claude/skills/<name>` | `~/.agents/skills/<name>` | symlink (for Codex, by `scripts/sync_agent_skills.sh`) |
 | `scripts/detect-theme.sh` | `~/.local/bin/detect-theme` | symlink |
+| `scripts/codex-mcp-bridge.mjs` | `~/.local/bin/codex-mcp-bridge` | symlink |
 | `scripts/chpc-allocs.py` | `~/.local/bin/chpc-allocs` | symlink |
 
 Both `shell/bashrc_exports` and `shell/bashrc_aliases` are sourced from `~/.bashrc` (lines appended by `install.sh` if not already present). Zsh wiring is parallel: `~/.zshrc_exports` and `~/.zshrc_aliases`.
@@ -124,6 +127,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │   ├── install_claude_plugins.sh   # MCP servers (fetch, time, codex) + marketplace plugins for Claude Code
 │   ├── install_claude_skills.sh    # Upstream skill repos → ~/.claude/skills/
 │   ├── sync_agent_skills.sh        # Mirror skills between Claude Code and Codex
+│   ├── codex-mcp-bridge.mjs        # Current Codex CLI → stdio MCP bridge for Claude
 │   ├── detect-theme.sh             # Terminal background detector
 │   ├── chpc-allocs.py              # CHPC SLURM allocations CLI
 │   └── test_regressions.sh         # Regression test suite
@@ -149,6 +153,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 │   └── gitconfig               # delta pager, rebase, aliases
 ├── ai/
 │   ├── claude_settings.json    # Claude Code settings
+│   ├── claude_statusline.sh    # Adaptive two-line Claude status command
 │   ├── codex_config.toml       # Codex CLI settings
 │   └── skills/                 # Claude Code skills (HPC, CUDA, LaTeX, …) — symlinked into ~/.claude/skills/, mirrored to ~/.agents/skills/ for Codex
 ├── .githooks/
@@ -178,7 +183,7 @@ All tools install to `~/.local/bin/`. Installed via GitHub releases (no root req
 
 | Generated file | Source config | Adapts for |
 |---------------|-------------|------------|
-| `tmux.compat.conf` | `tmux/tmux.conf` | Terminal type, true color, passthrough |
+| `tmux.compat.conf` | `tmux/tmux.conf` | Terminal type, true color, passthrough, global clipboard |
 | `tmux-theme*.conf` | (rendered) | Light/dark palette dispatcher (`*-style` vs legacy `*-bg`/`*-fg`) |
 | `vimrc.compat` | `editor/vimrc` | Clipboard, listchars, Neovim features |
 | `gitconfig.compat` | `git/gitconfig` | Credential helper; HTTPS rewrite on keyless hosts |

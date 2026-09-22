@@ -1,6 +1,6 @@
 # AI Tool Configuration Reference
 
-Sources: [`claude_settings.json`](../ai/claude_settings.json), [`codex_config.toml`](../ai/codex_config.toml), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh)
+Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh)
 
 > **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The "Denied Patterns" table below documents a **recommended hardening pattern**, not what the shipped JSON contains (the shipped `permissions.deny` array is empty). Before deploying these configs to a shared host, copy that table's patterns into `permissions.deny` and consider flipping `defaultMode` to `default`.
 
@@ -40,6 +40,13 @@ Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not 
 | `showTurnDuration` | `true` | Show time taken per turn |
 | `terminalProgressBarEnabled` | `true` | Progress bar in terminal |
 | `autoConnectIde` | `true` | Auto-connect to IDE if available |
+| `statusLine` | `~/.claude/statusline.sh` | Two-line model, project, context, usage, cost, and git status |
+
+`install.sh` symlinks the tracked status command into `~/.claude/statusline.sh`.
+It renders model/effort/session/project/git/PR on the first line and a ten-cell
+context bar, five-hour and seven-day allowance, cache ratio, cost, elapsed time,
+and changed-line counts on the second. Missing data is omitted, lower-priority
+segments disappear in narrow terminals, and `NO_COLOR` is honored.
 
 ### Timeouts
 
@@ -121,12 +128,6 @@ Copied to `~/.codex/config.toml` by `install.sh` (mode `600`).
 | `approval_policy` | `never` | Never ask for approval |
 | `sandbox_mode` | `danger-full-access` | Full filesystem/network access |
 
-### Attribution
-
-| Setting | Value |
-|---------|-------|
-| `commit_attribution` | `""` (empty — no attribution) |
-
 ### Shell
 
 ```toml
@@ -147,6 +148,11 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 |---------|-------|
 | `notifications` | `true` |
 | `animations` | `true` |
+| `status_line_use_colors` | `true` |
+| `status_line` | Model/reasoning, activity, context/tokens, limits/cost, project/git/PR, permissions, progress, and thread name |
+
+The Codex status line is native TUI configuration. Codex automatically omits
+unavailable items and truncates the ordered list to fit the terminal width.
 
 ### Trusted Projects
 
@@ -184,7 +190,15 @@ The install script registers three MCP servers (`fetch`, `time`, `codex`) and th
 |--------|-----------|---------|---------|
 | `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching (URLs Claude can't otherwise reach) |
 | `time` | stdio/uvx | `mcp-server-time` | Current time / timezone conversions (date-stamp memory, reason about SLURM `--time=` budgets) |
-| `codex` | stdio | `codex mcp-server` (Codex CLI itself) | Delegate to Codex mid-session: tools `codex` (prompt, cwd, sandbox, approval-policy, model, …) and `codex-reply` (threadId, prompt). When and how: the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill |
+| `codex` | stdio | `~/.local/bin/codex-mcp-bridge` | Delegate to current Codex releases: tools `codex` (prompt, cwd, read-only/workspace-write sandbox, model, developer instructions) and `codex-reply` (threadId, prompt). When and how: the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill |
+
+The dependency-free bridge is owned by this repo and wraps `codex exec --json`
+plus `codex exec resume`. This replaces the deprecated `codex mcp-server`
+subcommand removed from current Codex releases. Delegated calls always use
+approval policy `never`; new calls default to `read-only`, may explicitly use
+`workspace-write`, and cannot request `danger-full-access`. The installer runs
+one live `claude mcp list` health check and reports a warning unless the Codex
+row says `Connected`.
 
 ### Cloud-managed connector catalog (`claude.ai *`)
 
@@ -210,4 +224,4 @@ Each step is best-effort:
 - If `claude mcp` is unavailable the MCP step is skipped.
 - If `claude plugin` is unavailable the marketplace step is skipped.
 - If `uvx` is missing the `fetch` and `time` MCPs are skipped (`uv` is installed by `install.sh`, so this is rare).
-- If `codex` is missing the `codex` MCP is skipped; re-run `./install.sh` after Codex is installed and it registers.
+- If `codex` or the installed bridge is missing the `codex` MCP is skipped; re-run `./install.sh` after Codex is installed and it registers.

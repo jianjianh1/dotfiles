@@ -7,7 +7,7 @@ Configs are grouped by topic into subdirectories:
 - `shell/` — bash/zsh rc files, readline, dircolors, starship prompt
 - `editor/` — `vimrc` and the `nvim/` Neovim tree (one plugin spec per file in `lua/plugins/`)
 - `tmux/`, `git/`, `ai/` — single-tool configs
-- `scripts/` — `install_claude_plugins.sh`, `install_claude_skills.sh`, `sync_agent_skills.sh`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
+- `scripts/` — `install_claude_plugins.sh`, `install_claude_skills.sh`, `sync_agent_skills.sh`, `codex-mcp-bridge.mjs`, `detect-theme.sh`, `chpc-allocs.py`, `test_regressions.sh`
 - `lib/` — shared shell helpers (`common.sh`, `vscode-tunnel.sh`)
 - `docs/` — per-tool reference tables
 
@@ -36,7 +36,7 @@ Use the scripts directly from the repo root.
 - `./deploy.sh --help` shows deploy options for remote server setup.
 - `./deploy.sh --yes` skips confirmation prompts during deploy.
 - `./uninstall.sh --yes` removes symlinks and tool installs non-interactively.
-- `bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases` runs a syntax check.
+- `bash -n install.sh deploy.sh uninstall.sh ai/claude_statusline.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases` runs a Bash syntax check; `node --check scripts/codex-mcp-bridge.mjs` checks the MCP bridge.
 
 ## Script Flag Conventions
 
@@ -79,8 +79,9 @@ shellcheck --severity=warning --exclude=SC1091 shell/bashrc_exports shell/bashrc
 ### Script changes (`install.sh`, `deploy.sh`, `uninstall.sh`)
 
 ```bash
-bash -n install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
-shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+bash -n install.sh deploy.sh uninstall.sh ai/claude_statusline.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+shellcheck --severity=warning --exclude=SC1091 install.sh deploy.sh uninstall.sh ai/claude_statusline.sh scripts/install_claude_plugins.sh scripts/install_claude_skills.sh scripts/sync_agent_skills.sh lib/common.sh .githooks/pre-commit scripts/test_regressions.sh shell/bashrc_exports shell/bashrc_aliases
+node --check scripts/codex-mcp-bridge.mjs
 bash scripts/test_regressions.sh
 # Run affected script to smoke test
 ./install.sh --dry-run          # after install.sh changes (safe, no side effects)

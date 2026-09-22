@@ -328,6 +328,158 @@ test_detect_theme_installs_to_local_bin() (
     [ ! -e "$BIN_DIR/detect-theme" ] || fail "detect-theme should ignore BIN_DIR"
 )
 
+test_codex_mcp_bridge_installs_to_local_bin() (
+    local tmp target
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME/.dotfiles-generated"
+    INSTALL_MANIFEST="$HOME/.dotfiles-generated/install-manifest.txt"
+    DRY_RUN=false
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+
+    install_codex_mcp_bridge >/dev/null || fail "install_codex_mcp_bridge failed"
+    [ -x "$HOME/.local/bin/codex-mcp-bridge" ] ||
+        fail "Codex MCP bridge was not linked into ~/.local/bin"
+    target="$(portable_realpath "$HOME/.local/bin/codex-mcp-bridge" 2>/dev/null || true)"
+    [ "$target" = "$DIR/scripts/codex-mcp-bridge.mjs" ] ||
+        fail "Codex MCP bridge symlink points at '$target'"
+    manifest_contains_path "$HOME/.local/bin/codex-mcp-bridge" ||
+        fail "Codex MCP bridge was not recorded in the manifest"
+)
+
+test_tmux_clipboard_compat_uses_global_scope() (
+    local tmp compat
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home"
+    mkdir -p "$HOME"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    mkdir -p "$GENERATED_DIR"
+    tmux_default_terminal() { printf 'screen-256color\n'; }
+    tmux_version() { printf '%s\n' "${TMUX_TEST_VERSION:-3.2}"; }
+
+    TMUX_TEST_VERSION=3.2
+    render_tmux_compat
+    compat="$GENERATED_DIR/tmux.compat.conf"
+    grep -qx 'set -g set-clipboard on' "$compat" ||
+        fail "tmux compat config did not use global set-clipboard scope"
+    if grep -q 'set -s set-clipboard' "$compat"; then
+        fail "tmux compat config retained the server-scoped clipboard command"
+    fi
+
+    TMUX_TEST_VERSION=2.5
+    render_tmux_compat
+    if grep -q '^set .*set-clipboard' "$compat"; then
+        fail "tmux < 2.6 received an unsupported set-clipboard command"
+    fi
+    grep -q 'clipboard integration unavailable' "$compat" ||
+        fail "tmux < 2.6 fallback comment is missing"
+)
+
+test_claude_statusline() (
+    local tmp repo fixture wide narrow fallback
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    repo="$tmp/repo"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email test@example.com
+    git -C "$repo" config user.name Test
+    printf 'tracked\n' > "$repo/tracked.txt"
+    git -C "$repo" add tracked.txt
+    git -C "$repo" commit -qm initial
+    printf 'dirty\n' >> "$repo/tracked.txt"
+
+    fixture="$(printf '%s' '{"model":{"display_name":"Opus 4.1"},"effort_level":"high","session_name":"fixture-session","workspace":{"current_dir":"REPO"},"pull_request":{"number":17},"context_window":{"used_percentage":42,"current_usage":{"cache_read_input_tokens":800,"input_tokens":200}},"rate_limits":{"five_hour":{"used_percentage":25},"seven_day":{"used_percentage":40}},"cost":{"total_cost_usd":1.234,"total_duration_ms":125000,"total_lines_added":10,"total_lines_removed":3}}' | sed "s|REPO|$repo|")"
+
+    wide="$(printf '%s' "$fixture" | NO_COLOR=1 TERM=dumb COLUMNS=160 "$DIR/ai/claude_statusline.sh")" ||
+        fail "Claude status line failed on a valid fixture"
+    [ "$(printf '%s\n' "$wide" | wc -l | tr -d ' ')" -eq 2 ] ||
+        fail "Claude status line should render exactly two lines"
+    printf '%s\n' "$wide" | grep -q 'Opus 4.1.*effort high.*fixture-session' ||
+        fail "Claude status line omitted model, effort, or session"
+    printf '%s\n' "$wide" | grep -q 'git:.*\*.*PR #17' ||
+        fail "Claude status line omitted dirty git or PR state"
+    printf '%s\n' "$wide" | grep -q 'ctx .*42%.*5h 75% left.*7d 60% left' ||
+        fail "Claude status line omitted context or rate limits"
+    printf '%s\n' "$wide" | grep -q 'cache 80%.*\$1.23.*2m05s.*+10/-3' ||
+        fail "Claude status line omitted cache, cost, duration, or diff details"
+    if printf '%s' "$wide" | grep -q $'\033'; then
+        fail "Claude status line ignored NO_COLOR"
+    fi
+
+    narrow="$(printf '%s' "$fixture" | NO_COLOR=1 TERM=dumb COLUMNS=90 "$DIR/ai/claude_statusline.sh")"
+    if printf '%s\n' "$narrow" | grep -Eq 'fixture-session|PR #17|cache 80%|\$1.23'; then
+        fail "Claude status line did not trim low-priority fields in a narrow terminal"
+    fi
+    printf '%s\n' "$narrow" | grep -q 'Opus 4.1.*git:' ||
+        fail "Claude status line trimmed essential narrow-terminal fields"
+
+    fallback="$(printf 'not-json' | "$DIR/ai/claude_statusline.sh")"
+    [ "$fallback" = Claude ] || fail "Claude status line invalid-input fallback changed"
+)
+
+test_codex_mcp_bridge_protocol() (
+    local tmp fake_codex output log
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    fake_codex="$tmp/codex"
+    log="$tmp/codex.log"
+    mkdir -p "$tmp/work"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'printf "%s\n" "$*" >> "$CODEX_TEST_LOG"' \
+        'case " $* " in' \
+        '  *" force-error "*) printf "simulated failure\n" >&2; exit 7 ;;' \
+        '  *" resume "*)' \
+        '    printf '\''{"type":"thread.started","thread_id":"thread-resumed"}\n'\''' \
+        '    printf '\''{"type":"item.completed","item":{"type":"agent_message","text":"resumed answer"}}\n'\''' \
+        '    ;;' \
+        '  *)' \
+        '    printf '\''{"type":"thread.started","thread_id":"thread-new"}\n'\''' \
+        '    printf '\''{"type":"item.completed","item":{"type":"agent_message","text":"new answer"}}\n'\''' \
+        '    ;;' \
+        'esac' > "$fake_codex"
+    chmod +x "$fake_codex"
+
+    output="$(printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"codex\",\"arguments\":{\"prompt\":\"review\",\"cwd\":\"$tmp/work\",\"sandbox\":\"read-only\",\"approval-policy\":\"never\",\"model\":\"gpt-test\"}}}" \
+        '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"codex-reply","arguments":{"threadId":"thread-new","prompt":"continue"}}}' \
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"codex","arguments":{"prompt":"unsafe","sandbox":"danger-full-access"}}}' \
+        '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"codex","arguments":{"prompt":"force-error"}}}' |
+        CODEX_BIN="$fake_codex" CODEX_TEST_LOG="$log" node "$DIR/scripts/codex-mcp-bridge.mjs")" ||
+        fail "Codex MCP bridge protocol run failed"
+
+    printf '%s\n' "$output" | jq -s -e '
+        (map(select(.id == 1))[0].result.serverInfo.name == "dotfiles-codex-bridge") and
+        (map(select(.id == 2))[0].result.tools | map(.name) | sort == ["codex", "codex-reply"]) and
+        (map(select(.id == 3))[0].result.structuredContent == {threadId:"thread-new", content:"new answer"}) and
+        (map(select(.id == 4))[0].result.structuredContent.content == "resumed answer") and
+        (map(select(.id == 5))[0].result.isError == true) and
+        (map(select(.id == 6))[0].result.isError == true)
+    ' >/dev/null || fail "Codex MCP bridge returned incorrect protocol responses"
+    if printf '%s\n' "$output" | jq -e '.result.tools[]?.inputSchema.properties.sandbox.enum[]? | select(. == "danger-full-access")' >/dev/null; then
+        fail "Codex MCP bridge exposed danger-full-access delegation"
+    fi
+    grep -q -- '-a never exec --json --color never --skip-git-repo-check -s read-only' "$log" ||
+        fail "Codex MCP bridge did not force headless read-only defaults"
+    grep -q -- "-C $tmp/work -m gpt-test review" "$log" ||
+        fail "Codex MCP bridge did not forward cwd, model, and prompt"
+    grep -q -- '-a never exec resume --json --skip-git-repo-check thread-new continue' "$log" ||
+        fail "Codex MCP bridge did not invoke codex exec resume"
+)
+
 test_deploy_sources_without_prompting() (
     local tmp
     tmp="$(mktemp -d)"
@@ -1469,6 +1621,10 @@ main() {
     run_test test_cached_init_evals_output_when_cache_unwritable
     run_test test_manifest_controls_uninstall
     run_test test_detect_theme_installs_to_local_bin
+    run_test test_codex_mcp_bridge_installs_to_local_bin
+    run_test test_tmux_clipboard_compat_uses_global_scope
+    run_test test_claude_statusline
+    run_test test_codex_mcp_bridge_protocol
     run_test test_scripts_source_without_side_effects
     run_test test_deploy_sources_without_prompting
     run_test test_remote_dotfiles_preflight_snippet

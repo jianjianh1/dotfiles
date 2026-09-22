@@ -30,16 +30,18 @@ no memory of this conversation, so the prompt must carry everything it needs.
 
 ## From Claude Code → Codex (MCP tool `codex`)
 
-`scripts/install_claude_plugins.sh` registers `codex mcp-server` as the
-user-scope MCP `codex`. Two tools appear: `codex` (start a thread) and
-`codex-reply` (continue it).
+`scripts/install_claude_plugins.sh` registers the repo-owned
+`~/.local/bin/codex-mcp-bridge` as the user-scope MCP `codex`. The bridge wraps
+current `codex exec` releases; it replaces the removed `codex mcp-server`
+subcommand. Two tools appear: `codex` (start a thread) and `codex-reply`
+(continue it).
 
 | Parameter | Use |
 |---|---|
 | `prompt` | Self-contained task: goal, files, constraints, acceptance criteria, report format |
 | `cwd` | Absolute project root; Codex resolves relative paths against it |
 | `sandbox` | `read-only` for reviews and opinions; `workspace-write` for edits. Never `danger-full-access` from a delegate |
-| `approval-policy` | Always `"never"` — anything else blocks waiting for a human who is not there |
+| `approval-policy` | Optional compatibility field; the only accepted value is `"never"` |
 | `model` | Omit unless the user names one |
 | `developer-instructions` | Pin conventions: "do not commit", "no new dependencies", "report as a unified diff" |
 
@@ -50,8 +52,10 @@ Example call:
  "cwd": "/home/user/project", "sandbox": "read-only", "approval-policy": "never"}
 ```
 
-The result carries a `threadId`. Iterate with `codex-reply {threadId, prompt}`
-instead of starting over; keep one thread per task.
+The bridge itself always forces approval policy `never`, rejects delegated
+`danger-full-access`, and defaults new threads to `read-only`. The result
+carries a `threadId`. Iterate with `codex-reply {threadId, prompt}` instead of
+starting over; keep one thread per task.
 
 **Fallback without the MCP** (`claude mcp list` lacks `codex`): run the CLI
 through Bash. `approval_policy = "never"` comes from `~/.codex/config.toml`,

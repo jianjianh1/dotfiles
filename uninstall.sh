@@ -218,6 +218,7 @@ remove_symlinks() {
     unlink_config "$HOME/.bashrc_aliases"
     unlink_config "$HOME/.zshrc_exports"
     unlink_config "$HOME/.zshrc_aliases"
+    unlink_config "$HOME/.claude/statusline.sh"
     unlink_claude_skills
     unlink_external_claude_skills
     unlink_agent_skills
@@ -249,13 +250,16 @@ remove_git_hooks_config() {
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq rclone uv uvx starship atuin chpc-allocs detect-theme; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq rclone uv uvx starship atuin chpc-allocs detect-theme codex-mcp-bridge; do
         remove_bin "$bin"
     done
 }
 
 remove_claude() {
     echo "Removing Claude Code..."
+    if command -v claude >/dev/null 2>&1 && claude mcp --help >/dev/null 2>&1; then
+        claude mcp remove --scope user codex >/dev/null 2>&1 || true
+    fi
     remove_bin claude
     remove_tracked_path "$HOME/.claude/settings.json"
     remove_dir_if_empty "$HOME/.claude"

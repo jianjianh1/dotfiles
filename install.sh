@@ -439,7 +439,7 @@ EOF
 
     if tmux_supports_set_clipboard; then
         cat >> "$GENERATED_DIR/tmux.compat.conf" <<'EOF'
-set -s set-clipboard on
+set -g set-clipboard on
 EOF
     else
         cat >> "$GENERATED_DIR/tmux.compat.conf" <<'EOF'
@@ -1836,6 +1836,20 @@ install_detect_theme() {
     manifest_add_path "$HOME/.local/bin/detect-theme"
 }
 
+# Current Codex releases no longer ship the deprecated `codex mcp-server`
+# subcommand. Install the repo-owned stdio adapter at a stable path so Claude
+# can delegate to `codex exec` without depending on the clone location.
+install_codex_mcp_bridge() {
+    if [ ! -f "$DIR/scripts/codex-mcp-bridge.mjs" ]; then
+        echo "  Skipping Codex MCP bridge (source missing)"
+        return 1
+    fi
+    chmod +x "$DIR/scripts/codex-mcp-bridge.mjs" 2>/dev/null || true
+    mkdir -p "$HOME/.local/bin" || return 1
+    backup_and_link "$DIR/scripts/codex-mcp-bridge.mjs" "$HOME/.local/bin/codex-mcp-bridge" || return 1
+    manifest_add_path "$HOME/.local/bin/codex-mcp-bridge"
+}
+
 # One-shot migration: older installs appended `Include $DIR/ssh/sshconfig`
 # to ~/.ssh/config and created ~/.ssh/sockets for ControlMaster. Both are
 # gone now — strip the Include line and rmdir the (empty) sockets dir so
@@ -1874,6 +1888,8 @@ link_generated_configs() {
     backup_and_link "$DIR/shell/bashrc_aliases" "$HOME/.bashrc_aliases" || return 1
     backup_and_copy "$CLAUDE_SETTINGS_SRC" "$HOME/.claude/settings.json" || return 1
     manifest_add_path "$HOME/.claude/settings.json" || return 1
+    backup_and_link "$DIR/ai/claude_statusline.sh" "$HOME/.claude/statusline.sh" || return 1
+    manifest_add_path "$HOME/.claude/statusline.sh" || return 1
     backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml" || return 1
     manifest_add_path "$HOME/.codex/config.toml" || return 1
     append_line_if_missing 'source ~/.bashrc_exports' "$HOME/.bashrc" || return 1
@@ -2092,6 +2108,7 @@ setup_main() {
     run_step "tpm"          install_tpm
     run_step "claude"       install_claude
     run_step "codex"        install_codex
+    run_step "codex MCP bridge" install_codex_mcp_bridge
     run_step "chpc-allocs"  install_chpc_allocs
     run_step "detect-theme" install_detect_theme
 

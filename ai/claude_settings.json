@@ -56,5 +56,11 @@
   "theme": "auto",
   "editorMode": "vim",
   "showTurnDuration": true,
-  "terminalProgressBarEnabled": true
+  "terminalProgressBarEnabled": true,
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 0,
+    "refreshInterval": 10
+  }
 }
