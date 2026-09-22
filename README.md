@@ -19,6 +19,25 @@ Re-running `install.sh` keeps every managed CLI tool current: each present tool'
 
 On macOS, `install.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
 
+### Research with Claude or Codex
+
+`./install.sh` adds the official OpenAlex paper-search connector to both agents
+and shares the `research-brief` and `research-project` skills. Sign in to
+OpenAlex once per host, then ask for a cited investigation or a budgeted
+computational research project:
+
+```bash
+claude mcp login openalex
+codex mcp login openalex
+```
+
+Use `--no-browser` with either login command on a remote or headless host.
+Invoke `/research-brief <question>` in Claude or `$research-brief <question>`
+in Codex. For original experiments and a cited report, invoke
+`/research-project <question; budget>` or `$research-project <question; budget>`.
+[AI skills](docs/ai-skills.md#research) explains the workflow and [AI tools](docs/ai-tools.md#openalex-sign-in-and-research-scope)
+explains the connector's limits.
+
 ### Remote server
 
 ```bash

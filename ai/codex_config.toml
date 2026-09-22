@@ -9,6 +9,15 @@ plan_mode_reasoning_effort = "xhigh"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
+# Use current sources for on-demand research and other date-sensitive work.
+web_search = "live"
+
+# Official OpenAlex connector. Sign in once per host with `codex mcp login openalex`.
+# Expose its public research tools; account and author-profile tools are omitted.
+[mcp_servers.openalex]
+url = "https://mcp.openalex.org/mcp"
+enabled_tools = ["search_works", "get_work", "resolve_references", "list_citations", "search_entities", "get_entity", "group_works", "analyze_works", "read_docs"]
+
 # Shell — inherit all env vars so tools like gh, npm, etc. work
 [shell_environment_policy]
 inherit = "all"

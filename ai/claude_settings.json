@@ -14,7 +14,13 @@
   "permissions": {
     "defaultMode": "bypassPermissions",
     "allow": [],
-    "deny": []
+    "deny": [
+      "mcp__openalex__get_my_account",
+      "mcp__openalex__claim_author_profile",
+      "mcp__openalex__find_candidate_works",
+      "mcp__openalex__submit_curations",
+      "mcp__openalex__list_my_curations"
+    ]
   },
   "model": "opus",
   "enableAllProjectMcpServers": true,

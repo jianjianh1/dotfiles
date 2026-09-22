@@ -37,6 +37,33 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 |---|---|
 | [`explain-concepts`](../ai/skills/explain-concepts/SKILL.md) | "explain X", "what is Y", "why does Z work", "intuition behind W" — governs how Claude explains HPC, CS, and math concepts (punchline first, intuition before formalism, defined notation, anchored claims) |
 
+### Research
+
+| Skill | Triggers on |
+|---|---|
+| [`research-brief`](../ai/skills/research-brief/SKILL.md) | On-demand investigations, literature overviews, and changing topics that need current web sources, paper discovery, evidence comparison, and direct citations |
+| [`research-project`](../ai/skills/research-project/SKILL.md) | Original computational research: verify sources, design a comparison, run experiments within a stated budget, analyze results, and write a cited report with reproducibility artifacts |
+
+`research-brief` answers in chat by default. It uses the OpenAlex research
+connector for scholarly discovery and native web tools to read source material;
+OpenAlex sign-in is described in [ai-tools.md](ai-tools.md#openalex-sign-in-and-research-scope).
+Ask `/research-brief How has GPU collective communication changed since 2023?`
+in Claude, or invoke `$research-brief` with the same question in Codex. The
+result should link each important claim to the source it was checked against
+and identify any material access or search limits.
+
+`research-project` runs the full computational workflow in the current project.
+For example, ask `/research-project Compare two GPU collective algorithms on
+the same hardware; budget: 2 GPU-hours; write a report` in Claude, or use
+`$research-project` in Codex. The agent records its sources, plan, experiment
+commands and results, logs, and `report.md` in the project's existing research
+layout or a dated `research-runs/` directory. It can use CHPC when reachable
+and suitably allocated, or local compute when feasible. It runs within the
+supplied budget without approval between phases. If the request gives no
+compute limit, it finishes the source review and experiment design, then asks
+for one before launching jobs. A session must stay active or be resumed to
+continue work; the run record supports that handoff.
+
 ### Academic writing
 
 | Skill | Triggers on |
@@ -152,7 +179,8 @@ Check the result with `ls -l ~/.agents/skills/`; in Codex, type `$` to see the m
 ## Related plugin and MCP (installed by `scripts/install_claude_plugins.sh`)
 
 - **[context7](https://github.com/upstash/context7)** (marketplace plugin) — live API documentation lookup (PyTorch, NumPy, MPI, CUDA, …). Ships its own skill + `/context7:docs` command + a `docs-researcher` subagent.
-- **`codex`** (MCP server) — Codex CLI's own `codex mcp-server`, registered at user scope so Claude can delegate mid-session. The [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill says when and how; [`docs/ai-tools.md`](ai-tools.md) documents the registration.
+- **`codex`** (MCP server) — the repo's `codex-mcp-bridge`, registered at user scope so Claude can delegate to current Codex releases. The [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill says when and how; [`docs/ai-tools.md`](ai-tools.md) documents the registration.
+- **`openalex`** (MCP server) — official paper search, citation, and reference tools used by both research skills. Requires a free OpenAlex sign-in on each host.
 
 ## Not included
 

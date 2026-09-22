@@ -2,7 +2,7 @@
 
 Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
-> **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The "Denied Patterns" table below documents a **recommended hardening pattern**, not what the shipped JSON contains (the shipped `permissions.deny` array is empty). Before deploying these configs to a shared host, copy that table's patterns into `permissions.deny` and consider flipping `defaultMode` to `default`.
+> **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
 
 ---
 
@@ -104,9 +104,9 @@ under `--no-update`, and on CHPC when the tools come from `module load`. See the
 
 ### Permissions
 
-#### Denied Patterns (recommended — NOT shipped)
+#### Optional file-path restrictions
 
-The shipped `claude_settings.json` has `permissions.deny = []` to match the permissive default mode noted at the top of this doc. The table below is the **recommended deny-list to copy in** when hardening for a shared host:
+The shipped `claude_settings.json` denies the five OpenAlex account and author-profile tools, so the research connector cannot use them through Claude. The file-path patterns below are **recommended additions**, not shipped rules:
 
 | Pattern | Protects |
 |---------|----------|
@@ -164,6 +164,13 @@ inherit = "all"    # Inherit all env vars (gh, npm, etc. work)
 | `persistence` | `save-all` | Save all session history |
 | `max_bytes` | `52428800` (50 MB) | Maximum history size |
 
+### Web search
+
+`web_search = "live"` makes Codex fetch current web results by default. This
+supports [`research-brief`](../ai/skills/research-brief/SKILL.md),
+[`research-project`](../ai/skills/research-project/SKILL.md), and other
+questions where the answer may have changed.
+
 ### TUI
 
 | Setting | Value |
@@ -197,7 +204,7 @@ There is deliberately **no** `[mcp_servers.claude-code]` entry: `claude mcp serv
 
 ## MCP Servers & Plugins (`install_claude_plugins.sh`)
 
-The install script registers three MCP servers (`fetch`, `time`, `codex`) and three marketplace plugins. Anything an older version of the script previously installed (`github`/`filesystem`/`memory`/`git`/`serena` MCPs and several extra plugins) is uninstalled defensively on each run so upgrade hosts converge to the curated set.
+The install script registers four Claude MCP servers (`fetch`, `time`, `codex`, `openalex`) and three marketplace plugins. Codex gets `openalex` from `ai/codex_config.toml`. Anything an older version of the script previously installed (`github`/`filesystem`/`memory`/`git`/`serena` MCPs and several extra plugins) is uninstalled defensively on each run so upgrade hosts converge to the curated set.
 
 > **Reserved names — do not use locally.** The defensive uninstall runs on every `./install.sh`, so manually adding any of these will get silently undone on the next run. Pick a different name for personal MCPs or plugins.
 >
@@ -213,6 +220,7 @@ The install script registers three MCP servers (`fetch`, `time`, `codex`) and th
 | `fetch` | stdio/uvx | `mcp-server-fetch` | HTTP fetching (URLs Claude can't otherwise reach) |
 | `time` | stdio/uvx | `mcp-server-time` | Current time / timezone conversions (date-stamp memory, reason about SLURM `--time=` budgets) |
 | `codex` | stdio | `~/.local/bin/codex-mcp-bridge` | Delegate to current Codex releases: tools `codex` (prompt, cwd, read-only/workspace-write sandbox, model, developer instructions) and `codex-reply` (threadId, prompt). When and how: the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill |
+| `openalex` | HTTP | [Official OpenAlex connector](https://help.openalex.org/access/connector/) | Scholarly work search, citation trails, reference checks, and bibliographic analysis |
 
 The dependency-free bridge is owned by this repo and wraps `codex exec --json`
 plus `codex exec resume`. This replaces the deprecated `codex mcp-server`
@@ -221,6 +229,31 @@ approval policy `never`; new calls default to `read-only`, may explicitly use
 `workspace-write`, and cannot request `danger-full-access`. The installer runs
 one live `claude mcp list` health check and reports a warning unless the Codex
 row says `Connected`.
+
+### OpenAlex sign-in and research scope
+
+After `./install.sh`, sign in with a free OpenAlex account on each host:
+
+```bash
+claude mcp login openalex
+codex mcp login openalex
+```
+
+For SSH or other headless hosts, add `--no-browser` to each command and follow
+the printed URL and callback instructions. Check registration with
+`claude mcp list` and `codex mcp list`. The installer keeps an unchanged Claude
+HTTP registration so later runs do not disrupt its OAuth state. `uninstall.sh`
+removes the managed Claude registration; Codex loads the same endpoint from
+its managed config. Neither an API key nor OAuth tokens are stored in this repo.
+
+Codex exposes only OpenAlex's nine public research tools. Claude denies all
+five account and author-profile tools by name in `ai/claude_settings.json`;
+the other OpenAlex tools remain available. The connector uses the signed-in
+account's [daily API budget](https://help.openalex.org/api/authentication/).
+It returns metadata and links but [does not fetch full-text papers](https://help.openalex.org/access/connector/),
+so the agent must open a paper or source before citing its findings. If sign-in
+or budget is unavailable, both research skills use web sources and the
+existing Crossref workflow, and state the missing scholarly checks.
 
 ### Cloud-managed connector catalog (`claude.ai *`)
 
@@ -247,3 +280,4 @@ Each step is best-effort:
 - If `claude plugin` is unavailable the marketplace step is skipped.
 - If `uvx` is missing the `fetch` and `time` MCPs are skipped (`uv` is installed by `install.sh`, so this is rare).
 - If `codex` or the installed bridge is missing the `codex` MCP is skipped; re-run `./install.sh` after Codex is installed and it registers.
+- `openalex` is registered without local package dependencies; it needs a separate OAuth sign-in before research tools can connect.

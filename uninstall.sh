@@ -275,6 +275,7 @@ remove_claude() {
     echo "Removing Claude Code..."
     if command -v claude >/dev/null 2>&1 && claude mcp --help >/dev/null 2>&1; then
         claude mcp remove --scope user codex >/dev/null 2>&1 || true
+        claude mcp remove --scope user openalex >/dev/null 2>&1 || true
     fi
     remove_bin claude
     remove_tracked_path "$HOME/.claude/settings.json"

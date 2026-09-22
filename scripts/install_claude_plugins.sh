@@ -3,7 +3,7 @@ set -uo pipefail
 
 # Install a curated set of Claude Code plugins.
 #
-# Scope: three MCP servers (`fetch`, `time`, `codex`) plus three marketplace
+# Scope: four MCP servers (`fetch`, `time`, `codex`, `openalex`) plus three marketplace
 # plugins (`context7`, `commit-commands`, `pr-review-toolkit`).
 #
 # Anything previously installed by older versions of this script
@@ -47,13 +47,29 @@ CODEX_MCP_EXPECTED=false
 
 # Source-of-truth for the curated set. Both the install loop and the final
 # "Installed MCP servers" listing read from this so they stay in sync.
-OUR_MCPS=(fetch time codex)
+OUR_MCPS=(fetch time codex openalex)
 
 # Idempotent MCP add: remove existing entry first so re-runs are clean.
 mcp_add() {
     local name="$1"; shift
     claude mcp remove --scope user "$name" 2>/dev/null || true
     claude mcp add "$@"
+}
+
+# Keep an unchanged OAuth registration in place: removing and re-adding an
+# HTTP server can require the user to sign in again on every install.
+mcp_add_openalex() {
+    local details
+    details="$(claude mcp get openalex 2>/dev/null || true)"
+    if printf '%s\n' "$details" | grep -qF 'Scope: User config' &&
+       printf '%s\n' "$details" | grep -qF 'Type: http' &&
+       printf '%s\n' "$details" | grep -qF 'https://mcp.openalex.org/mcp'; then
+        echo "  OpenAlex MCP already registered"
+        return 0
+    fi
+    claude mcp remove --scope user openalex 2>/dev/null || true
+    claude mcp add --scope user --transport http openalex \
+        https://mcp.openalex.org/mcp
 }
 
 # Match a user-scope MCP row by name in `claude mcp list` output. The
@@ -115,6 +131,8 @@ else
     else
         echo "  Skipping Codex MCP (codex or codex-mcp-bridge not found — re-run ./install.sh)"
     fi
+    echo "  Adding OpenAlex MCP server..."
+    run_step "mcp:openalex" mcp_add_openalex
 fi
 
 echo ""
@@ -137,6 +155,10 @@ if $CLAUDE_HAS_MCP; then
                 FAILURES+=("mcp:codex health check")
                 echo "  Warning: Codex MCP did not report Connected." >&2
             fi
+        fi
+        if [ "$name" = openalex ] && [ -n "$row" ] &&
+           ! printf '%s\n' "$row" | grep -q 'Connected'; then
+            echo "  Sign in to OpenAlex with: claude mcp login openalex"
         fi
     done
 else
