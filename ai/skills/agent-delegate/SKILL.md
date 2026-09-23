@@ -9,6 +9,13 @@ Apply when Claude Code should hand a task to Codex CLI, or Codex should hand
 one to Claude Code. Both directions are one-shot: the other agent starts with
 no memory of this conversation, so the prompt must carry everything it needs.
 
+The installed user-level hooks automatically request read-only peer review of
+plans and Git changes. Treat that review as part of the task: revise actionable
+findings once, review the revision, and report the result. When the hook says
+the peer is unavailable, disclose that instead of claiming a review passed.
+The `DOTFILES_PEER_REVIEW=1` marker prevents delegated review sessions from
+calling each other recursively.
+
 ## When to delegate
 
 - **Second opinion** on a design choice, a suspected bug, or a proof sketch —
@@ -26,7 +33,8 @@ no memory of this conversation, so the prompt must carry everything it needs.
 - Both agents editing the same files at once. Give the delegate its own
   worktree ([[using-git-worktrees]]) or a disjoint file list.
 - Tasks that need more context than fits in one prompt.
-- Trivial edits — the round trip costs more than doing it yourself.
+- Trivial *optional* delegation. The installed plan and change review hooks
+  still apply to small edits.
 
 ## From Claude Code → Codex (MCP tool `codex`)
 

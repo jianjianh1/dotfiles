@@ -36,3 +36,15 @@ status_line = ["model-with-reasoning", "status", "context-remaining", "used-toke
 
 [projects."/uufs/chpc.utah.edu/common/home/u1446071/.dotfiles"]
 trust_level = "trusted"
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "~/.local/bin/peer-review-hook codex"
+timeout = 30
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "~/.local/bin/peer-review-hook codex"
+timeout = 360

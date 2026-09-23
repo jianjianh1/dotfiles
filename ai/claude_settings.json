@@ -25,6 +25,41 @@
   "model": "opus",
   "enableAllProjectMcpServers": true,
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/peer-review-hook claude",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/peer-review-hook claude",
+            "timeout": 360
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/peer-review-hook claude",
+            "timeout": 360
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -32,6 +67,11 @@
           {
             "type": "command",
             "command": "{ printf '\\a' > /dev/tty; } 2>/dev/null || true"
+          },
+          {
+            "type": "command",
+            "command": "~/.local/bin/peer-review-hook claude",
+            "timeout": 360
           }
         ]
       }

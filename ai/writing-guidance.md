@@ -11,3 +11,11 @@ Apply these rules to your replies and to human-facing prose you create or edit: 
 - For a reply about completed work, say what changed, why it matters, how you checked it, and any material limit. Scale the length to the task.
 
 Before sending or saving prose, reread it as a new colleague would. Check that the opening answers their first question, each paragraph follows from the previous one, terms are clear, and the text can stand without this chat.
+
+# Peer review of plans and changes
+
+Before presenting an implementation plan or finishing edits in a Git project, use the automatic peer review result: Claude reviews Codex's work, and Codex reviews Claude's. A delegated reviewer works read-only and must not start another review. For a plan outside the CLI's formal plan mode, include `<!-- peer-review:plan -->` so the review hook can recognize it.
+
+This global review sends the plan or Git changes to the other provider. If project rules prohibit sharing code with both providers, disclose the conflict before transmitting it.
+
+Address actionable findings and submit one revised version for re-review. End the final response with a `Peer review:` line stating the result. If the peer is unavailable, or findings remain after re-review, disclose that clearly. Keep credential-like files out of the review input and disclose their exclusion when relevant.

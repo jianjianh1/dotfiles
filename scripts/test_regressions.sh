@@ -1685,6 +1685,10 @@ test_install_accepts_no_update_flag() (
     fi
 )
 
+test_peer_review_hook() (
+    node "$DIR/scripts/test_peer_review_hook.mjs" || fail "peer review hook tests failed"
+)
+
 run_test() {
     local name="$1"
 
@@ -1741,6 +1745,7 @@ main() {
     run_test test_agent_writing_guidance_restores_global_symlink
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
+    run_test test_peer_review_hook
     echo "All regression tests passed."
 }
 

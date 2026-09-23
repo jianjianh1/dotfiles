@@ -1,6 +1,6 @@
 # AI Tool Configuration Reference
 
-Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
+Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`peer-review-hook.mjs`](../scripts/peer-review-hook.mjs), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
 > **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
 
@@ -25,6 +25,47 @@ restores the link when that content is unchanged. `CODEX_HOME` replaces
 `~/.codex` for these instruction files when set. Re-running the installer
 refreshes managed sections. These instructions guide writing but cannot
 guarantee prose quality.
+
+### Automatic peer review
+
+The shared guide also requires Codex and Claude to review each other's plans
+and Git changes. `install.sh` links `scripts/peer-review-hook.mjs` to
+`~/.local/bin/peer-review-hook`; user-level Claude and Codex hooks call it for
+each new prompt and before a turn ends. Claude also calls it before presenting
+an `ExitPlanMode` plan; both `PreToolUse` and `PermissionRequest` guard that
+step because some Claude Code versions ignore a `PreToolUse` denial for
+`ExitPlanMode`. Codex plans are caught at `Stop` in plan mode or when
+the response contains `<proposed_plan>`. For plans written outside formal plan
+mode, the agent must add `<!-- peer-review:plan -->`.
+
+These hooks apply across projects. A Codex-authored plan or Git change goes to
+Claude's service for review, and a Claude-authored one goes to OpenAI's
+service. Use this configuration only for projects whose code may be shared
+with both providers. Disabling a hook in the CLI's user settings stops its
+automatic review for that CLI.
+
+At prompt submission, the hook records the Git diff and untracked text files
+in a private local state directory. At completion, it compares that snapshot
+with the current worktree so existing edits do not trigger a review by
+themselves. The peer gets both snapshots and may inspect repository files for
+context. Known credential filenames and common token patterns are excluded
+from the review input and their exclusion must be disclosed. This filter
+cannot detect every secret; keep credentials out of project changes. Code
+review applies only in Git repositories; plan review works in any directory.
+
+The delegated reviewer runs read-only through the existing CLI sign-ins:
+`codex exec -s read-only` when Claude is the author, and `claude -p` with only
+read tools and the Sonnet model when Codex is the author. Set
+`CLAUDE_REVIEW_MODEL` to use another available Claude model. An environment
+marker prevents recursive
+reviews. Actionable findings return to the author, who revises once and sends
+the revision for review. If the peer is unavailable, or findings remain, the
+author reports that in a `Peer review:` line instead of claiming success.
+
+Codex requires a one-time `/hooks` trust action after installation or a hook
+definition change. These user-level hooks can be disabled, so they enforce the
+normal configured workflow rather than an immutable policy. The peer review
+uses each CLI's existing account; no API key is added by this setup.
 
 ---
 
@@ -125,10 +166,13 @@ The shipped `claude_settings.json` denies the five OpenAlex account and author-p
 
 | Event | Action |
 |-------|--------|
-| `Stop` | Ring terminal bell (`\a`) |
+| `UserPromptSubmit` | Record the starting Git state |
+| `PreToolUse` (`ExitPlanMode`) | Have Codex review Claude's plan |
+| `PermissionRequest` (`ExitPlanMode`) | Deny an unreviewed or flawed plan before approval |
+| `Stop` | Have Codex review plans or Git edits; ring terminal bell (`\a`) |
 | `Notification` | Ring terminal bell (`\a`) |
 
-Both hooks run `printf '\a' > /dev/tty` to produce an audible notification.
+The bell handlers run `printf '\a' > /dev/tty` to produce an audible notification.
 
 ---
 

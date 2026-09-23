@@ -1852,6 +1852,15 @@ install_codex_mcp_bridge() {
     manifest_add_path "$HOME/.local/bin/codex-mcp-bridge"
 }
 
+install_peer_review_hook() {
+    local source="$DIR/scripts/peer-review-hook.mjs"
+    [ -f "$source" ] || return 1
+    chmod +x "$source" || return 1
+    mkdir -p "$HOME/.local/bin" || return 1
+    backup_and_link "$source" "$HOME/.local/bin/peer-review-hook" || return 1
+    manifest_add_path "$HOME/.local/bin/peer-review-hook"
+}
+
 # One-shot migration: older installs appended `Include $DIR/ssh/sshconfig`
 # to ~/.ssh/config and created ~/.ssh/sockets for ControlMaster. Both are
 # gone now — strip the Include line and rmdir the (empty) sockets dir so
@@ -2127,6 +2136,7 @@ setup_main() {
     run_step "claude"       install_claude
     run_step "codex"        install_codex
     run_step "codex MCP bridge" install_codex_mcp_bridge
+    run_step "peer review hook" install_peer_review_hook
     run_step "chpc-allocs"  install_chpc_allocs
     run_step "detect-theme" install_detect_theme
 
