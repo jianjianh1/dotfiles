@@ -236,8 +236,21 @@ function reviewPrompt(kind, data, state, stateFile) {
   const excluded = new Set([...state.baseline.unsafePaths, ...data.unsafePaths]);
   writeFileSync(beforePath, snapshotText(state.baseline, excluded), { mode: 0o600 });
   writeFileSync(afterPath, snapshotText(data, excluded), { mode: 0o600 });
-  const paths = data.safePaths.filter((path) => !excluded.has(path));
-  return `${header}\n\nRepository: ${data.root}\nChanged paths: ${paths.join(", ") || "none"}\nRead both complete snapshots at ${beforePath} and ${afterPath}; focus on changes between them. The first snapshot includes edits that existed before this user turn. Inspect repository files for context if needed. Do not inspect credential files.`;
+  const paths = changedSafePaths(state.baseline, data, excluded);
+  return `${header}\n\nRepository: ${data.root}\nChanged since user prompt: ${paths.join(", ") || "none"}\nRead both complete snapshots at ${beforePath} and ${afterPath}; review only differences between them. The first snapshot includes edits that existed before this user turn; do not report findings on unchanged content. Inspect repository files for context if needed. Do not inspect credential files.`;
+}
+
+function changedSafePaths(before, after, excluded) {
+  const entries = (snapshot) => new Map([
+    ...(snapshot.safeTracked || []).filter((file) => !excluded.has(file.path))
+      .map((file) => [file.path, `tracked:${file.patch}`]),
+    ...snapshot.safeUntracked.filter((file) => !excluded.has(file.path))
+      .map((file) => [file.path, `untracked:${file.sha256}`]),
+  ]);
+  const earlier = entries(before);
+  const later = entries(after);
+  return [...new Set([...earlier.keys(), ...later.keys()])]
+    .filter((path) => earlier.get(path) !== later.get(path)).sort();
 }
 
 function snapshotText(snapshot, excluded = new Set()) {

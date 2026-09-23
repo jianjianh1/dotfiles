@@ -72,7 +72,7 @@ if ((process.env.REVIEW_TEST_LIMIT === "claude" && model === "sonnet") ||
   }
   process.exit(1);
 }
-if (process.env.REVIEW_TEST_FALLBACK_FAIL === "1" && model === "haiku") {
+if (process.env.REVIEW_TEST_HAIKU_LIMIT === "1" && model === "haiku") {
   process.stderr.write("You've hit your weekly limit\\n");
   process.exit(1);
 }
@@ -94,7 +94,7 @@ if ((process.env.REVIEW_TEST_LIMIT === "codex" && model === "gpt-6-sol") ||
   process.stdout.write(JSON.stringify({type:"error",message:"rate_limit_exceeded"}) + "\\n");
   process.exit(process.env.REVIEW_TEST_LIMIT_STYLE === "event" ? 0 : 1);
 }
-if (process.env.REVIEW_TEST_FALLBACK_FAIL === "1" && model === "gpt-6-luna") {
+if (process.env.REVIEW_TEST_LUNA_FAIL === "1" && model === "gpt-6-luna") {
   process.stderr.write("model unavailable\\n");
   process.exit(2);
 }
@@ -111,11 +111,13 @@ try {
   git("config", "user.name", "Review Test");
   git("config", "user.email", "review@example.invalid");
   writeFileSync(join(repo, "main.js"), "export const value = 1;\n");
-  git("add", "main.js");
+  writeFileSync(join(repo, "context.js"), "export const context = 1;\n");
+  git("add", "main.js", "context.js");
   git("commit", "-qm", "Initial");
 
   // A pre-existing edit is included in the baseline but does not cause review.
   writeFileSync(join(repo, "main.js"), "export const value = 2;\n");
+  writeFileSync(join(repo, "context.js"), "export const context = 2;\n");
   assert.deepEqual(hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Fix the code" }), {});
   assert.deepEqual(hook("codex", { hook_event_name: "Stop", last_assistant_message: "No changes" }), {});
   assert.equal(calls().length, 0);
@@ -127,6 +129,9 @@ try {
   assert.equal(result.decision, "block");
   assert.match(result.reason, /Claude found no actionable issues/);
   assert.deepEqual(calls(), ["claude"]);
+  assert.equal(modelCalls().at(-1).input.split("\n")
+    .find((line) => line.startsWith("Changed since user prompt:")),
+  "Changed since user prompt: main.js");
   assert.deepEqual(hook("codex", { hook_event_name: "UserPromptSubmit", prompt: result.reason }), {});
   result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Peer review: Claude found no actionable issues." });
   assert.deepEqual(result, {});
@@ -253,12 +258,13 @@ try {
     [["codex", "gpt-6-sol"], ["codex", "gpt-6-luna"], ["claude", "haiku"]]);
   assert.equal(attempts[0].input, attempts[2].input);
 
-  // If all three reviewers fail, the hook still reports unavailability.
+  // Sonnet and Haiku hit usage limits; Luna then fails for a different reason.
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Shared limit" });
   start = modelCalls().length;
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
-    last_assistant_message: first }, { REVIEW_TEST_LIMIT: "claude", REVIEW_TEST_FALLBACK_FAIL: "1" });
-  assert.match(result.reason, /review was unavailable.*sonnet.*haiku.*gpt-6-luna/s);
+    last_assistant_message: first },
+  { REVIEW_TEST_LIMIT: "claude", REVIEW_TEST_HAIKU_LIMIT: "1", REVIEW_TEST_LUNA_FAIL: "1" });
+  assert.match(result.reason, /review was unavailable.*sonnet.*haiku.*weekly limit.*gpt-6-luna.*model unavailable/s);
   assert.equal(modelCalls().length - start, 3);
 
   // Reviewer failure is disclosed and delegated sessions never recurse.
