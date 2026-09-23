@@ -243,7 +243,7 @@ try {
     last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex gpt-6-luna passed.\n</proposed_plan>") });
   assert.match(result.reason, /same provider as author/);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
-    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex gpt-6-luna same-provider fallback passed.\n</proposed_plan>") });
+    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex GPT-6 Luna, same-provider fallback, found no actionable issues.\n</proposed_plan>") });
   assert.deepEqual(result, {});
 
   // A shared Codex limit likewise switches to an independent Claude session.

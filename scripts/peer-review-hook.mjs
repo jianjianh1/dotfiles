@@ -356,7 +356,11 @@ function peerLabel(peer, review) {
 
 function reviewDisclosed(message, review) {
   const line = message.split("\n").find((part) => REVIEW_LINE.test(part));
-  return Boolean(line && (!review?.fallback || line.toLowerCase().includes(review.model.toLowerCase())) &&
+  const modelWords = review?.model?.toLowerCase().match(/[a-z]+|\d+/g) || [];
+  const lineWords = line?.toLowerCase().match(/[a-z]+|\d+/g) || [];
+  const namesModel = modelWords.length > 0 && lineWords.some((_, index) =>
+    modelWords.every((word, offset) => lineWords[index + offset] === word));
+  return Boolean(line && (!review?.fallback || namesModel) &&
     (!review?.sameProvider || /same[- ]provider/i.test(line)));
 }
 
