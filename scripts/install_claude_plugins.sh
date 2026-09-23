@@ -183,8 +183,16 @@ enable_plugin_idempotent() {
     return 1
 }
 
-refresh_marketplace() {
-    claude plugin marketplace update "$1" >/dev/null 2>&1 || true
+ensure_official_marketplace() {
+    local listing
+    listing="$(claude plugin marketplace list 2>/dev/null)" || return 1
+    if printf '%s\n' "$listing" | grep -qF 'claude-plugins-official'; then
+        # An existing checkout still works offline, so an update failure is
+        # not a reason to skip its already-available plugins.
+        claude plugin marketplace update claude-plugins-official >/dev/null 2>&1 || true
+    else
+        claude plugin marketplace add anthropics/claude-plugins-official
+    fi
 }
 
 install_and_enable_plugin() {
@@ -268,14 +276,17 @@ if ! $CLAUDE_HAS_PLUGIN_CMD; then
     echo "  Skipping marketplace plugins (no 'plugin' subcommand)."
 else
     prune_stale_plugins
-    refresh_marketplace claude-plugins-official
+    if ensure_official_marketplace; then
+        # context7: live API docs lookup for libraries.
+        install_and_enable_plugin context7
 
-    # context7: live API docs lookup for libraries.
-    install_and_enable_plugin context7
-
-    # Development workflows used directly by the user's commit/PR flow.
-    install_and_enable_plugin commit-commands
-    install_and_enable_plugin pr-review-toolkit
+        # Development workflows used directly by the user's commit/PR flow.
+        install_and_enable_plugin commit-commands
+        install_and_enable_plugin pr-review-toolkit
+    else
+        echo "  Could not add the official Claude plugin marketplace." >&2
+        FAILURES+=("official plugin marketplace")
+    fi
 fi
 
 # --- Summary ---------------------------------------------------------------
@@ -285,6 +296,7 @@ if [ ${#FAILURES[@]} -gt 0 ]; then
     for f in "${FAILURES[@]}"; do
         echo "  - $f (non-critical)"
     done
+    exit 1
 else
     echo "Done! All curated plugins installed."
 fi

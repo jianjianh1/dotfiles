@@ -1685,6 +1685,49 @@ test_install_accepts_no_update_flag() (
     fi
 )
 
+test_claude_plugins_bootstrap_marketplace() (
+    local tmp run_count add_count install_count
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/bin" "$tmp/home"
+
+    cat > "$tmp/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TEST_CLAUDE_LOG"
+case "$*" in
+    'mcp --help') exit 1 ;;
+    'plugin --help'|'plugin list'|'plugin marketplace remove '*) exit 0 ;;
+    'plugin marketplace list')
+        if [ -f "$TEST_CLAUDE_MARKET_FILE" ]; then
+            printf 'claude-plugins-official\n'
+        else
+            printf 'No marketplaces configured\n'
+        fi
+        ;;
+    'plugin marketplace add anthropics/claude-plugins-official')
+        : > "$TEST_CLAUDE_MARKET_FILE" ;;
+    'plugin marketplace update claude-plugins-official'|'plugin install '*|'plugin enable '*)
+        [ -f "$TEST_CLAUDE_MARKET_FILE" ] ;;
+    *) exit 2 ;;
+esac
+EOF
+    chmod +x "$tmp/bin/claude"
+
+    for run_count in 1 2; do
+        HOME="$tmp/home" PATH="$tmp/bin:$PATH" \
+            TEST_CLAUDE_LOG="$tmp/claude.log" TEST_CLAUDE_MARKET_FILE="$tmp/market" \
+            bash "$DIR/scripts/install_claude_plugins.sh" > "$tmp/output" 2>&1 ||
+            fail "Claude plugin installer failed on run $run_count"
+        grep -q 'Done! All curated plugins installed.' "$tmp/output" ||
+            fail "Claude plugins were not installed on run $run_count"
+    done
+
+    add_count="$(grep -c '^plugin marketplace add anthropics/claude-plugins-official$' "$tmp/claude.log" || true)"
+    install_count="$(grep -c '^plugin install ' "$tmp/claude.log" || true)"
+    [ "$add_count" -eq 1 ] || fail "official marketplace was not added exactly once"
+    [ "$install_count" -eq 6 ] || fail "curated plugins were not installed on both runs"
+)
+
 test_peer_review_hook() (
     node "$DIR/scripts/test_peer_review_hook.mjs" || fail "peer review hook tests failed"
 )
@@ -1749,6 +1792,7 @@ main() {
     run_test test_agent_writing_guidance_restores_global_symlink
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
+    run_test test_claude_plugins_bootstrap_marketplace
     run_test test_peer_review_hook
     run_test test_codex_loop
     echo "All regression tests passed."

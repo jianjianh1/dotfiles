@@ -344,6 +344,11 @@ existing Crossref workflow, and state the missing scholarly checks.
 
 ### Installed marketplace plugins
 
+On a fresh host, the installer adds Anthropic's `claude-plugins-official`
+marketplace before installing these plugins. Later runs refresh the existing
+marketplace when possible. A failed marketplace or plugin installation is
+reported in the top-level `install.sh` warning summary.
+
 | Plugin | Purpose |
 |--------|---------|
 | `context7` | Live API docs lookup for libraries (PyTorch, NumPy, MPI, CUDA, …) |
