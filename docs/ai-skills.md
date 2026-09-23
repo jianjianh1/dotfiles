@@ -64,6 +64,19 @@ compute limit, it finishes the source review and experiment design, then asks
 for one before launching jobs. A session must stay active or be resumed to
 continue work; the run record supports that handoff.
 
+### Ideas and decisions
+
+| Skill | Triggers on |
+|---|---|
+| [`grill-me`](../ai/skills/grill-me/SKILL.md) | An unfinished idea, decision, or plan the user wants to work through by answering one question at a time |
+
+Use `/grill-me <idea>` in Claude Code or `$grill-me <idea>` in Codex. It
+loads Matt Pocock's upstream `grilling` method, but asks one question per turn
+instead of a full batch. It checks available facts before asking, offers a
+recommended answer, and recaps decisions and open questions in chat. It does
+not create a session file. For a concrete plan that is ready to challenge,
+use `premortem-analysis` below.
+
 ### Academic writing
 
 | Skill | Triggers on |
@@ -109,7 +122,7 @@ Use the existing skills as templates — particularly [`slurm-job`](../ai/skills
 
 ## Upstream skills (cloned at install time)
 
-In addition to the in-tree skills under `ai/skills/`, [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh) clones four upstream skill repos to `~/.local/share/claude-skills/` and symlinks a curated set into `~/.claude/skills/` alongside the custom ones. They appear under their natural names (e.g. `/systematic-debugging`, not `/superpowers:systematic-debugging`).
+In addition to the in-tree skills under `ai/skills/`, [`scripts/install_claude_skills.sh`](../scripts/install_claude_skills.sh) clones six upstream skill repos to `~/.local/share/claude-skills/` and symlinks a curated set into `~/.claude/skills/` alongside the custom ones. They appear under their natural names (e.g. `/systematic-debugging`, not `/superpowers:systematic-debugging`).
 
 The cache and symlinks are refreshed on every `./install.sh` run; pass `--force` to re-clone from upstream.
 
@@ -163,6 +176,27 @@ One skill, MIT licensed, synthesizing [hardikpandya/stop-slop](https://github.co
 | Skill | What it covers |
 |---|---|
 | `deslop` | Final editing pass that strips AI-writing tells from a draft: filler openers, formulaic contrasts, vague declaratives, "delve" / "quietly" / invented labels, bold-bullet formatting, plus a 5-dimension score (revise below 35/50). Tuned for scientific prose — passive voice is allowed in methods, domain terms are not slop, "we" for own work. It bans em dashes, which `reply-style` / `technical-writing` permit; `deslop` wins when the user asks to deslop. |
+
+### From [mattpocock/skills](https://github.com/mattpocock/skills)
+
+One MIT-licensed skill supplies the decision-tree interview behind the
+bundled `grill-me` entry point. The upstream `grill-me` entry point calls
+Claude's `Skill` tool and is not linked; the repo's entry point supports
+Claude Code and Codex and applies the one-question pace described above.
+
+| Skill | What it covers |
+|---|---|
+| `grilling` | Maps decisions and their prerequisites, researches facts the user need not supply, and interviews until the important branches are resolved. Direct use follows upstream's batch-question pace. |
+
+### From [radarist/structured-analytic-skills](https://github.com/radarist/structured-analytic-skills)
+
+The MIT-licensed `premortem-analysis` skill challenges a concrete plan by
+assuming it has failed, then works backward to identify likely causes,
+mitigations, and a threshold for reconsidering the plan. Ask
+`/premortem-analysis <plan>` in Claude Code or `$premortem-analysis <plan>` in
+Codex. Its result is in chat by default; it does not change the plan or write
+a report. Use `grill-me` first if the intended decision and success measure
+are still unclear.
 
 ## Codex skill sync
 

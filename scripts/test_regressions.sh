@@ -1414,7 +1414,9 @@ test_install_claude_skills_dry_run() (
     # that go through link_skill_path rather than link_skill.
     for step in "clone superpowers" "clone anthropic-skills" \
                 "clone research-paper-writing-skills" "link research-paper-writing" \
-                "clone skill-deslop" "link deslop"; do
+                "clone skill-deslop" "link deslop" \
+                "clone mattpocock-skills" "link grilling" \
+                "clone structured-analytic-skills" "link premortem-analysis"; do
         printf '%s\n' "$output" | grep -qF "Would run: $step" ||
             fail "install_claude_skills.sh --dry-run did not plan '$step'"
     done

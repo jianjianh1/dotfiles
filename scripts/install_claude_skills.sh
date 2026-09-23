@@ -7,7 +7,8 @@ set -uo pipefail
 #
 # Upstream repos: obra/superpowers and anthropics/skills (multi-skill layout
 # <clone>/skills/<name>/), Master-cai/Research-Paper-Writing-Skills (one skill
-# in a named subdir), stephenturner/skill-deslop (SKILL.md at the clone root).
+# in a named subdir), stephenturner/skill-deslop (SKILL.md at the clone root),
+# mattpocock/skills and radarist/structured-analytic-skills (named subdirs).
 #
 # Mirrors install_claude_plugins.sh in spirit but does NOT touch MCP or the
 # plugin marketplace — skills are pure markdown and CHPC-safe.
@@ -31,7 +32,8 @@ Usage: install_claude_skills.sh [--force] [--dry-run] [--help|-h]
 Cache dir:   ~/.local/share/claude-skills/
 Symlink dir: ~/.claude/skills/
 Upstream:    obra/superpowers, anthropics/skills,
-             Master-cai/Research-Paper-Writing-Skills, stephenturner/skill-deslop
+             Master-cai/Research-Paper-Writing-Skills, stephenturner/skill-deslop,
+             mattpocock/skills, radarist/structured-analytic-skills
 EOF
 }
 
@@ -94,6 +96,16 @@ DESLOP_DIR="$CACHE_DIR/skill-deslop"
 DESLOP_SKILL_NAME="deslop"
 DESLOP_SKILL_SRC="$DESLOP_DIR"                    # SKILL.md at the repo root
 
+GRILLING_REPO="https://github.com/mattpocock/skills.git"
+GRILLING_DIR="$CACHE_DIR/mattpocock-skills"
+GRILLING_SKILL_NAME="grilling"
+GRILLING_SKILL_SRC="$GRILLING_DIR/skills/productivity/grilling"
+
+PREMORTEM_REPO="https://github.com/radarist/structured-analytic-skills.git"
+PREMORTEM_DIR="$CACHE_DIR/structured-analytic-skills"
+PREMORTEM_SKILL_NAME="premortem-analysis"
+PREMORTEM_SKILL_SRC="$PREMORTEM_DIR/skills/premortem-analysis"
+
 # --- Operations ------------------------------------------------------------
 
 # All upstream skill <name>s the curated lists own. Used by prune_orphans()
@@ -102,7 +114,8 @@ kept_skill_names() {
     printf '%s\n' "${SUPERPOWERS_SKILLS[@]}" \
                  "${ANTHROPIC_SKILLS_MARKDOWN[@]}" \
                  "${ANTHROPIC_SKILLS_PYDEPS[@]}" \
-                 "$RPW_SKILL_NAME" "$DESLOP_SKILL_NAME"
+                 "$RPW_SKILL_NAME" "$DESLOP_SKILL_NAME" \
+                 "$GRILLING_SKILL_NAME" "$PREMORTEM_SKILL_NAME"
 }
 
 # Remove ~/.claude/skills/<name> symlinks that point into the upstream
@@ -264,6 +277,14 @@ main() {
     # --- stephenturner/skill-deslop (SKILL.md at the repo root) ---
     run_step "clone skill-deslop" clone_or_update "$DESLOP_REPO" "$DESLOP_DIR"
     run_step "link $DESLOP_SKILL_NAME" link_skill_path "$DESLOP_SKILL_SRC" "$DESLOP_SKILL_NAME"
+
+    # --- mattpocock/skills (engine for the bundled grill-me entry point) ---
+    run_step "clone mattpocock-skills" clone_or_update "$GRILLING_REPO" "$GRILLING_DIR"
+    run_step "link $GRILLING_SKILL_NAME" link_skill_path "$GRILLING_SKILL_SRC" "$GRILLING_SKILL_NAME"
+
+    # --- radarist/structured-analytic-skills (concrete-plan critique) ---
+    run_step "clone structured-analytic-skills" clone_or_update "$PREMORTEM_REPO" "$PREMORTEM_DIR"
+    run_step "link $PREMORTEM_SKILL_NAME" link_skill_path "$PREMORTEM_SKILL_SRC" "$PREMORTEM_SKILL_NAME"
 
     echo ""
     if [ ${#FAILURES[@]} -gt 0 ]; then
