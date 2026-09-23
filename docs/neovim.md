@@ -6,6 +6,10 @@ Uses [lazy.nvim](https://github.com/folke/lazy.nvim) for plugin management. For 
 
 `install.sh` installs Neovim on Linux from the official release tarball into `~/.local/opt/nvim` and links `~/.local/bin/nvim`. On old x86_64 glibc systems, it falls back to Neovim's legacy glibc 2.17 release tarball instead of the AppImage path.
 
+Tree-sitter parsers are compiled on the host, so `cc` must be on `PATH`.
+If the installer reports a missing compiler, install or load one and run
+`nvim`. Wait for the parser installation messages to finish before exiting.
+
 ---
 
 ## Architecture

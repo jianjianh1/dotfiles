@@ -1633,6 +1633,16 @@ install_tree_sitter() {
     echo "  tree-sitter $TS_VERSION installed to $BIN_DIR/tree-sitter"
 }
 
+check_nvim_parser_compiler() {
+    command -v nvim >/dev/null 2>&1 || return 0
+    if ! command -v cc >/dev/null 2>&1; then
+        echo "  Neovim Tree-sitter parsers need a C compiler named 'cc'." >&2
+        echo "    Install or load one, then open nvim and wait for parser installation." >&2
+        return 1
+    fi
+    return 0
+}
+
 install_gh_tools() {
     # jq is installed earlier in setup_main so install_node and friends
     # can use it; it is intentionally absent from this list.
@@ -2164,6 +2174,7 @@ setup_main() {
     install_gh_tools
     run_step "tree-sitter"  install_tree_sitter
     run_step "nvim"         install_nvim
+    run_step "Neovim parser compiler" check_nvim_parser_compiler
     run_step "tpm"          install_tpm
     run_step "claude"       install_claude
     run_step "codex"        install_codex

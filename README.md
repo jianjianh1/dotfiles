@@ -19,6 +19,10 @@ Re-running `install.sh` keeps every managed CLI tool current: each present tool'
 
 On macOS, `install.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
 
+Neovim's Tree-sitter syntax parsers need a C compiler available as `cc`.
+`install.sh` reports a warning if it is missing; install or load a compiler,
+then open Neovim and wait for parser installation to finish.
+
 ### Research with Claude or Codex
 
 `./install.sh` adds the official OpenAlex paper-search connector to both agents
