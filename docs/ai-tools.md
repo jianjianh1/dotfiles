@@ -59,16 +59,22 @@ The delegated reviewer runs read-only through the existing CLI sign-ins:
 reviewer hits a usage, quota, or rate limit, the hook retries the same review
 once with GPT-6 Luna or Claude Haiku, respectively. It names the fallback
 model in its feedback, and the author names it in the `Peer review:` line.
-Other failures do not trigger the retry. The two Codex models are pinned
-together in `scripts/peer-review-hook.mjs`; update both pins and this description
-deliberately when moving reviews to a newer GPT family. `CLAUDE_REVIEW_MODEL`
-still overrides the primary Claude model.
+If that model hits a usage limit too, the hook tries an independent reviewer
+from the author's provider: GPT-6 Luna for Codex-authored work, or Claude
+Haiku for Claude-authored work. The result is labeled `same provider` so it
+is not presented as a cross-provider review. Other failures do not trigger a
+retry, and all attempts share the 300-second review budget.
+
+The two Codex models are pinned together in `scripts/peer-review-hook.mjs`.
+Update both pins and this description deliberately when moving reviews to a
+newer GPT family. `CLAUDE_REVIEW_MODEL` still overrides the primary Claude
+model.
 
 An environment marker prevents recursive reviews. Actionable findings return
 to the author, who revises once and sends the revision for review. A shared
-account limit can block both models; the author then reports the unavailable
-review in a `Peer review:` line. The fallback uses the same CLI sign-in and
-does not add API credentials or billing.
+account limit can block both models on one provider. If every reviewer fails,
+the author reports the unavailable review in a `Peer review:` line. Each
+fallback uses its existing CLI sign-in and adds no API credentials or billing.
 
 Codex requires a one-time `/hooks` trust action after installation or a hook
 definition change. These user-level hooks can be disabled, so they enforce the
