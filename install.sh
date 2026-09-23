@@ -1861,6 +1861,15 @@ install_peer_review_hook() {
     manifest_add_path "$HOME/.local/bin/peer-review-hook"
 }
 
+install_codex_loop() {
+    local source="$DIR/scripts/codex-loop.mjs"
+    [ -f "$source" ] || return 1
+    chmod +x "$source" || return 1
+    mkdir -p "$HOME/.local/bin" || return 1
+    backup_and_link "$source" "$HOME/.local/bin/codex-loop" || return 1
+    manifest_add_path "$HOME/.local/bin/codex-loop"
+}
+
 # One-shot migration: older installs appended `Include $DIR/ssh/sshconfig`
 # to ~/.ssh/config and created ~/.ssh/sockets for ControlMaster. Both are
 # gone now — strip the Include line and rmdir the (empty) sockets dir so
@@ -1956,6 +1965,29 @@ link_claude_skills() {
         backup_and_link "${skill_dir%/}" "$dst" || return 1
         manifest_add_path "$dst" || return 1
     done
+}
+
+# This skill must stay Codex-only: installing it in ~/.claude/skills would
+# override Claude Code's bundled /loop command. Preserve user-owned entries.
+link_codex_loop_skill() {
+    local source="$DIR/ai/codex-skills/loop"
+    local dst="$CODEX_AGENT_SKILLS_DIR/loop"
+    local current=""
+    [ -f "$source/SKILL.md" ] || return 1
+    mkdir -p "$CODEX_AGENT_SKILLS_DIR" || return 1
+    if [ -L "$dst" ]; then
+        current="$(portable_realpath "$dst" 2>/dev/null || true)"
+        if [ "$current" = "$(portable_realpath "$source")" ]; then
+            manifest_add_path "$dst"
+            return 0
+        fi
+    fi
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        echo "  Skipping Codex loop skill: $dst already belongs to the user" >&2
+        return 1
+    fi
+    ln -s "$source" "$dst" || return 1
+    manifest_add_path "$dst"
 }
 
 # User-level rules are loaded in every Claude session. Codex reads its global
@@ -2137,6 +2169,7 @@ setup_main() {
     run_step "codex"        install_codex
     run_step "codex MCP bridge" install_codex_mcp_bridge
     run_step "peer review hook" install_peer_review_hook
+    run_step "codex loop helper" install_codex_loop
     run_step "chpc-allocs"  install_chpc_allocs
     run_step "detect-theme" install_detect_theme
 
@@ -2147,6 +2180,7 @@ setup_main() {
     run_step "agent writing guidance" link_agent_writing_guidance
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
+    run_step "codex loop skill"   link_codex_loop_skill
     run_step "agent skills sync"  sync_agent_skills
     run_step "chpc agent guide"   link_chpc_agent_guide
     run_step "cloudlab agent guide" link_cloudlab_agent_guide

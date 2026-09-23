@@ -266,11 +266,14 @@ remove_git_hooks_config() {
 
 remove_tools() {
     echo "Removing CLI tools..."
-    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq rclone uv uvx starship atuin chpc-allocs detect-theme codex-mcp-bridge peer-review-hook; do
+    for bin in gh glow fzf rg fd bat delta zoxide lazygit btop jq rclone uv uvx starship atuin chpc-allocs detect-theme codex-mcp-bridge peer-review-hook codex-loop; do
         remove_bin "$bin"
     done
     if [ -e "$HOME/.local/state/dotfiles-peer-review" ]; then
         rm -r "$HOME/.local/state/dotfiles-peer-review"
+    fi
+    if [ -e "$HOME/.local/state/dotfiles-codex-loop" ]; then
+        rm -r "$HOME/.local/state/dotfiles-codex-loop"
     fi
 }
 

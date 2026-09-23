@@ -238,6 +238,26 @@ trust_level = "trusted"
 
 Codex reads user skills from `~/.agents/skills/` and `~/.codex/skills/`. [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh) (run by `install.sh`) mirrors every `~/.claude/skills/<name>` into `~/.agents/skills/<name>` and links Codex-installed `~/.codex/skills/<name>` back into `~/.claude/skills/`, so both CLIs see one skill set — see [ai-skills.md](ai-skills.md#codex-skill-sync).
 
+### Repeat work in an open Codex chat
+
+The Codex-only [`$loop`](../ai/codex-skills/loop/SKILL.md) skill uses
+[`codex-loop`](../scripts/codex-loop.mjs) and `codex queue` to return to the
+same CLI chat on a schedule. For example, `$loop 5m check the deploy` checks
+every five minutes; `$loop check the deploy` lets Codex choose a delay after
+each check. Use `$loop list`, `$loop stop <id>`, or `$loop once in 45m remind me
+to push` to manage jobs. Bare `$loop` runs the maintenance prompt, using
+project `.claude/loop.md` or `~/.claude/loop.md` when present.
+
+Codex has no user-defined `/loop` slash command, so invoke the skill with `$`.
+The helper stores thread-local jobs under `~/.local/state/dotfiles-codex-loop/`
+and uses `UserPromptSubmit`, `Stop`, `SessionStart`, and `SessionEnd` hooks to
+validate, reschedule, and pause them. New or changed hooks need one `/hooks`
+trust action in Codex. Jobs run with the chat's existing permissions, expire
+after seven days, and require the chat to be open for timely delivery. Codex
+may not signal session end until 30 minutes after a disconnected chat becomes
+idle; a queued run can wait until resume. Use `$loop stop` to cancel a waiting
+job; `Esc` does not cancel its timer. Uninstall removes the helper and state.
+
 There is deliberately **no** `[mcp_servers.claude-code]` entry: `claude mcp serve` exposes Claude Code's file and shell tools, not the Claude model, and Codex already has equivalents. Codex asks Claude for a second opinion with headless `claude -p "<prompt>" --output-format text`, as described in the [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill. The opposite direction (Claude calling Codex) is the `codex` MCP server below.
 
 ### CHPC behavior

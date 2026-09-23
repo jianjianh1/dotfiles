@@ -1689,6 +1689,10 @@ test_peer_review_hook() (
     node "$DIR/scripts/test_peer_review_hook.mjs" || fail "peer review hook tests failed"
 )
 
+test_codex_loop() (
+    node --test "$DIR/scripts/test_codex_loop.mjs" || fail "Codex loop tests failed"
+)
+
 run_test() {
     local name="$1"
 
@@ -1746,6 +1750,7 @@ main() {
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     run_test test_peer_review_hook
+    run_test test_codex_loop
     echo "All regression tests passed."
 }
 

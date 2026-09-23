@@ -202,6 +202,11 @@ are still unclear.
 
 [`scripts/sync_agent_skills.sh`](../scripts/sync_agent_skills.sh) (run by `install.sh` right after the two skill steps) keeps Claude Code and Codex CLI on one skill set with per-skill symlinks. Both CLIs follow symlinked skill directories and load a skill once even when it is reachable from two places.
 
+The [`loop`](../ai/codex-skills/loop/SKILL.md) skill is installed only in
+Codex's `~/.agents/skills/`. Keeping it out of `~/.claude/skills/` preserves
+Claude Code's bundled `/loop`. Invoke `$loop` in Codex; see
+[the scheduling examples](ai-tools.md#repeat-work-in-an-open-codex-chat).
+
 - **Claude → Codex**: every `~/.claude/skills/<name>/SKILL.md` gets `~/.agents/skills/<name>` → its resolved directory. Codex reads `~/.agents/skills/` as its user-scope skill dir.
 - **Codex → Claude**: every real `~/.codex/skills/<name>/SKILL.md` (where Codex's `$skill-installer` writes) gets `~/.claude/skills/<name>` → that directory. `~/.codex/skills/.system/` (Codex's built-ins) is skipped.
 - **Never clobbers**: an existing real directory, or a symlink pointing elsewhere, is reported and left alone. Skills already under `~/.codex/skills` are not mirrored back into `~/.agents/skills` (Codex would load them twice), and `~/.claude/skills/synced/` (claude.ai synced skills) is ignored.
