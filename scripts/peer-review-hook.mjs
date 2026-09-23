@@ -14,6 +14,8 @@ const STATE_DIR = process.env.DOTFILES_PEER_REVIEW_STATE_DIR ||
   join(homedir(), ".local", "state", "dotfiles-peer-review");
 const REVIEW_TIMEOUT_MS = 300_000;
 const MAX_COMMAND_BYTES = 64 * 1024 * 1024;
+// Update both Codex models together when moving reviews to a newer GPT family.
+const CODEX_REVIEW_MODELS = ["gpt-6-sol", "gpt-6-luna"];
 const PLAN_MARKER = /<proposed_plan>|<!--\s*peer-review:plan\s*-->/i;
 const REVIEW_LINE = /^\s*Peer review:/im;
 const SECRET_PATTERN = /AKIA[0-9A-Z]{16}|sk-(?:proj-)?[A-Za-z0-9_-]{32,}|sk-ant-[A-Za-z0-9_-]{40,}|gh[oprsu]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/;
@@ -52,6 +54,40 @@ function command(bin, args, cwd, input = undefined, timeout = 15_000, env = proc
     throw new Error(`${bin} exited ${result.status}: ${(result.stderr || "").trim().slice(0, 300)}`);
   }
   return result.stdout;
+}
+
+function reviewerErrorText(stdout) {
+  for (const line of [stdout, ...stdout.split("\n")]) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.is_error) return String(event.result || event.error?.message || "review failed");
+    if (event?.type === "error") return String(event.message || event.error?.message || "review failed");
+  }
+  return "";
+}
+
+function reviewCommand(bin, args, cwd, input, timeout, env) {
+  const result = spawnSync(bin, args, {
+    cwd, input, env, encoding: "utf8", timeout, maxBuffer: MAX_COMMAND_BYTES,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = [reviewerErrorText(result.stdout || ""), (result.stderr || "").trim()]
+      .filter(Boolean).join(" | ") || "no error details";
+    const error = new Error(`${bin} exited ${result.status}: ${detail.slice(0, 300)}`);
+    error.reviewDetail = detail;
+    throw error;
+  }
+  return result.stdout;
+}
+
+function isUsageLimitError(error) {
+  const detail = error.reviewDetail || error.message || "";
+  if (/context[ _-]?window|maximum context|prompt (?:is )?too long|spend[ _-]?limit|billing|payment required/i.test(detail)) {
+    return false;
+  }
+  return /\b(?:usage|rate|weekly|daily|five[- ]hour|5[- ]hour)[ _-]?limit\b|\b(?:quota (?:exceeded|exhausted|reached)|too many requests|out of tokens)\b/i.test(detail) ||
+    /rate_limit_exceeded|usage_limit_reached|organization_usage_limit_exceeded|insufficient_quota|resource_exhausted/i.test(detail);
 }
 
 function git(cwd, args) {
@@ -230,16 +266,16 @@ function parseResult(text) {
   return value;
 }
 
-function callPeer(prompt, cwd, stateFile) {
+function callPeer(prompt, cwd, stateFile, model, timeout) {
   const env = { ...process.env, DOTFILES_PEER_REVIEW: "1", NO_COLOR: "1" };
   if (AGENT === "claude") {
     const schemaPath = `${stateFile}.schema.json`;
     writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
-    const raw = command(process.env.CODEX_BIN || "codex", [
-      "-a", "never", "-c", `developer_instructions=${JSON.stringify("This is a delegated read-only peer review. Do not request another peer review.")}`,
+    const raw = reviewCommand(process.env.CODEX_BIN || "codex", [
+      "-a", "never", "-m", model, "-c", `developer_instructions=${JSON.stringify("This is a delegated read-only peer review. Do not request another peer review.")}`,
       "exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-C", cwd,
       "--output-schema", schemaPath, "-",
-    ], cwd, prompt, REVIEW_TIMEOUT_MS, env);
+    ], cwd, prompt, timeout, env);
     let message = "";
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
@@ -251,18 +287,51 @@ function callPeer(prompt, cwd, stateFile) {
     if (!message) throw new Error("Codex returned no review message");
     return parseResult(message);
   }
-  const raw = command(process.env.CLAUDE_BIN || "claude", [
+  const raw = reviewCommand(process.env.CLAUDE_BIN || "claude", [
     "-p", "--output-format", "json", "--json-schema", JSON.stringify(REVIEW_SCHEMA),
-    "--model", process.env.CLAUDE_REVIEW_MODEL || "sonnet", "--effort", "medium",
+    "--model", model, "--effort", "medium",
     "--permission-mode", "plan", "--tools", "Read,Glob,Grep", "--add-dir", STATE_DIR,
     "--strict-mcp-config", "--no-session-persistence", "--append-system-prompt",
     "This is a delegated read-only peer review. Do not request another peer review.",
-  ], cwd, prompt, REVIEW_TIMEOUT_MS, env);
+  ], cwd, prompt, timeout, env);
   let wrapper;
   try { wrapper = JSON.parse(raw); } catch { throw new Error("Claude returned invalid JSON output"); }
   if (wrapper.is_error) throw new Error(wrapper.result || "Claude review failed");
   return parseResult(typeof wrapper.structured_output === "object" ?
     JSON.stringify(wrapper.structured_output) : wrapper.result || "");
+}
+
+function reviewWithFallback(prompt, cwd, stateFile) {
+  const models = AGENT === "claude" ? CODEX_REVIEW_MODELS :
+    [process.env.CLAUDE_REVIEW_MODEL || "sonnet", "haiku"];
+  const deadline = Date.now() + REVIEW_TIMEOUT_MS;
+  const failures = [];
+  for (const [index, model] of models.entries()) {
+    if (index && model === models[0]) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      failures.push("review time budget exhausted");
+      break;
+    }
+    try {
+      return { review: callPeer(prompt, cwd, stateFile, model, remaining),
+        model, fallback: index > 0 };
+    } catch (error) {
+      failures.push(`${model}: ${error.message || error}`);
+      if (index === 0 && models[1] !== model && isUsageLimitError(error)) continue;
+      break;
+    }
+  }
+  throw new Error(failures.join("; "));
+}
+
+function peerLabel(peer, review) {
+  return review?.fallback ? `${peer} (${review.model} fallback)` : peer;
+}
+
+function reviewDisclosed(message, review) {
+  const line = message.split("\n").find((part) => REVIEW_LINE.test(part));
+  return Boolean(line && (!review?.fallback || line.toLowerCase().includes(review.model.toLowerCase())));
 }
 
 function findingSummary(review) {
@@ -276,23 +345,24 @@ function reviewCandidate(kind, value, state, path, event, gate = "stop") {
   const message = kind === "plan" && gate !== "stop" ? value : event.last_assistant_message || "";
   const peer = AGENT === "claude" ? "Codex" : "Claude";
   if (current?.hash === digest) {
+    const reviewer = peerLabel(peer, current);
     if (current.verdict === "changes" && current.rounds === 1 && !current.repeatNotice) {
       current.repeatNotice = true;
       saveState(path, state);
-      const reason = `${peer} found issues. Revise the ${kind} and submit it for one re-review, or disclose the unresolved findings.\n${findingSummary(current)}`;
+      const reason = `${reviewer} found issues. Revise the ${kind} and submit it for one re-review, or disclose the unresolved findings.\n${findingSummary(current)}`;
       gateFeedback(gate, reason);
       return true;
     }
     if (gate !== "stop") {
-      if (current.verdict !== "pass" && !REVIEW_LINE.test(message)) {
-        gateFeedback(gate, `Add a "Peer review:" line disclosing ${peer}'s ${current.verdict === "unavailable" ? "unavailable review" : "unresolved findings"}, then present the plan.`);
+      if (current.verdict !== "pass" && !reviewDisclosed(message, current)) {
+        gateFeedback(gate, `Add a "Peer review:" line disclosing ${reviewer}'s ${current.verdict === "unavailable" ? "unavailable review" : "unresolved findings"}, then present the plan.`);
         return true;
       }
-      output({ systemMessage: `Peer review: ${peer} ${current.verdict === "pass" ? "found no actionable issues" : "has unresolved or unavailable findings"}.` });
+      output({ systemMessage: `Peer review: ${reviewer} ${current.verdict === "pass" ? "found no actionable issues" : "has unresolved or unavailable findings"}.` });
       return true;
     }
-    if (!REVIEW_LINE.test(message)) {
-      stopFeedback(`Add a "Peer review:" line to the final response stating ${peer}'s result${current.verdict === "changes" ? " and any unresolved findings" : ""}.`);
+    if (!reviewDisclosed(message, current)) {
+      stopFeedback(`Add a "Peer review:" line to the final response stating ${reviewer}'s result${current.verdict === "changes" ? " and any unresolved findings" : ""}${current.fallback ? ` and naming ${current.model}` : ""}.`);
       return true;
     }
     return false;
@@ -308,9 +378,10 @@ function reviewCandidate(kind, value, state, path, event, gate = "stop") {
     mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
     chmodSync(STATE_DIR, 0o700);
     const prompt = reviewPrompt(kind, value, state, path);
-    const result = callPeer(prompt, event.cwd || process.cwd(), path);
+    const result = reviewWithFallback(prompt, event.cwd || process.cwd(), path);
     record = { hash: digest, rounds: (current?.rounds || 0) + 1,
-      verdict: result.verdict, findings: result.findings, repeatNotice: false };
+      verdict: result.review.verdict, findings: result.review.findings,
+      model: result.model, fallback: result.fallback, repeatNotice: false };
   } catch (error) {
     record = { hash: digest, rounds: (current?.rounds || 0) + 1,
       verdict: "unavailable", findings: [], error: error.message };
@@ -318,16 +389,17 @@ function reviewCandidate(kind, value, state, path, event, gate = "stop") {
   state.reviews ||= {};
   state.reviews[kind] = record;
   saveState(path, state);
+  const reviewer = peerLabel(peer, record);
   if (record.verdict === "pass") {
     if (gate !== "stop") {
-      output({ systemMessage: `Peer review: ${peer} found no actionable issues in the plan.` });
+      output({ systemMessage: `Peer review: ${reviewer} found no actionable issues in the plan.` });
     } else {
-      stopFeedback(`${peer} found no actionable issues in the ${kind}. Add that result to the final response.`);
+      stopFeedback(`${reviewer} found no actionable issues in the ${kind}. Add that result to the final response.`);
     }
   } else if (record.verdict === "changes") {
     const retry = record.rounds === 1 ? `Revise the ${kind} and send it for one re-review.` :
       `The re-review still found issues. Disclose them in the ${kind} or final response.`;
-    gateFeedback(gate, `${peer} found actionable issues. ${retry}\n${findingSummary(record)}`);
+    gateFeedback(gate, `${reviewer} found actionable issues. ${retry}\n${findingSummary(record)}`);
   } else {
     gateFeedback(gate, `${peer} review was unavailable (${record.error || "review limit reached"}). Disclose this in the ${kind} or final response.`);
   }

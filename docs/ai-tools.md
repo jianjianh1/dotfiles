@@ -54,13 +54,21 @@ cannot detect every secret; keep credentials out of project changes. Code
 review applies only in Git repositories; plan review works in any directory.
 
 The delegated reviewer runs read-only through the existing CLI sign-ins:
-`codex exec -s read-only` when Claude is the author, and `claude -p` with only
-read tools and the Sonnet model when Codex is the author. Set
-`CLAUDE_REVIEW_MODEL` to use another available Claude model. An environment
-marker prevents recursive
-reviews. Actionable findings return to the author, who revises once and sends
-the revision for review. If the peer is unavailable, or findings remain, the
-author reports that in a `Peer review:` line instead of claiming success.
+`codex exec -s read-only` with GPT-6 Sol when Claude is the author, and
+`claude -p` with only read tools and Sonnet when Codex is the author. If the
+reviewer hits a usage, quota, or rate limit, the hook retries the same review
+once with GPT-6 Luna or Claude Haiku, respectively. It names the fallback
+model in its feedback, and the author names it in the `Peer review:` line.
+Other failures do not trigger the retry. The two Codex models are pinned
+together in `scripts/peer-review-hook.mjs`; update both pins and this description
+deliberately when moving reviews to a newer GPT family. `CLAUDE_REVIEW_MODEL`
+still overrides the primary Claude model.
+
+An environment marker prevents recursive reviews. Actionable findings return
+to the author, who revises once and sends the revision for review. A shared
+account limit can block both models; the author then reports the unavailable
+review in a `Peer review:` line. The fallback uses the same CLI sign-in and
+does not add API credentials or billing.
 
 Codex requires a one-time `/hooks` trust action after installation or a hook
 definition change. These user-level hooks can be disabled, so they enforce the

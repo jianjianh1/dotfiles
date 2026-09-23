@@ -13,6 +13,7 @@ const repo = join(temp, "repo");
 const bin = join(temp, "bin");
 const state = join(temp, "state");
 const log = join(temp, "calls.log");
+const argsLog = join(temp, "args.log");
 mkdirSync(repo);
 mkdirSync(bin);
 
@@ -37,6 +38,8 @@ function hook(agent, event, env = {}) {
     CODEX_BIN: join(bin, "codex"),
     CLAUDE_BIN: join(bin, "claude"),
     REVIEW_TEST_LOG: log,
+    REVIEW_TEST_ARGS_LOG: argsLog,
+    CLAUDE_REVIEW_MODEL: "sonnet",
     ...env,
   });
   return JSON.parse(raw);
@@ -47,9 +50,31 @@ function calls() {
   catch { return []; }
 }
 
+function modelCalls() {
+  try { return readFileSync(argsLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse); }
+  catch { return []; }
+}
+
 writeFileSync(join(bin, "claude"), `#!/usr/bin/env node
 const fs = require("node:fs");
 fs.appendFileSync(process.env.REVIEW_TEST_LOG, "claude\\n");
+const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1];
+const input = fs.readFileSync(0, "utf8");
+fs.appendFileSync(process.env.REVIEW_TEST_ARGS_LOG, JSON.stringify({agent:"claude",model,args,input}) + "\\n");
+if (process.env.REVIEW_TEST_LIMIT === "claude" && model === "sonnet") {
+  if (process.env.REVIEW_TEST_LIMIT_STYLE === "stderr") {
+    process.stderr.write("rate limit exceeded\\n");
+  } else {
+    process.stdout.write(JSON.stringify({is_error:true,api_error_status:429,
+      result:"You've hit your weekly limit"}));
+  }
+  process.exit(1);
+}
+if (process.env.REVIEW_TEST_FALLBACK_FAIL === "1" && model === "haiku") {
+  process.stderr.write("You've hit your weekly limit\\n");
+  process.exit(1);
+}
 if (process.env.REVIEW_TEST_FAIL === "1") process.exit(2);
 const finding = {location:"plan step 1",problem:"Missing rollback",fix:"Add rollback"};
 const review = process.env.REVIEW_TEST_ISSUES === "1" ?
@@ -59,6 +84,18 @@ process.stdout.write(JSON.stringify({structured_output:review}));
 writeFileSync(join(bin, "codex"), `#!/usr/bin/env node
 const fs = require("node:fs");
 fs.appendFileSync(process.env.REVIEW_TEST_LOG, "codex\\n");
+const args = process.argv.slice(2);
+const model = args[args.indexOf("-m") + 1];
+const input = fs.readFileSync(0, "utf8");
+fs.appendFileSync(process.env.REVIEW_TEST_ARGS_LOG, JSON.stringify({agent:"codex",model,args,input}) + "\\n");
+if (process.env.REVIEW_TEST_LIMIT === "codex" && model === "gpt-6-sol") {
+  process.stdout.write(JSON.stringify({type:"error",message:"rate_limit_exceeded"}) + "\\n");
+  process.exit(process.env.REVIEW_TEST_LIMIT_STYLE === "event" ? 0 : 1);
+}
+if (process.env.REVIEW_TEST_FALLBACK_FAIL === "1" && model === "gpt-6-luna") {
+  process.stderr.write("model unavailable\\n");
+  process.exit(2);
+}
 if (process.env.REVIEW_TEST_FAIL === "1") process.exit(2);
 const finding = {location:"plan step 1",problem:"Missing rollback",fix:"Add rollback"};
 const review = process.env.REVIEW_TEST_ISSUES === "1" ?
@@ -134,10 +171,69 @@ try {
     tool_input: { plan: "# Plan\nDo work and rollback" } });
   assert.match(result.systemMessage, /Codex found no actionable issues/);
 
+  // A Claude usage limit retries the same review with Haiku and names the model.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan with fallback" });
+  let start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first }, { REVIEW_TEST_LIMIT: "claude" });
+  assert.match(result.reason, /Claude \(haiku fallback\) found no actionable issues/);
+  let attempts = modelCalls().slice(start);
+  assert.deepEqual(attempts.map((call) => call.model), ["sonnet", "haiku"]);
+  assert.equal(attempts[0].input, attempts[1].input);
+  assert.ok(attempts.every((call) => call.args.includes("plan") &&
+    call.args.includes("Read,Glob,Grep") && call.args.includes("--json-schema")));
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude passed.\n</proposed_plan>") });
+  assert.match(result.reason, /naming haiku/);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude Haiku fallback found no actionable issues.\n</proposed_plan>") });
+  assert.deepEqual(result, {});
+
+  // A Codex usage limit retries with GPT-6 Luna, including JSON error events.
+  hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Plan with fallback" });
+  start = modelCalls().length;
+  result = hook("claude", { hook_event_name: "PreToolUse", tool_name: "ExitPlanMode",
+    tool_input: { plan: "# Plan\nUse fallback" } },
+  { REVIEW_TEST_LIMIT: "codex", REVIEW_TEST_LIMIT_STYLE: "event" });
+  assert.match(result.systemMessage, /Codex \(gpt-6-luna fallback\) found no actionable issues/);
+  attempts = modelCalls().slice(start);
+  assert.deepEqual(attempts.map((call) => call.model), ["gpt-6-sol", "gpt-6-luna"]);
+  assert.equal(attempts[0].input, attempts[1].input);
+  assert.ok(attempts.every((call) => call.args.includes("read-only") &&
+    call.args.includes("--output-schema") && call.args.includes("-a")));
+
+  // Nonzero Codex error events and plain stderr limits also trigger one retry.
+  hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Another plan" });
+  start = modelCalls().length;
+  result = hook("claude", { hook_event_name: "PreToolUse", tool_name: "ExitPlanMode",
+    tool_input: { plan: "# Plan\nAnother fallback" } }, { REVIEW_TEST_LIMIT: "codex" });
+  assert.match(result.systemMessage, /gpt-6-luna fallback/);
+  assert.equal(modelCalls().length - start, 2);
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Stderr limit" });
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first }, { REVIEW_TEST_LIMIT: "claude", REVIEW_TEST_LIMIT_STYLE: "stderr" });
+  assert.match(result.reason, /haiku fallback/);
+  assert.equal(modelCalls().length - start, 2);
+
+  // Fallback findings return to the author; a shared limit remains unavailable.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Review findings" });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first }, { REVIEW_TEST_LIMIT: "claude", REVIEW_TEST_ISSUES: "1" });
+  assert.match(result.reason, /haiku fallback.*Missing rollback/s);
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Shared limit" });
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first }, { REVIEW_TEST_LIMIT: "claude", REVIEW_TEST_FALLBACK_FAIL: "1" });
+  assert.match(result.reason, /review was unavailable.*sonnet.*haiku/s);
+  assert.equal(modelCalls().length - start, 2);
+
   // Reviewer failure is disclosed and delegated sessions never recurse.
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan it" });
+  start = modelCalls().length;
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first }, { REVIEW_TEST_FAIL: "1" });
   assert.match(result.reason, /review was unavailable/);
+  assert.equal(modelCalls().length - start, 1);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude was unavailable.\n</proposed_plan>") });
   assert.deepEqual(result, {});
   const before = calls().length;
