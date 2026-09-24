@@ -1616,6 +1616,50 @@ test_agent_writing_guidance_restores_global_symlink() (
     [ ! -e "$CODEX_HOME/AGENTS.md" ] || fail "fresh Codex guidance survived uninstall"
 )
 
+test_chpc_codex_guidance_lifecycle() (
+    local tmp codex_dir codex_file
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home" CODEX_HOME="$tmp/codex-profile"
+    codex_dir="$CODEX_HOME"
+    mkdir -p "$codex_dir"
+    printf '# User guidance\nKeep this instruction.\n' > "$codex_dir/AGENTS.md"
+    printf '# User override\nKeep this override.\n' > "$codex_dir/AGENTS.override.md"
+    cp "$codex_dir/AGENTS.md" "$tmp/original-agents"
+    cp "$codex_dir/AGENTS.override.md" "$tmp/original-override"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    is_chpc() { return 0; }
+    link_agent_writing_guidance >/dev/null || fail "writing guidance install failed"
+    link_chpc_codex_guidance >/dev/null || fail "CHPC guidance install failed"
+    link_chpc_codex_guidance >/dev/null || fail "CHPC guidance repeat install failed"
+    for codex_file in "$codex_dir/AGENTS.md" "$codex_dir/AGENTS.override.md"; do
+        [ "$(grep -Fxc "$CHPC_BLOCK_BEGIN" "$codex_file")" -eq 1 ] ||
+            fail "CHPC guidance duplicated in $codex_file"
+        grep -Fq 'mychpc batch' "$codex_file" || fail "CHPC rule absent from $codex_file"
+    done
+    sed -i 's/For every CHPC allocation/OLD RULE/' "$codex_dir/AGENTS.md"
+    link_chpc_codex_guidance >/dev/null || fail "CHPC guidance update failed"
+    if grep -Fq 'OLD RULE' "$codex_dir/AGENTS.md"; then
+        fail "CHPC guidance did not refresh its managed block"
+    fi
+
+    bash -c '. "$1/uninstall.sh"; remove_agent_writing_guidance' _ "$DIR" >/dev/null ||
+        fail "CHPC guidance uninstall failed"
+    cmp -s "$codex_dir/AGENTS.md" "$tmp/original-agents" ||
+        fail "CHPC uninstall changed user instructions"
+    cmp -s "$codex_dir/AGENTS.override.md" "$tmp/original-override" ||
+        fail "CHPC uninstall changed user override"
+
+    rm "$codex_dir/AGENTS.md" "$codex_dir/AGENTS.override.md"
+    link_agent_writing_guidance >/dev/null || fail "fresh guidance install failed"
+    link_chpc_codex_guidance >/dev/null || fail "fresh CHPC guidance install failed"
+    bash -c '. "$1/uninstall.sh"; remove_agent_writing_guidance' _ "$DIR" >/dev/null ||
+        fail "fresh CHPC guidance uninstall failed"
+    [ ! -e "$codex_dir/AGENTS.md" ] || fail "fresh Codex guidance survived uninstall"
+)
+
 test_update_guard_decisions() (
     local tmp
     tmp="$(mktemp -d)"
@@ -1790,6 +1834,7 @@ main() {
     run_test test_uninstall_removes_agent_skill_links
     run_test test_agent_writing_guidance_preserves_global_instructions
     run_test test_agent_writing_guidance_restores_global_symlink
+    run_test test_chpc_codex_guidance_lifecycle
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     run_test test_claude_plugins_bootstrap_marketplace

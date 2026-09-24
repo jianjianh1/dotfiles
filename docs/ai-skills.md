@@ -16,7 +16,7 @@ Skills are **symlinks**, not copies (unlike `~/.claude/settings.json` and `~/.co
 
 | Skill | Triggers on |
 |---|---|
-| [`chpc-job`](../ai/skills/chpc-job/SKILL.md) | CHPC end-to-end: find allocation (chpc-allocs), choose modules (compiler→MPI), write + submit sbatch on notchpeak/kingspeak/granite |
+| [`chpc-job`](../ai/skills/chpc-job/SKILL.md) | CHPC end-to-end: inventory all live allocations (`mychpc batch` and `chpc-allocs`), choose modules, write and submit jobs |
 | [`slurm-job`](../ai/skills/slurm-job/SKILL.md) | sbatch, srun, squeue, sacct, job arrays, partitions, QoS, CHPC clusters |
 | [`cuda-kernels`](../ai/skills/cuda-kernels/SKILL.md) | `.cu` / `.cuh` files, `__global__` / `__device__`, kernel launches, shared memory, warps, nvcc |
 | [`gpu-profile`](../ai/skills/gpu-profile/SKILL.md) | nsys, ncu, nvprof, `.nsys-rep` / `.ncu-rep` reports, occupancy, roofline |

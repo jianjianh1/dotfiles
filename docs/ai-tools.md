@@ -278,6 +278,11 @@ There is deliberately **no** `[mcp_servers.claude-code]` entry: `claude mcp serv
 
 `install.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.dotfiles-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
 
+On CHPC, installation also adds a managed allocation-discovery rule to Codex's
+global `AGENTS.md` and, when present, `AGENTS.override.md`. It directs Codex to
+run `mychpc batch` for the complete current list before choosing a job triple.
+Uninstall removes only that managed rule; existing user instructions remain.
+
 ---
 
 ## MCP Servers & Plugins (`install_claude_plugins.sh`)

@@ -14,105 +14,70 @@
 ## Critical Rules
 
 1. **NEVER run computation on login nodes.** Login nodes have a 4-core/8GB limit enforced by Arbiter. Always use `salloc`, `srun`, or `sbatch` to run on compute nodes.
-2. **Every SLURM job needs three flags:** `--partition`, `--account`, `--qos`. Run `mychpc batch` to see valid combinations for this user.
+2. **Every SLURM job needs three flags:** `--partition`, `--account`, `--qos`. Run `mychpc batch` for every allocation or job choice; its live list is authoritative. Inspect every option before choosing one.
 3. **Never unload `chpc/1.0`** -- it is a sticky module required for the CHPC environment.
 4. **Scratch is purged every 60 days.** Never store important results only on scratch. Copy outputs back to home or group space.
 5. **Keep `$HOME` lean -- never write bulk data to home.** Home is capped at 50GB soft / 70GB hard. Datasets, benchmark output, build artifacts, model checkpoints, and any large generated files belong on scratch (`/scratch/general/vast/$USER`), not under `$HOME` or a repo inside it. When a tool insists on a home path, relocate the heavy directory to scratch and symlink it back. Check `quota -s` / `du -sh ~` before and after large jobs, and clear regenerable caches (`~/.julia/artifacts`, `~/.cache`, `build*/` dirs) when space is tight.
 
-## User's Available SLURM Accounts
-
-### Non-preemptable (guaranteed)
+## Find the current allocation
 
 ```bash
-# GPU -- general (no allocation needed)
---partition=notchpeak-gpu --account=notchpeak-gpu --qos=notchpeak-gpu
-
-# CPU -- shared-short (no allocation, 8h max, 16 cores max, 128GB max, 2 jobs max)
---partition=notchpeak-shared-short --account=notchpeak-shared-short --qos=notchpeak-shared-short
-
-# Owner nodes -- School of Computing
---partition=soc-np --account=soc-np --qos=soc-np
---partition=soc-gpu-np --account=soc-gpu-np --qos=soc-gpu-np
-
-# Owner nodes -- sadayappan group
---partition=sadayappan-np --account=sadayappan-np --qos=sadayappan-np  # NOTE: this is CPU-only via soc-np nodes
-
-# Owner nodes -- College of Engineering
---partition=coestudent-np --account=coe-np --qos=coe-np
-
-# Other clusters (also available)
---partition=kingspeak --account=sadayappan --qos=kingspeak
---partition=lonepeak --account=sadayappan --qos=lonepeak
---partition=kingspeak-gpu --account=kingspeak-gpu --qos=kingspeak-gpu
---partition=lonepeak-gpu --account=lonepeak-gpu --qos=lonepeak-gpu
+mychpc batch                              # every combination available to this user
+chpc-allocs --quick --format table         # the same triples, with partition shown
+chpc-allocs --show-all 'a100:1@8h'         # assess every compatible GPU option
 ```
 
-### Preemptable (jobs may be killed, use --requeue and checkpointing)
-
-```bash
-# Freecycle -- all notchpeak general nodes
---partition=notchpeak-freecycle --account=sadayappan --qos=notchpeak-freecycle
-
-# GPU guest -- idle owner GPU nodes (wide GPU selection)
---partition=notchpeak-gpu-guest --account=owner-gpu-guest --qos=notchpeak-gpu-guest
-
-# CPU guest -- idle owner nodes
---partition=notchpeak-guest --account=owner-guest --qos=notchpeak-guest
-
-# Granite cluster (newest: AMD Genoa, H100 NVL GPUs)
---partition=granite --account=sadayappan --qos=granite-freecycle
---partition=granite-gpu --account=sadayappan --qos=granite-gpu-freecycle
---partition=granite-gpu-guest --account=sadayappan --qos=granite-gpu-guest
-```
+Use the exact account, partition, and QoS from one live row. `--best` is a final
+selection shortcut, not an inventory. Guest and freecycle jobs may be preempted;
+use checkpointing and `--requeue` when those options are suitable. Data-transfer
+partitions are not compute options. If `mychpc batch` is unavailable, say the
+inventory may be incomplete rather than using a saved account list.
 
 ## GPU Resources
 
-### General GPU partition (notchpeak-gpu)
-- V100 (3/node): notch001-003
-- RTX 2080 Ti (2-8/node): notch004, notch086-088, notch271
-- P40 (1): notch004
-- RTX 3090 (4-8/node): notch293, notch328
-- A100 (4): notch293
+GPU models and node counts change. Query the live hardware list, then check
+which matching partitions appear in your `mychpc batch` inventory:
 
-### SoC GPU owner nodes (soc-gpu-np)
-- A6000 (8/node): notch367-368
-- A100 (2-8/node): notch369-372
+```bash
+chpc-allocs --list-gpus
+chpc-allocs --show-all 'gpu:1@8h'
+```
 
-### Request GPUs with:
+Request a GPU type exposed by the chosen partition:
+
 ```bash
 --gres=gpu:<type>:<count>
-# Types: v100, 2080ti, p40, 3090, a100, a6000, a5500, a40, a800, h100nvl, l40, rtx6000, t4
 ```
 
 ## Job Templates
 
-### Quick CPU job (no allocation needed)
+### Short CPU job
 ```bash
 #!/bin/bash
 #SBATCH --job-name=JOB_NAME
-#SBATCH --time=HH:MM:SS          # max 08:00:00
+#SBATCH --time=HH:MM:SS          # within the chosen QoS limit
 #SBATCH --nodes=1
-#SBATCH --ntasks=CORES            # max 16
-#SBATCH --mem=MEMORY              # max 128G
-#SBATCH --account=notchpeak-shared-short
-#SBATCH --partition=notchpeak-shared-short
-#SBATCH --qos=notchpeak-shared-short
+#SBATCH --ntasks=CORES
+#SBATCH --mem=MEMORY
+#SBATCH --account=<from mychpc batch>
+#SBATCH --partition=<from the same mychpc batch row>
+#SBATCH --qos=<from the same mychpc batch row>
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
 ```
 
-### GPU job (no allocation needed)
+### GPU job
 ```bash
 #!/bin/bash
 #SBATCH --job-name=JOB_NAME
-#SBATCH --time=HH:MM:SS          # max 72:00:00
+#SBATCH --time=HH:MM:SS          # within the chosen QoS limit
 #SBATCH --nodes=1
 #SBATCH --ntasks=CORES
 #SBATCH --mem=MEMORY
 #SBATCH --gres=gpu:TYPE:COUNT
-#SBATCH --account=notchpeak-gpu
-#SBATCH --partition=notchpeak-gpu
-#SBATCH --qos=notchpeak-gpu
+#SBATCH --account=<from mychpc batch>
+#SBATCH --partition=<from the same mychpc batch row>
+#SBATCH --qos=<from the same mychpc batch row>
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
 ```
@@ -124,9 +89,9 @@
 #SBATCH --time=HH:MM:SS
 #SBATCH --nodes=1
 #SBATCH --ntasks=CORES
-#SBATCH --account=soc-np
-#SBATCH --partition=soc-np
-#SBATCH --qos=soc-np
+#SBATCH --account=<from mychpc batch>
+#SBATCH --partition=<from the same mychpc batch row>
+#SBATCH --qos=<from the same mychpc batch row>
 #SBATCH -o slurm-%j.out
 ```
 
@@ -137,9 +102,9 @@
 #SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=CORES
-#SBATCH --account=sadayappan
-#SBATCH --partition=notchpeak-freecycle
-#SBATCH --qos=notchpeak-freecycle
+#SBATCH --account=<from mychpc batch>
+#SBATCH --partition=<from the same mychpc batch row>
+#SBATCH --qos=<from the same mychpc batch row>
 #SBATCH --requeue
 #SBATCH --signal=B:USR1@120
 #SBATCH -o slurm-%j.out
@@ -187,7 +152,7 @@ module list                    # see what's loaded
 - **AMD vs Intel**: use `--constraint="skl|csl"` if code needs AVX-512; AMD Rome nodes don't have it
 - **Memory errors**: default is 2GB/core; specify `--mem=XG` explicitly
 - **MKL on AMD**: set `export MKL_DEBUG_CPU_TYPE=5` for better performance
-- **Process killed on a login node (Claude, python, etc.)**: login nodes cap each user at **8GB mem+swap / 4 cores** in one shared cgroup (Arbiter). When your combined login-node processes exceed 8GB, the kernel OOM-killer reaps the largest one -- confirm with `dmesg | grep CONSTRAINT_MEMCG`. This is why Claude sometimes dies, especially alongside a memory-heavy analysis. Per Critical Rule #1, run Claude *and* any heavy analysis in an interactive allocation, not on the login node: `cnode` (shell alias, defaults to 4 cores/32G/8h on `notchpeak-shared-short`) or `salloc --partition=notchpeak-shared-short --account=notchpeak-shared-short --qos=notchpeak-shared-short --ntasks=4 --mem=32G --time=8:00:00`. Check current usage with `cat /sys/fs/cgroup/memory/user.slice/user-$(id -u).slice/memory.usage_in_bytes`.
+- **Process killed on a login node (Claude, python, etc.)**: login nodes cap each user at **8GB mem+swap / 4 cores** in one shared cgroup (Arbiter). When your combined login-node processes exceed 8GB, the kernel OOM-killer reaps the largest one. Confirm with `dmesg | grep CONSTRAINT_MEMCG`. Run heavy work in an interactive allocation: choose a live triple from `mychpc batch`, then pass its exact values to `salloc` with suitable `--ntasks`, `--mem`, and `--time`. Check current usage with `cat /sys/fs/cgroup/memory/user.slice/user-$(id -u).slice/memory.usage_in_bytes`.
 
 ## Useful Commands
 

@@ -2016,6 +2016,18 @@ link_agent_writing_guidance() {
     fi
 }
 
+link_chpc_codex_guidance() {
+    is_chpc || return 0
+    local source="$DIR/chpc/codex-guidance.md"
+    local codex_dir="${CODEX_HOME:-$HOME/.codex}"
+    local codex_file
+    for codex_file in "$codex_dir/AGENTS.md" "$codex_dir/AGENTS.override.md"; do
+        [ -e "$codex_file" ] || [ -L "$codex_file" ] || continue
+        install_codex_writing_file \
+            "$codex_file" "$source" "$CHPC_BLOCK_BEGIN" "$CHPC_BLOCK_END" || return 1
+    done
+}
+
 # The Notchpeak HPC agent guide (chpc/CLAUDE.md) is CHPC-specific operational
 # knowledge that should track the repo verbatim (like skills), so symlink it --
 # but only on CHPC, where ~/CLAUDE.md is the guide every agent loads. On first
@@ -2189,6 +2201,7 @@ setup_main() {
     # Link remaining configs
     run_step "shell config links" link_generated_configs
     run_step "agent writing guidance" link_agent_writing_guidance
+    run_step "CHPC Codex guidance" link_chpc_codex_guidance
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
     run_step "codex loop skill"   link_codex_loop_skill

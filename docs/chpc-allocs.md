@@ -2,9 +2,12 @@
 
 Source: [`chpc-allocs.py`](../scripts/chpc-allocs.py) (installed to `~/.local/bin/chpc-allocs` by `install.sh`).
 
-Show your CHPC SLURM allocations and predict queue wait time for hypothetical jobs. A "wait check" here is a non-mutating `sbatch --test-only` probe — nothing is actually submitted.
+Show every current CHPC account, partition, and QoS combination for the user,
+then predict queue wait time for hypothetical jobs. On CHPC, the inventory
+comes from `mychpc batch`; `sacctmgr`, `sinfo`, and `sshare` add metadata. A
+"wait check" is a non-mutating `sbatch --test-only` probe — nothing is submitted.
 
-Requires **Python 3.7+**. CHPC's system `/usr/bin/python3` is 3.6 on some nodes; `module load python/3.10.3` first if `chpc-allocs` exits with the version-guard error.
+Requires **Python 3.6+**, including CHPC's stock `/usr/bin/python3`.
 
 ---
 
@@ -18,7 +21,8 @@ Requires **Python 3.7+**. CHPC's system `/usr/bin/python3` is 3.6 on some nodes;
 | `chpc-allocs a100:4 cpu:32` | Two alternatives (space ≡ `+` ≡ OR). |
 | `chpc-allocs 'a100:4*cpu:32'` | Combine into one job (`*` ≡ AND; quote where shells glob). |
 | `chpc-allocs --best a100:4` | Lowest-wait runnable triple as a paste-ready `#SBATCH` block. |
-| `chpc-allocs --quick` | Allocations only, no wait checks (fast). |
+| `chpc-allocs --quick` | Full personalized inventory with exact partitions, no wait checks. |
+| `chpc-allocs --show-all a100:4` | All compatible options, including unknown waits and scheduler rejections. |
 | `chpc-allocs --explain a100:4` | Preview which filters/checks would run; no `sbatch` calls. |
 | `chpc-allocs --list-gpus` | Cluster-wide GPU inventory from `sinfo`. |
 | `chpc-allocs --list-cpus 'cpu:32*genoa'` | CPU inventory narrowed to Genoa hosts. |
@@ -61,7 +65,7 @@ Name filters are case-insensitive substring matches, repeatable, OR-joined. Hard
 | `--reservation` | Only QOS that require a reservation. |
 | `--min-wall DUR` | Minimum MaxWall (e.g. `24:00:00`, `7d`, `unlimited`). |
 | `--fairshare-min F`, `--usage-max F` | Drop rows by FairShare / RawUsage (needs `sshare` data). |
-| `--all-visible` | Search every association readable by your permissions. Omits user names; may be slow; disables sshare enrichment. |
+| `--all-visible` | Search every association readable by your permissions instead of the personalized `mychpc batch` inventory. Omits user names; may be slow; disables sshare enrichment. |
 
 ---
 
@@ -80,7 +84,7 @@ Default: **table on a TTY, JSON when piped or redirected** (a stderr notice fire
 | `--show-all` | Don't hide marginal rows (`?` waits, scheduler rejections). |
 | `--best` | Print only the lowest-wait runnable triple as a paste-ready `#SBATCH` block. |
 | `--sbatch` | Emit a `#SBATCH` block per allocation row. Requires a REQUEST. |
-| `--pivot` | Pivot layout: rows = (cluster, account, qos), columns = request labels, cells = wait times. Table only. |
+| `--pivot` | Pivot layout: rows = (cluster, account, partition, qos), columns = request labels, cells = wait times. Table only. |
 
 ---
 
@@ -116,7 +120,7 @@ chpc-allocs 'a100:4+cpu:32@12h'
 # One combined 12-hour job needing BOTH a100x4 and cpu:32.
 chpc-allocs 'a100:4*cpu:32@12h'
 
-# All my allocations as CSV, no wait checks.
+# All current combinations as CSV, with distinct partitions and no wait checks.
 chpc-allocs --quick --format csv > allocs.csv
 
 # 2 nodes, 64 cores total (the explicit form).
@@ -136,5 +140,7 @@ chpc-allocs --explain a100:4+cpu:32
 - **`wait: ?`** — the scheduler returned an ambiguous result or `--no-wait` was set. Re-run with `-v` to see the full reason.
 - **`wait: None` with `wait-check-error`** — an exception was raised during the `sbatch --test-only` probe. A one-line `[chpc-allocs] wait-check raised for …` should print to stderr; re-run with `-v` for the full traceback.
 - **No rows** — name filters intersect to empty, or your hardware request can't run on any QOS you have access to. Try `--explain` to see what was filtered out, or drop `--cluster`/`--account`/`--qos` flags.
+- **`mychpc is unavailable`** — the helper falls back to Slurm associations and warns that the inventory may be incomplete. Run from CHPC to verify against `mychpc batch`.
+- **Malformed or failed `mychpc batch`** — the helper stops instead of presenting a partial inventory. Run `mychpc batch` directly and check the command's output.
+- **Unresolved cluster** — the exact official triple remains in the inventory, but the helper cannot safely wait-check or emit a paste-ready job block for it. Check `sinfo --clusters=all`.
 - **`CommandError: command not found: sacctmgr/sinfo/sshare`** — load the SLURM client module on this node, or run from a CHPC login node. The script doesn't auto-`module load`.
-- **`requires Python 3.7+`** — `module load python/3.10.3` and re-run.

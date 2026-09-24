@@ -210,7 +210,12 @@ remove_agent_writing_guidance() {
         if [ -L "$codex_file" ]; then
             unlink_config "$codex_file"
         else
-            remove_codex_writing_file "$codex_file"
+            remove_codex_writing_file "$codex_file" "$CHPC_BLOCK_BEGIN" "$CHPC_BLOCK_END"
+            if [ -L "$codex_file" ]; then
+                unlink_config "$codex_file"
+            else
+                remove_codex_writing_file "$codex_file"
+            fi
         fi
     done
 }

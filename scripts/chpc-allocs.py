@@ -2,9 +2,9 @@
 """
 Find CHPC SLURM allocations and QOS choices for the current user.
 
-The default mode only queries associations for the invoking user. Use
---all-visible to search broader account/QOS metadata your normal permissions
-can read; user names are never displayed in that mode.
+On CHPC, the default inventory comes from `mychpc batch` for the invoking
+user. Use --all-visible to search broader account/QOS metadata your normal
+permissions can read; user names are never displayed in that mode.
 
 Compatible with Python 3.6+ because CHPC's stock /usr/bin/python3 is 3.6 on
 some nodes.
@@ -509,6 +509,7 @@ class AllocationRow:
         tags=(),
         gpu_types=(),
         cpu_features=(),
+        official=False,
     ):
         self.cluster = cluster
         self.account = account
@@ -521,6 +522,7 @@ class AllocationRow:
         self.tags = tags
         self.gpu_types = gpu_types
         self.cpu_features = cpu_features
+        self.official = official
         self.cpu_vendor = classify_cpu_vendor(cpu_features)
         self.gpu_vendor = classify_gpu_vendor(gpu_types)
         self.free_nodes = ""
@@ -613,6 +615,7 @@ class AllocationRow:
         data: Dict[str, str] = {
             "cluster": self.cluster,
             "account": self.account,
+            "partition": self.partition,
             "qos": self.qos,
         }
         if include_avail and include_wait:
@@ -639,7 +642,6 @@ class AllocationRow:
         if include_details:
             data.update(
                 {
-                    "partition": self.partition,
                     "gpu_types": ",".join(self.gpu_types),
                     "cpu_archs": ",".join(self.cpu_features),
                     "default_qos": self.default_qos,
@@ -686,6 +688,7 @@ Run `chpc-allocs --help` for the full request grammar, filters, and output modes
 DESCRIPTION = """\
 chpc-allocs — show your CHPC SLURM allocations and predict queue wait time.
 
+On CHPC, `mychpc batch` supplies every current account/partition/QoS triple.
 A "wait check" here is a hypothetical job (`sbatch --test-only`) used to predict
 wait time. With no args, a short quickstart is printed. Pass one or more
 REQUEST tokens to run wait checks for those requests; separate alternatives with spaces or '+',
@@ -777,6 +780,7 @@ Inventory shortcuts (do not consult your allocations; REQUEST_LIST narrows):
 
 Recipes:
   chpc-allocs --best a100:4                             # paste-ready #SBATCH for fastest triple
+  chpc-allocs --quick                                   # every current mychpc batch triple
   chpc-allocs --best a100:4 --format json | jq .        # same, machine-readable
   chpc-allocs --sbatch a100:4 --quick                   # all matching allocations as #SBATCH blocks
   chpc-allocs --sbatch a100:4 --format json             # JSON array of {cluster,account,qos,partition}
@@ -915,7 +919,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     filt.add_argument(
         "--all-visible", action="store_true",
-        help="Search every association you can read (omits user names; "
+        help="Search every association you can read instead of the personalized "
+        "mychpc batch inventory (omits user names; "
         "may be slow; disables sshare enrichment). "
         "e.g. --all-visible --quick",
     )
@@ -1004,7 +1009,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     presentation.add_argument(
         "--pivot", action="store_true",
-        help="Pivot layout: rows = (cluster, account, qos), columns = request "
+        help="Pivot layout: rows = (cluster, account, partition, qos), columns = request "
         "labels, cells = wait times. Table format only; useful with a "
         "multi-request REQUEST_LIST. e.g. 'a100:1+a100:4' --pivot",
     )
@@ -1198,6 +1203,61 @@ def show_associations(user: Optional[str], all_visible: bool) -> List[Allocation
                 )
             )
 
+    return dedupe_rows(rows)
+
+
+_MYCHPC_FLAG = re.compile(r"--(partition|qos|account)=([^\s]+)")
+
+
+def show_partition_clusters() -> Dict[str, Set[str]]:
+    """Map each live partition name to its SLURM cluster(s)."""
+    sinfo = require_tool("sinfo")
+    output = run_command([
+        sinfo, "--clusters=all", "-h", "-O", "Cluster:|,PartitionName:|",
+    ])
+    result: Dict[str, Set[str]] = {}
+    for line in output.splitlines():
+        fields = line.split("|")
+        if len(fields) < 2:
+            continue
+        cluster, partition = fields[0].strip(), fields[1].strip().rstrip("*")
+        if cluster and partition:
+            result.setdefault(partition, set()).add(cluster)
+    return result
+
+
+def parse_mychpc_batch(
+    output: str,
+    associations: Sequence[AllocationRow],
+    partition_clusters: Dict[str, Set[str]],
+) -> List[AllocationRow]:
+    """Use CHPC's personalized triples; associations supply metadata only."""
+    association_clusters: Dict[Tuple[str, str], Set[str]] = {}
+    association_defaults: Dict[Tuple[str, str, str], str] = {}
+    for row in associations:
+        association_clusters.setdefault((row.account, row.qos), set()).add(row.cluster)
+        association_defaults[(row.cluster, row.account, row.qos)] = row.default_qos
+    rows: List[AllocationRow] = []
+    for line in output.splitlines():
+        matches = _MYCHPC_FLAG.findall(line)
+        if not matches:
+            if re.search(r"--(?:partition|qos|account)(?:=|\b)", line):
+                raise CommandError("malformed mychpc batch option line: " + line.strip())
+            continue
+        flags = dict(matches)
+        if len(matches) != 3 or set(flags) != {"partition", "qos", "account"}:
+            raise CommandError("malformed mychpc batch option line: " + line.strip())
+        partition, qos, account = (flags[key] for key in ("partition", "qos", "account"))
+        clusters = partition_clusters.get(partition, set())
+        assoc_clusters = association_clusters.get((account, qos), set())
+        choices = clusters & assoc_clusters if clusters and assoc_clusters else clusters or assoc_clusters
+        cluster = next(iter(choices)) if len(choices) == 1 else ""
+        rows.append(AllocationRow(
+            cluster, account, "", partition, qos,
+            association_defaults.get((cluster, account, qos), ""), official=True,
+        ))
+    if not rows:
+        raise CommandError("mychpc batch returned no account/partition/QoS combinations")
     return dedupe_rows(rows)
 
 
@@ -2575,6 +2635,8 @@ def predict_wait_result(
         return None, "missing-sbatch"
     if not row.account or not row.qos:
         return None, "missing-account-or-qos"
+    if not row.cluster:
+        return None, "unresolved-cluster"
     candidates = [c for c in _candidate_partitions(row, known_partitions) if c]
     if not candidates:
         return None, "missing-partition"
@@ -2823,6 +2885,8 @@ def _candidate_partitions(
     stripped (e.g. QOS `granite-gpu-freecycle` runs on partition `granite-gpu`).
     Wait checks try each candidate in order and stop at the first one SLURM accepts.
     """
+    if row.official:
+        return [row.partition] if row.partition else []
     candidates = list(_candidate_partitions_raw(row.partition, row.qos))
     if known_partitions:
         known = known_partitions.get(row.cluster)
@@ -3927,7 +3991,8 @@ def filter_rows_by_requests(
         return rows
     return [
         row for row in rows
-        if any(not request.should_skip(row) for request in requests)
+        if not row.partition.endswith("-dtn")
+        and any(not request.should_skip(row) for request in requests)
     ]
 
 
@@ -4747,6 +4812,7 @@ def table_output(
     term_width: Optional[int] = None,
     show_gpu: bool = False,
     show_cpu: bool = False,
+    compact_inventory: bool = False,
 ) -> str:
     records = [
         row.to_dict(
@@ -4765,6 +4831,11 @@ def table_output(
         else _empty_columns(include_details, include_avail, include_wait)
     )
     columns = _select_table_columns(all_columns, include_avail)
+    if compact_inventory:
+        columns = [
+            c for c in ("cluster", "account", "partition", "qos", "wall", "tags")
+            if c in all_columns
+        ]
 
     if tty is None:
         tty = sys.stdout.isatty()
@@ -4864,7 +4935,7 @@ def json_output(
             "fields": {
                 "cluster": "SLURM cluster name (e.g. notchpeak, granite)",
                 "account": "account to pass via --account",
-                "qos": "QOS to pass via --qos; partition is usually the same name",
+                "qos": "QOS to pass via --qos; use the separate partition field for --partition",
                 "partition": "partition name; pass via --partition",
                 "wall": "QOS MaxWall as HH:MM:SS, D-HH:MM:SS, or 'unlimited'",
                 "request": "resource request: '<gpu>:<count>@<wall>[,<mem>]' or "
@@ -5099,6 +5170,8 @@ def sbatch_output(
     """
     blocks: List[List[str]] = []
     for row, request in _dedup_pairs(pairs):
+        if not row.cluster:
+            continue
         header_id = f"{row.cluster} · {row.account}/{row.qos}".strip(" ·/")
         # Distinguish "checked but unknown" (key present, value None → show
         # `(wait: ?)`) from "not checked" (--no-wait/--quick → no annotation).
@@ -5125,7 +5198,10 @@ def sbatch_json_output(
     (cluster, account, qos, partition) plus the same directive list, request
     label, and predicted wait that `--best` exposes.
     """
-    items = [_allocation_json_record(row, request) for row, request in _dedup_pairs(pairs)]
+    items = [
+        _allocation_json_record(row, request)
+        for row, request in _dedup_pairs(pairs) if row.cluster
+    ]
     return json.dumps(items, indent=2, sort_keys=True)
 
 
@@ -5135,7 +5211,7 @@ def pivot_output(
     tty: Optional[bool] = None,
     term_width: Optional[int] = None,
 ) -> str:
-    """Render a (cluster, account, qos) × request pivot table of wait times.
+    """Render a (cluster, account, partition, qos) × request wait table.
 
     Rows are unique allocations, columns are request labels in first-seen order,
     cells are formatted wait strings. Missing cells render as '?'. When no
@@ -5145,15 +5221,15 @@ def pivot_output(
     """
     if not pairs:
         return "(no matching allocations)"
-    row_keys: List[Tuple[str, str, str]] = []
-    seen_keys: Set[Tuple[str, str, str]] = set()
+    row_keys: List[Tuple[str, str, str, str]] = []
+    seen_keys: Set[Tuple[str, str, str, str]] = set()
     request_labels: List[str] = []
     seen_labels: Set[str] = set()
-    cells: Dict[Tuple[Tuple[str, str, str], str], str] = {}
+    cells: Dict[Tuple[Tuple[str, str, str, str], str], str] = {}
     for row, request in pairs:
         if request is None:
             continue
-        key = (row.cluster, row.account, row.qos)
+        key = (row.cluster, row.account, row.partition, row.qos)
         if key not in seen_keys:
             seen_keys.add(key)
             row_keys.append(key)
@@ -5165,12 +5241,12 @@ def pivot_output(
     if not row_keys or not request_labels:
         return "(no matching allocations)"
     request_headers = [s.upper() for s in request_labels]
-    headers = ["CLUSTER", "ACCOUNT", "QOS"] + request_headers
+    headers = ["CLUSTER", "ACCOUNT", "PARTITION", "QOS"] + request_headers
     body: List[List[str]] = []
     for key in row_keys:
-        cluster, account, qos = key
+        cluster, account, partition, qos = key
         body.append(
-            [cluster, account, qos]
+            [cluster, account, partition, qos]
             + [cells.get((key, s), "?") for s in request_labels]
         )
     if tty is None:
@@ -5178,7 +5254,7 @@ def pivot_output(
     if term_width is None:
         term_width = shutil.get_terminal_size((120, 24)).columns
     color = _color_enabled(tty)
-    columns = ["cluster", "account", "qos"] + [
+    columns = ["cluster", "account", "partition", "qos"] + [
         f"wait_{i}" for i in range(len(request_headers))
     ]
     labels = {column: headers[i] for i, column in enumerate(columns)}
@@ -5350,6 +5426,85 @@ def render_explain_plan(
 
 
 def run_self_test() -> int:
+    official_text = (
+        "PREEMPTABLE GPU --partition=granite-gpu-guest "
+        "--qos=granite-gpu-guest --account=sadayappan 15%\n"
+        "PREEMPTABLE GPU --partition=granite-gpu-gh200-guest "
+        "--qos=granite-gpu-guest --account=sadayappan 50%\n"
+        "DATA-TRANSFER CPU --partition=notchpeak-dtn "
+        "--qos=notchpeak-dtn --account=dtn 90%\n"
+    )
+    assoc = [AllocationRow("granite", "sadayappan", "me", "", "granite-gpu-guest", "")]
+    official = parse_mychpc_batch(
+        official_text + official_text.splitlines()[0] + "\n", assoc,
+        {"granite-gpu-guest": {"granite"},
+         "granite-gpu-gh200-guest": {"granite"},
+         "notchpeak-dtn": {"notchpeak"}},
+    )
+    assert len(official) == 3
+    assert {r.partition for r in official} == {
+        "granite-gpu-guest", "granite-gpu-gh200-guest", "notchpeak-dtn"
+    }
+    assert all(r.official for r in official)
+    assert _candidate_partitions(official[1]) == ["granite-gpu-gh200-guest"]
+    assert "--partition=granite-gpu-gh200-guest" in sbatch_output([(official[1], None)])
+    assert "PARTITION" in pivot_output([
+        (official[0], parse_resource_spec("gpu:1@30m")),
+        (official[1], parse_resource_spec("gpu:1@30m")),
+    ])
+    assert len(filter_rows_by_requests(official, [parse_resource_spec("cpu:4")])) == 2
+    unresolved = parse_mychpc_batch(official_text, [], {})
+    assert len(unresolved) == 3 and all(not row.cluster for row in unresolved)
+    conflicting_assoc = [AllocationRow(
+        "notchpeak", "sadayappan", "me", "", "granite-gpu-guest", ""
+    )]
+    conflicting = parse_mychpc_batch(
+        official_text.splitlines()[0], conflicting_assoc,
+        {"granite-gpu-guest": {"granite", "kingspeak"}},
+    )
+    assert conflicting[0].cluster == ""
+    conflicting = parse_mychpc_batch(
+        official_text.splitlines()[0], conflicting_assoc,
+        {"granite-gpu-guest": {"granite"}},
+    )
+    assert conflicting[0].cluster == ""
+    try:
+        parse_mychpc_batch("OWNER GPU --partition=x --qos=y\n", [], {})
+    except CommandError:
+        pass
+    else:
+        raise AssertionError("incomplete mychpc batch line should fail")
+
+    # Optional Slurm metadata failures must not erase official combinations.
+    from contextlib import redirect_stderr, redirect_stdout
+    from unittest.mock import patch
+    output_stream, error_stream = StringIO(), StringIO()
+    with patch("shutil.which", return_value="/fake/mychpc"), \
+            patch(__name__ + ".run_command", return_value=official_text), \
+            patch(__name__ + ".show_associations", side_effect=CommandError("no sacctmgr")), \
+            patch(__name__ + ".show_partition_clusters", return_value={
+                "granite-gpu-guest": {"granite"},
+                "granite-gpu-gh200-guest": {"granite"},
+                "notchpeak-dtn": {"notchpeak"},
+            }), \
+            patch(__name__ + ".show_partition_features", return_value={}), \
+            patch(__name__ + ".show_partition_gpus", return_value={}), \
+            patch(__name__ + ".show_qos", side_effect=CommandError("no qos")), \
+            redirect_stdout(output_stream), redirect_stderr(error_stream):
+        assert main(["--quick", "--format", "json", "--no-json-help"]) == 0
+    assert len(json.loads(output_stream.getvalue())) == 3
+    assert "metadata unavailable" in error_stream.getvalue()
+
+    # Without mychpc, the association fallback must disclose incompleteness.
+    output_stream, error_stream = StringIO(), StringIO()
+    with patch("shutil.which", return_value=None), \
+            patch(__name__ + ".show_associations", return_value=assoc), \
+            patch(__name__ + ".show_qos", return_value={}), \
+            redirect_stdout(output_stream), redirect_stderr(error_stream):
+        assert main(["--quick", "--format", "table"]) == 0
+    assert "granite-gpu-guest" in output_stream.getvalue()
+    assert "may be incomplete" in error_stream.getvalue()
+
     parsed = split_parsable("a|b|c|\n1|2|3\n", 3)
     assert parsed == [["a", "b", "c"], ["1", "2", "3"]]
     assert parse_wall_seconds("3-00:00:00") == 259200
@@ -5362,7 +5517,7 @@ def run_self_test() -> int:
     assert "gpu" in row.tags
     assert "default" in row.tags
     assert "cluster" in row.to_dict()
-    assert csv_output([(row, None)]).startswith("cluster,account,qos")
+    assert csv_output([(row, None)]).startswith("cluster,account,partition,qos")
     assert json.loads(json_output([(row, None)]))[0]["account"] == "soc-gpu-np"
 
     cluster, partition, bucket = parse_gres_line(
@@ -5761,8 +5916,8 @@ def run_self_test() -> int:
     # Header + rule + first data line + at least one indented continuation.
     assert len(rendered_lines) >= 4, rendered
     assert max(len(_ansi.sub("", line)) for line in rendered_lines) <= 80, rendered
-    assert "FLAGS" in rendered_lines[0] and "NODES" in rendered_lines[0]
-    assert "CPU_VENDOR" not in rendered_lines[0]
+    assert "FLAGS" in rendered and "NODES" in rendered
+    assert "CPU_VENDOR" not in rendered
     assert "def" in rendered and "gpu,default" not in rendered
     assert "a100" in rendered and "h200" in rendered, rendered
     # Even when piped with explicit table output, physical lines are capped.
@@ -7433,6 +7588,12 @@ def main(argv: Sequence[str]) -> int:
 
     user = os.environ.get("USER") or run_command(["id", "-un"]).strip()
     include_usage = _needs_usage_lookup(args, fmt, sort_spec)
+    mychpc = shutil.which("mychpc") if not args.all_visible else None
+    if mychpc is None and not args.all_visible:
+        print(
+            "[chpc-allocs] mychpc is unavailable; association inventory may be incomplete",
+            file=sys.stderr,
+        )
     # Fan out independent SLURM CLI subprocesses in parallel: sinfo (slowest),
     # sacctmgr show association, sshare. show_qos depends on the rows, so it
     # is submitted only after show_associations completes.
@@ -7441,17 +7602,63 @@ def main(argv: Sequence[str]) -> int:
         and not (args.no_availability and not machine_details)
     )
     fetch_partition_gpus_fallback = not include_avail and machine_details
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         f_assoc = pool.submit(show_associations, user, args.all_visible)
+        f_mychpc = pool.submit(run_command, [mychpc, "batch"]) if mychpc else None
         f_avail = pool.submit(show_partition_availability) if include_avail else None
+        f_pmap = pool.submit(show_partition_clusters) if mychpc and not include_avail else None
         f_usage = pool.submit(show_usage, user) if include_usage else None
         f_features = pool.submit(show_partition_features) if fetch_features_fallback else None
         f_pgpus = pool.submit(show_partition_gpus) if fetch_partition_gpus_fallback else None
-        rows = f_assoc.result()
-        f_qos = pool.submit(show_qos, [row.qos for row in rows])
+        if f_mychpc is not None:
+            batch_output = f_mychpc.result()
+            try:
+                associations = f_assoc.result()
+            except CommandError as exc:
+                print(f"[chpc-allocs] association metadata unavailable: {exc}", file=sys.stderr)
+                associations = []
+        else:
+            associations = f_assoc.result()
         partition_avail = f_avail.result() if f_avail is not None else None
-        qos_info = f_qos.result()
-        share_info = f_usage.result() if f_usage is not None else {}
+        if f_pmap is not None:
+            try:
+                partition_clusters = f_pmap.result()
+            except CommandError as exc:
+                print(f"[chpc-allocs] partition map unavailable: {exc}", file=sys.stderr)
+                partition_clusters = {}
+        else:
+            partition_clusters = {}
+            if partition_avail is not None:
+                for cluster, parts in partition_avail.items():
+                    for partition in parts:
+                        partition_clusters.setdefault(partition, set()).add(cluster)
+        rows = (
+            parse_mychpc_batch(batch_output, associations, partition_clusters)
+            if f_mychpc is not None else associations
+        )
+        unresolved = [row for row in rows if not row.cluster]
+        if unresolved:
+            names = ", ".join(sorted({row.partition for row in unresolved}))
+            print(
+                "[chpc-allocs] cluster unresolved for " + names
+                + "; those triples remain in inventory but cannot be wait-checked",
+                file=sys.stderr,
+            )
+        f_qos = pool.submit(show_qos, [row.qos for row in rows])
+        try:
+            qos_info = f_qos.result()
+        except CommandError as exc:
+            if f_mychpc is None:
+                raise
+            print(f"[chpc-allocs] QoS metadata unavailable: {exc}", file=sys.stderr)
+            qos_info = {}
+        try:
+            share_info = f_usage.result() if f_usage is not None else {}
+        except CommandError as exc:
+            if f_mychpc is None:
+                raise
+            print(f"[chpc-allocs] usage metadata unavailable: {exc}", file=sys.stderr)
+            share_info = {}
     # When availability data is loaded, derive the gpu-types map from it for
     # free (no second sinfo call) — needed by the 'premium' sort key so
     # a100/h100/h200/a6000 rows surface in compact table output.
@@ -7564,6 +7771,7 @@ def main(argv: Sequence[str]) -> int:
                 include_details=False,
                 include_avail=include_avail, include_wait=include_wait,
                 show_gpu=show_gpu, show_cpu=show_cpu,
+                compact_inventory=args.quick,
             )
             if getattr(args, "legend", False):
                 output = output + "\n" + render_legend()

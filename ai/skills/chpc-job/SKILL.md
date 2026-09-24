@@ -9,7 +9,7 @@ Apply when the user wants to *get something running* on a CHPC cluster, not just
 patch one directive. Walk these four steps in order — each feeds the next.
 
 ```
-[ ] 1. find a runnable allocation   (chpc-allocs --best → account/partition/qos)
+[ ] 1. inventory, then choose a runnable allocation (mychpc batch → chpc-allocs)
 [ ] 2. choose the right modules     (module spider → load, compiler before MPI)
 [ ] 3. write the sbatch script      (seed it with the triple from step 1)
 [ ] 4. submit and monitor           (sbatch → squeue --me → seff)
@@ -19,23 +19,27 @@ Copy that checklist into your reply and tick items off as you go.
 
 ## 1. Find a runnable allocation
 
-The **allocation** is the `account` / `partition` / `qos` triple. Don't guess it —
-run the repo's tool, which also predicts queue wait time, and paste what it emits:
+The **allocation** is the `account` / `partition` / `qos` triple. First get every
+current option from CHPC, then compare all options compatible with the job:
 
 ```bash
-chpc-allocs --best 'a100:4@8h'    # lowest-wait runnable triple as a #SBATCH block
-chpc-allocs cpu:32                # 32-core CPU job; bare number → cpu:N
-chpc-allocs 'a100:4*cpu:32@12h'   # one job needing BOTH (space/+ = OR, * = AND)
+mychpc batch                         # CHPC's complete personalized list
+chpc-allocs --quick --format table    # complete inventory with exact partitions
+chpc-allocs --show-all 'a100:4@8h'    # every compatible option, including unknown waits
+chpc-allocs --best 'a100:4@8h'        # one choice after inspecting the list
 ```
 
-`chpc-allocs --best` runs `sbatch --test-only` under the hood — nothing is submitted.
+The helper uses `mychpc batch` for its inventory and `sbatch --test-only` for
+wait checks; nothing is submitted. `--best` returns only one option, so do not
+use it as the inventory. Data-transfer partitions are not compute options.
+If the official command or helper fails, report that completeness could not be
+verified. Never fill gaps from saved account examples.
 The full request grammar (GPU/CPU atoms, walltime, multi-node) lives in
 `docs/chpc-allocs.md`; reuse it, don't re-derive it.
 
-- If it exits with a Python version-guard error: `module load python/3.10.3` and retry
-  (CHPC's stock `/usr/bin/python3` is 3.6 on some nodes).
-- No tool / want the official list: `mychpc batch` prints every valid triple for the
-  user. Slower, no wait prediction.
+- The helper runs on CHPC's stock Python 3.6.
+- If the helper is unavailable, use the `mychpc batch` triples directly;
+  wait estimates will be unavailable.
 
 ## 2. Choose the right modules
 
@@ -69,9 +73,9 @@ Seed the `#SBATCH` triple from step 1; tune the rest. The full directive catalog
 
 ```bash
 #!/usr/bin/env bash
-#SBATCH --account=<from chpc-allocs>    # the three flags are mandatory on CHPC
-#SBATCH --partition=<from chpc-allocs>
-#SBATCH --qos=<from chpc-allocs>
+#SBATCH --account=<from one live inventory row>  # all three flags are mandatory
+#SBATCH --partition=<from the same row>
+#SBATCH --qos=<from the same row>
 #SBATCH --job-name=<short-tag>
 #SBATCH --time=HH:MM:SS                  # job is killed at the limit, no warning
 #SBATCH --nodes=1

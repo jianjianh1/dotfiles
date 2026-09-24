@@ -40,7 +40,12 @@ srun ./a.out                            # always srun under SLURM; never bare mp
 Make `logs/` exist (`mkdir -p logs`) before submission — sbatch will refuse if
 the output path is invalid.
 
-## Picking a partition (CHPC reference)
+## Picking a partition (CHPC examples)
+
+On CHPC, run `mychpc batch` before choosing: its current account, partition,
+and QoS combinations are personalized. Use `chpc-allocs --quick` for the full
+inventory and `chpc-allocs --show-all REQUEST` to assess job compatibility.
+The names below describe common partition types; they do not establish access.
 
 | Partition | Use when |
 |---|---|
@@ -51,10 +56,9 @@ the output path is invalid.
 | `granite` | Mixed CPU + GPU |
 | `ash` / `ash-shared-short` | Open-queue (no allocation needed); contention varies |
 
-Pick the **lowest-tier partition that fits**; long queues on the big partitions
-are the #1 cause of "my job hasn't started yet". Use the
-`scripts/chpc-allocs.py` helper (installed as `chpc-allocs` in `~/.local/bin`)
-to discover which allocations the user has access to.
+Pick a suitable option from the live list, accounting for wait, limits, and
+preemption. Use the `scripts/chpc-allocs.py` helper (installed as
+`chpc-allocs` in `~/.local/bin`) to compare eligible options.
 
 ## Submitting and monitoring
 
