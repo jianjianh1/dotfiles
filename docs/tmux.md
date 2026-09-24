@@ -54,13 +54,6 @@ Default split bindings (`"` and `%`) are unbound.
 | `Alt+Up` | No | Select pane up |
 | `Alt+Down` | No | Select pane down |
 
-### Window Switching (no prefix)
-
-| Key | Action |
-|-----|--------|
-| `Shift+Left` | Previous window |
-| `Shift+Right` | Next window |
-
 ### Pane Resizing (require prefix, repeatable)
 
 | Key | Action |
