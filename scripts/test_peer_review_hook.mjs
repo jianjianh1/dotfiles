@@ -122,18 +122,37 @@ try {
   assert.deepEqual(hook("codex", { hook_event_name: "Stop", last_assistant_message: "No changes" }), {});
   assert.equal(calls().length, 0);
 
+  // Plan mode alone does not turn explanations or examples into plans.
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "Here is the diagnosis." }), {});
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "Write <proposed_plan>steps</proposed_plan> in a plan." }), {});
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "```md\n<proposed_plan>\nsteps\n</proposed_plan>\n<!-- peer-review:plan -->\n```" }), {});
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "~~~md\n<!-- peer-review:plan -->\n~~~" }), {});
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "<proposed_plan>\nUnclosed example" }), {});
+  assert.equal(calls().length, 0);
+
   // A later edit triggers Claude once, then requires a visible review line.
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Fix the code" });
   writeFileSync(join(repo, "main.js"), "export const value = 3;\n");
-  let result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Fixed it" });
+  let result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "Fixed it" });
   assert.equal(result.decision, "block");
-  assert.match(result.reason, /Claude found no actionable issues/);
+  assert.match(result.reason, /Claude found no actionable issues in Git changes since this prompt/);
   assert.deepEqual(calls(), ["claude"]);
   assert.equal(modelCalls().at(-1).input.split("\n")
     .find((line) => line.startsWith("Changed since user prompt:")),
   "Changed since user prompt: main.js");
   assert.deepEqual(hook("codex", { hook_event_name: "UserPromptSubmit", prompt: result.reason }), {});
-  result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Peer review: Claude found no actionable issues." });
+  result = hook("codex", { hook_event_name: "Stop",
+    last_assistant_message: "Peer review: Claude found no actionable issues." });
+  assert.match(result.reason, /Git changes since this prompt/);
+  assert.deepEqual(calls(), ["claude"]);
+  result = hook("codex", { hook_event_name: "Stop",
+    last_assistant_message: "Peer review: Claude found no actionable issues in Git changes since this prompt." });
   assert.deepEqual(result, {});
   assert.deepEqual(calls(), ["claude"]);
 
@@ -143,7 +162,27 @@ try {
   result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Added a file" });
   assert.equal(result.decision, "block");
   assert.equal(calls().length, 2);
-  hook("codex", { hook_event_name: "Stop", last_assistant_message: "Peer review: Claude found no actionable issues." });
+  hook("codex", { hook_event_name: "Stop",
+    last_assistant_message: "Peer review: Claude found no actionable issues in Git changes since this prompt." });
+
+  // Findings and unavailable reviews name the same per-prompt code scope.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Change code again" });
+  writeFileSync(join(repo, "main.js"), "export const value = 4;\n");
+  result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Changed code" },
+    { REVIEW_TEST_ISSUES: "1" });
+  assert.match(result.reason, /actionable issues in Git changes since this prompt.*Missing rollback/s);
+  result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Changed code" });
+  assert.match(result.reason, /found issues in Git changes since this prompt/);
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop",
+    last_assistant_message: "Peer review: Claude found issues in Git changes since this prompt." }), {});
+
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Change code again" });
+  writeFileSync(join(repo, "main.js"), "export const value = 5;\n");
+  result = hook("codex", { hook_event_name: "Stop", last_assistant_message: "Changed code" },
+    { REVIEW_TEST_FAIL: "1" });
+  assert.match(result.reason, /review was unavailable for Git changes since this prompt/);
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop",
+    last_assistant_message: "Peer review: Claude review was unavailable for Git changes since this prompt." }), {});
 
   // A plan gets one review and one re-review after a revision.
   const first = "<proposed_plan>\nStep 1\n</proposed_plan>";
@@ -151,11 +190,13 @@ try {
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan it" });
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first }, { REVIEW_TEST_ISSUES: "1" });
   assert.equal(result.decision, "block");
-  assert.match(result.reason, /Missing rollback/);
+  assert.match(result.reason, /the proposed plan.*Missing rollback/s);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: revised });
   assert.equal(result.decision, "block");
   assert.match(result.reason, /no actionable issues/);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: revised.replace("</proposed_plan>", "Peer review: Claude found no actionable issues.\n</proposed_plan>") });
+  assert.match(result.reason, /the proposed plan/);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: revised.replace("</proposed_plan>", "Peer review: Claude found no actionable issues in the proposed plan.\n</proposed_plan>") });
   assert.deepEqual(result, {});
 
   // Plan review does not depend on a Git repository.
@@ -163,7 +204,11 @@ try {
   mkdirSync(nonGit);
   result = hook("codex", { hook_event_name: "Stop", cwd: nonGit,
     session_id: "outside-git", last_assistant_message: "<!-- peer-review:plan -->\n# Plan\nDo work" });
-  assert.match(result.reason, /Claude found no actionable issues/);
+  assert.match(result.reason, /Claude found no actionable issues in the proposed plan/);
+  result = hook("codex", { hook_event_name: "Stop", cwd: nonGit,
+    session_id: "outside-git-formal", permission_mode: "plan",
+    last_assistant_message: "<!-- peer-review:plan -->\n# Plain-text plan\nDo work" });
+  assert.match(result.reason, /Claude found no actionable issues in the proposed plan/);
 
   // Claude's ExitPlanMode hook reviews before the plan is presented.
   hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Plan it" });
@@ -173,10 +218,10 @@ try {
     tool_input: { plan: "# Plan\nDo work" } });
   assert.equal(result.hookSpecificOutput.decision.behavior, "deny");
   result = hook("claude", { hook_event_name: "PreToolUse", tool_name: "ExitPlanMode", tool_input: { plan: "# Plan\nDo work and rollback" } });
-  assert.match(result.systemMessage, /Codex found no actionable issues/);
+  assert.match(result.systemMessage, /Codex found no actionable issues in the proposed plan/);
   result = hook("claude", { hook_event_name: "PermissionRequest", tool_name: "ExitPlanMode",
     tool_input: { plan: "# Plan\nDo work and rollback" } });
-  assert.match(result.systemMessage, /Codex found no actionable issues/);
+  assert.match(result.systemMessage, /Codex found no actionable issues in the proposed plan/);
 
   // A Claude usage limit retries the same review with Haiku and names the model.
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan with fallback" });
@@ -193,7 +238,7 @@ try {
     last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude passed.\n</proposed_plan>") });
   assert.match(result.reason, /naming haiku/);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
-    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude Haiku fallback found no actionable issues.\n</proposed_plan>") });
+    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude Haiku fallback found no actionable issues in the proposed plan.\n</proposed_plan>") });
   assert.deepEqual(result, {});
 
   // A Codex usage limit retries with GPT-6 Luna, including JSON error events.
@@ -243,7 +288,7 @@ try {
     last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex gpt-6-luna passed.\n</proposed_plan>") });
   assert.match(result.reason, /same provider as author/);
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
-    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex GPT-6 Luna, same-provider fallback, found no actionable issues.\n</proposed_plan>") });
+    last_assistant_message: first.replace("</proposed_plan>", "Peer review: Codex GPT-6 Luna, same-provider fallback, found no actionable issues in the proposed plan.\n</proposed_plan>") });
   assert.deepEqual(result, {});
 
   // A shared Codex limit likewise switches to an independent Claude session.
@@ -273,7 +318,7 @@ try {
   result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first }, { REVIEW_TEST_FAIL: "1" });
   assert.match(result.reason, /review was unavailable/);
   assert.equal(modelCalls().length - start, 1);
-  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude was unavailable.\n</proposed_plan>") });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan", last_assistant_message: first.replace("</proposed_plan>", "Peer review: Claude was unavailable for the proposed plan.\n</proposed_plan>") });
   assert.deepEqual(result, {});
   const before = calls().length;
   assert.deepEqual(hook("codex", { hook_event_name: "Stop", last_assistant_message: first }, { DOTFILES_PEER_REVIEW: "1" }), {});

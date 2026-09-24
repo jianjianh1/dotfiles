@@ -34,9 +34,11 @@ and Git changes. `install.sh` links `scripts/peer-review-hook.mjs` to
 each new prompt and before a turn ends. Claude also calls it before presenting
 an `ExitPlanMode` plan; both `PreToolUse` and `PermissionRequest` guard that
 step because some Claude Code versions ignore a `PreToolUse` denial for
-`ExitPlanMode`. Codex plans are caught at `Stop` in plan mode or when
-the response contains `<proposed_plan>`. For plans written outside formal plan
-mode, the agent must add `<!-- peer-review:plan -->`.
+`ExitPlanMode`. At `Stop`, a standalone `<proposed_plan>` block triggers plan
+review. Any plan without that block, including plain text in formal plan mode,
+needs a standalone `<!-- peer-review:plan -->` marker outside a code fence.
+Ordinary plan-mode replies do not trigger plan review. If they include Git
+changes, the normal code review still runs.
 
 These hooks apply across projects. A Codex-authored plan or Git change goes to
 Claude's service for review, and a Claude-authored one goes to OpenAI's
@@ -52,6 +54,9 @@ context. Known credential filenames and common token patterns are excluded
 from the review input and their exclusion must be disclosed. This filter
 cannot detect every secret; keep credentials out of project changes. Code
 review applies only in Git repositories; plan review works in any directory.
+Review feedback and the final `Peer review:` line name their scope: `the proposed plan`
+or `Git changes since this prompt`. A pass does not assess existing code outside
+that scope.
 
 The delegated reviewer runs read-only through the existing CLI sign-ins:
 `codex exec -s read-only` with GPT-6 Sol when Claude is the author, and

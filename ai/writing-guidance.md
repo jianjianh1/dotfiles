@@ -14,8 +14,8 @@ Before sending or saving prose, reread it as a new colleague would. Check that t
 
 # Peer review of plans and changes
 
-Before presenting an implementation plan or finishing edits in a Git project, use the automatic peer review result: Claude reviews Codex's work, and Codex reviews Claude's. A delegated reviewer works read-only and must not start another review. For a plan outside the CLI's formal plan mode, include `<!-- peer-review:plan -->` so the review hook can recognize it.
+Before presenting an implementation plan or finishing edits in a Git project, use the automatic peer review result: Claude reviews Codex's work, and Codex reviews Claude's. A delegated reviewer works read-only and must not start another review. For a Codex plan, use a standalone `<proposed_plan>` block. For any plan without that block, including plain text in formal plan mode, put `<!-- peer-review:plan -->` on its own line outside a code fence so the hook can recognize it. Claude's `ExitPlanMode` review works without a marker.
 
 This global review sends the plan or Git changes to the other provider. If project rules prohibit sharing code with both providers, disclose the conflict before transmitting it.
 
-Address actionable findings and submit one revised version for re-review. End the final response with a `Peer review:` line stating the result. If the peer is unavailable, or findings remain after re-review, disclose that clearly. Keep credential-like files out of the review input and disclose their exclusion when relevant.
+Address actionable findings and submit one revised version for re-review. For reviewed work, end the final response with a `Peer review:` line stating the result and its scope: `the proposed plan` or `Git changes since this prompt`. If the peer is unavailable, or findings remain after re-review, disclose that clearly. Keep credential-like files out of the review input and disclose their exclusion when relevant.
