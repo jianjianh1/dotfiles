@@ -55,6 +55,20 @@ function modelCalls() {
   catch { return []; }
 }
 
+function codexTranscript(sessionId, turns) {
+  const path = join(temp, `rollout-${sessionId}.jsonl`);
+  const events = turns.flatMap(({ id, message, plan }) => [
+    { type: "event_msg", payload: { type: "task_started", turn_id: id } },
+    ...(plan ? [{ type: "event_msg", payload: {
+      type: "item_completed", turn_id: id, item: { type: "Plan", text: plan },
+    } }] : []),
+    { type: "response_item", payload: { type: "message", role: "assistant",
+      phase: "final_answer", content: [{ type: "output_text", text: message }] } },
+  ]);
+  writeFileSync(path, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+  return path;
+}
+
 writeFileSync(join(bin, "claude"), `#!/usr/bin/env node
 const fs = require("node:fs");
 fs.appendFileSync(process.env.REVIEW_TEST_LOG, "claude\\n");
@@ -131,8 +145,8 @@ try {
     last_assistant_message: "```md\n<proposed_plan>\nsteps\n</proposed_plan>\n<!-- peer-review:plan -->\n```" }), {});
   assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
     last_assistant_message: "~~~md\n<!-- peer-review:plan -->\n~~~" }), {});
-  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
-    last_assistant_message: "<proposed_plan>\nUnclosed example" }), {});
+  assert.match(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "<proposed_plan>\nUnclosed example" }).reason, /<proposed_plan>/);
   assert.equal(calls().length, 0);
 
   // A later edit triggers Claude once, then requires a visible review line.
@@ -208,7 +222,7 @@ try {
   result = hook("codex", { hook_event_name: "Stop", cwd: nonGit,
     session_id: "outside-git-formal", permission_mode: "plan",
     last_assistant_message: "<!-- peer-review:plan -->\n# Plain-text plan\nDo work" });
-  assert.match(result.reason, /Claude found no actionable issues in the proposed plan/);
+  assert.match(result.reason, /<proposed_plan>/);
 
   // Claude's ExitPlanMode hook reviews before the plan is presented.
   hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Plan it" });
@@ -222,6 +236,9 @@ try {
   result = hook("claude", { hook_event_name: "PermissionRequest", tool_name: "ExitPlanMode",
     tool_input: { plan: "# Plan\nDo work and rollback" } });
   assert.match(result.systemMessage, /Codex found no actionable issues in the proposed plan/);
+  result = hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "The plan is ready." });
+  assert.deepEqual(result, {});
 
   // A Claude usage limit retries the same review with Haiku and names the model.
   hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan with fallback" });
@@ -365,6 +382,251 @@ try {
   assert.match(result.systemMessage, /missing session_id/);
   result = hook("codex", { hook_event_name: "Stop", session_id: null, last_assistant_message: "Done" });
   assert.match(result.reason, /missing session_id/);
+
+  // A completed plan in chat must reach each CLI's native approval handoff.
+  const prosePlan = "# Cache Plan\n## Summary\nCache results.\n## Implementation\n- Add a cache.\n- Test eviction.";
+  hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Plan the cache" });
+  result = hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: prosePlan });
+  assert.match(result.reason, /ExitPlanMode/);
+  assert.deepEqual(hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "I need to inspect the cache first." }), {});
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan the cache" });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: prosePlan });
+  assert.match(result.reason, /<proposed_plan>/);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "Here's what I'll do:\n- Add a cache.\n- Test eviction." });
+  assert.match(result.reason, /<proposed_plan>/);
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "Here is the diagnosis." }), {});
+  assert.deepEqual(hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "```md\n# Cache Plan\n## Implementation\n- Add a cache.\n- Test eviction.\n```" }), {});
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "<proposed_plan>\nAdd a cache." });
+  assert.match(result.reason, /<proposed_plan>/);
+
+  // Codex can omit last_assistant_message for a native Plan item.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan again" });
+  const transcript = codexTranscript("test-codex", [{ id: "turn-plan", plan: prosePlan,
+    message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` }]);
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-plan", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /Claude found no actionable issues in the proposed plan/);
+  assert.equal(modelCalls().length - start, 1);
+  assert.match(modelCalls().at(-1).input, /Plan:\n# Cache Plan/);
+  assert.doesNotMatch(modelCalls().at(-1).input, /task_started/);
+
+  // A TODO update in Plan mode is not a completed proposal by itself.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Investigate before planning" });
+  codexTranscript("test-codex", [{ id: "turn-todo-plan", plan: "1. Inspect files\n2. Compare options",
+    message: "I am still investigating." }]);
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-todo-plan", transcript_path: transcript, last_assistant_message: null });
+  assert.deepEqual(result, {});
+  assert.equal(modelCalls().length, start);
+  codexTranscript("test-codex", [{ id: "turn-todo-prose", plan: "1. Inspect files\n2. Compare options",
+    message: "Here's what I'll do:\n- Add the cache.\n- Test eviction." }]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-todo-prose", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /<proposed_plan>/);
+  assert.equal(modelCalls().length, start);
+
+  // If both appear, review the final proposed block rather than the TODO text.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Complete the cache proposal" });
+  codexTranscript("test-codex", [{ id: "turn-todo-and-proposal",
+    plan: "1. Inspect files\n2. Compare options",
+    message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` }]);
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-todo-and-proposal", transcript_path: transcript,
+    last_assistant_message: null });
+  assert.match(result.reason, /no actionable issues/);
+  assert.equal(modelCalls().length - start, 1);
+  assert.match(modelCalls().at(-1).input, /Plan:\n# Cache Plan/);
+  assert.doesNotMatch(modelCalls().at(-1).input, /Compare options/);
+
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Review the original cache plan" });
+  codexTranscript("test-codex", [{ id: "turn-plan", plan: prosePlan,
+    message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` }]);
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-plan", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /no actionable issues/);
+
+  // A partially written final JSONL line must not erase an earlier Plan item.
+  writeFileSync(transcript, readFileSync(transcript, "utf8") + '{"type":"event_msg"');
+  const callsAfterPlan = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-plan", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /Add a "Peer review:" line/);
+  assert.equal(modelCalls().length, callsAfterPlan);
+
+  // A review-only continuation cannot finish without a new native Plan item.
+  codexTranscript("test-codex", [
+    { id: "turn-plan", plan: prosePlan, message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` },
+    { id: "turn-review", message: "Peer review: Claude found no actionable issues in the proposed plan." },
+  ]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-review", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /<proposed_plan>/);
+  const disclosed = `${prosePlan}\nPeer review: Claude found no actionable issues in the proposed plan.`;
+  codexTranscript("test-codex", [
+    { id: "turn-plan", plan: prosePlan, message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` },
+    { id: "turn-review", message: "Peer review: Claude found no actionable issues in the proposed plan." },
+    { id: "turn-final", plan: disclosed, message: `<proposed_plan>\n${disclosed}\n</proposed_plan>` },
+  ]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-final", transcript_path: transcript, last_assistant_message: null });
+  assert.deepEqual(result, {});
+  assert.equal(modelCalls().length - start, 1);
+
+  // Marker-only plans outside formal plan mode still use review and disclosure.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan outside formal mode" });
+  const markedPlan = `${prosePlan}\n<!-- peer-review:plan -->`;
+  codexTranscript("test-codex", [{ id: "turn-marked", message: markedPlan }]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-marked", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /no actionable issues/);
+  assert.doesNotMatch(result.reason, /Re-emit/);
+  codexTranscript("test-codex", [
+    { id: "turn-marked", message: markedPlan },
+    { id: "turn-marked-final", message: "Peer review: Claude found no actionable issues in the proposed plan." },
+  ]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-marked-final", transcript_path: transcript, last_assistant_message: null });
+  assert.deepEqual(result, {});
+
+  // An ordinary Codex TODO/Plan update is not a plan proposal outside Plan mode.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Work through a TODO list" });
+  codexTranscript("test-codex", [{ id: "turn-todo", plan: "1. Inspect code\n2. Edit code",
+    message: "I will inspect the code." }]);
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-todo", transcript_path: transcript, last_assistant_message: null });
+  assert.deepEqual(result, {});
+  assert.equal(modelCalls().length, start);
+
+  // A transcript-only code reply can disclose its Git review as well.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Change code with transcript" });
+  writeFileSync(join(repo, "scratch.js"), "export const value = 99;\n");
+  codexTranscript("test-codex", [{ id: "turn-code", message: "Changed code" }]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-code", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /no actionable issues in Git changes since this prompt/);
+  codexTranscript("test-codex", [
+    { id: "turn-code", message: "Changed code" },
+    { id: "turn-code-final", message: "Peer review: Claude found no actionable issues in Git changes since this prompt." },
+  ]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-code-final", transcript_path: transcript, last_assistant_message: null });
+  assert.deepEqual(result, {});
+
+  // An unreadable transcript cannot create an impossible code disclosure gate.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Change code without a readable transcript" });
+  writeFileSync(join(repo, "other.js"), "export const other = true;\n");
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-unreadable-code", transcript_path: join(temp, "rollout-wrong-session.jsonl"),
+    last_assistant_message: null });
+  assert.match(result.systemMessage, /transcript|review/i);
+  assert.equal(result.decision, undefined);
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Change a credential-like file without a readable transcript" });
+  writeFileSync(join(repo, "auth.json"), '{"token":"changed-example"}\n');
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-unreadable-secret", transcript_path: join(temp, "rollout-wrong-session.jsonl"),
+    last_assistant_message: null });
+  assert.match(result.systemMessage, /transcript.*Credential-like files changed/s);
+  assert.equal(result.decision, undefined);
+
+  // The Plan item still carries the disclosure when the hook's message is short.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan once more" });
+  codexTranscript("test-codex", [{ id: "turn-short-first", plan: prosePlan,
+    message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` }]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-short-first", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /no actionable issues/);
+  codexTranscript("test-codex", [
+    { id: "turn-short-first", plan: prosePlan,
+      message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` },
+    { id: "turn-short-final", plan: disclosed,
+      message: `<proposed_plan>\n${disclosed}\n</proposed_plan>` },
+  ]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-short-final", transcript_path: transcript,
+    last_assistant_message: "Plan complete." });
+  assert.deepEqual(result, {});
+
+  // Unreadable transcripts fail open visibly; repeated missed handoffs end cleanly.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan with missing transcript" });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-missing", transcript_path: join(temp, "rollout-wrong-session.jsonl"),
+    last_assistant_message: null });
+  assert.match(result.systemMessage, /transcript|plan approval/i);
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Review before losing transcript" });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: first });
+  assert.match(result.reason, /no actionable issues/);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-lost", transcript_path: join(temp, "rollout-wrong-session.jsonl"),
+    last_assistant_message: null });
+  assert.match(result.systemMessage, /transcript|plan approval/i);
+  assert.equal(result.decision, undefined);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    turn_id: "turn-lost", transcript_path: join(temp, "rollout-wrong-session.jsonl"),
+    last_assistant_message: null });
+  assert.match(result.systemMessage, /transcript|plan approval/i);
+  assert.equal(result.decision, undefined);
+
+  // A corrected Plan item resets the handoff retry count, even if disclosure is missing.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Retry a mixed handoff" });
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: prosePlan });
+  assert.match(result.reason, /<proposed_plan>/);
+  codexTranscript("test-codex", [{ id: "turn-mixed-plan", plan: prosePlan,
+    message: `<proposed_plan>\n${prosePlan}\n</proposed_plan>` }]);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    turn_id: "turn-mixed-plan", transcript_path: transcript, last_assistant_message: null });
+  assert.match(result.reason, /Peer review/);
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: prosePlan });
+  assert.match(result.reason, /<proposed_plan>/);
+  assert.equal(result.systemMessage, undefined);
+  hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Plan with repeated missed handoff" });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    result = hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+      last_assistant_message: "The plan is ready." });
+    assert.match(result.reason, /ExitPlanMode/);
+  }
+  result = hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "The plan is ready." });
+  assert.match(result.systemMessage, /approval.*not triggered/i);
+  assert.doesNotMatch(result.systemMessage, /peer review.*passed/i);
+  hook("claude", { hook_event_name: "UserPromptSubmit", prompt: "Try a new plan" });
+  result = hook("claude", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: "The plan is ready." });
+  assert.match(result.reason, /ExitPlanMode/);
+
+  // Review the whole plan, including quoted requirements inside its block.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Plan with quoted requirements" });
+  const quotedPlan = "<proposed_plan>\n# Requirements Plan\n> Keep the public API stable.\n## Implementation\n- Edit the parser.\n- Test the parser.\n</proposed_plan>";
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "plan",
+    last_assistant_message: quotedPlan });
+  assert.match(result.reason, /no actionable issues/);
+  assert.equal(modelCalls().length - start, 1);
+  assert.match(modelCalls().at(-1).input, /> Keep the public API stable\./);
+
+  // When several complete blocks appear, the most recent one is the proposal.
+  hook("codex", { hook_event_name: "UserPromptSubmit", prompt: "Revise the example plan" });
+  start = modelCalls().length;
+  result = hook("codex", { hook_event_name: "Stop", permission_mode: "default",
+    last_assistant_message: "<proposed_plan>\nOld step\n</proposed_plan>\n<proposed_plan>\nNew step\n</proposed_plan>" });
+  assert.match(result.reason, /no actionable issues/);
+  assert.equal(modelCalls().length - start, 1);
+  assert.match(modelCalls().at(-1).input, /Plan:\nNew step/);
+  assert.doesNotMatch(modelCalls().at(-1).input, /Old step/);
 
   process.stdout.write("peer review hook tests passed\n");
 } finally {

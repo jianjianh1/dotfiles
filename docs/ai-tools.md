@@ -34,11 +34,40 @@ and Git changes. `install.sh` links `scripts/peer-review-hook.mjs` to
 each new prompt and before a turn ends. Claude also calls it before presenting
 an `ExitPlanMode` plan; both `PreToolUse` and `PermissionRequest` guard that
 step because some Claude Code versions ignore a `PreToolUse` denial for
-`ExitPlanMode`. At `Stop`, a standalone `<proposed_plan>` block triggers plan
-review. Any plan without that block, including plain text in formal plan mode,
-needs a standalone `<!-- peer-review:plan -->` marker outside a code fence.
-Ordinary plan-mode replies do not trigger plan review. If they include Git
-changes, the normal code review still runs.
+`ExitPlanMode`. In formal plan mode, Claude must call `ExitPlanMode` to show
+its approval prompt. Codex must finish with a standalone `<proposed_plan>`
+block; its terminal shows “Implement this plan?” only when the completed turn
+contains a native Plan item. After peer review continues a Codex turn, the
+agent must resend the complete block with its `Peer review:` line. A review
+line alone does not restore the approval prompt.
+
+At `Stop`, the hook redirects a completed prose plan toward the native
+handoff. It recognizes an explicit “plan is ready” statement, an unclosed
+`<proposed_plan>` tag, or at least two action items following either “Here's
+what I'll do” or a plan heading and an implementation, test, summary, or
+validation section. It ignores fenced examples, short sketches, and ordinary
+progress replies. After two missed handoff retries, it reports that approval
+was not triggered instead of continuing indefinitely. A valid native plan
+resets that retry count. Outside formal plan mode, a plan without
+`<proposed_plan>` needs a standalone
+`<!-- peer-review:plan -->` marker outside a code fence. Git changes still
+receive their normal code review.
+
+Codex can omit `last_assistant_message` in a `Stop` event. The hook reads the
+current turn's Plan item and final answer from the Codex transcript. In formal
+plan mode, the Plan item confirms the native handoff; the complete
+`<proposed_plan>` block in the final answer supplies the reviewed text. This
+keeps routine TODO updates out of plan review. The hook combines the final
+answer with any direct message for disclosure checks. It accepts transcripts
+up to 64 MiB whose filename identifies
+the session and skips an incomplete JSONL line. If the transcript cannot be
+read and the hook payload has no message text, the hook warns and lets the
+turn finish. It cannot verify a plan handoff or Git review disclosure in that
+case; if credential-like files changed, the warning also names their exclusion
+from review. This fallback depends on the `permission_mode`, `turn_id`, and
+`transcript_path` hook fields and the transcript event format. Approval smoke
+tests used Codex CLI 0.156.1 and Claude Code 2.1.274; revisit the fixture and
+these fields when upgrading either CLI or changing the pinned review models.
 
 These hooks apply across projects. A Codex-authored plan or Git change goes to
 Claude's service for review, and a Claude-authored one goes to OpenAI's

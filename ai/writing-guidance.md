@@ -14,7 +14,7 @@ Before sending or saving prose, reread it as a new colleague would. Check that t
 
 # Peer review of plans and changes
 
-Before presenting an implementation plan or finishing edits in a Git project, use the automatic peer review result: Claude reviews Codex's work, and Codex reviews Claude's. A delegated reviewer works read-only and must not start another review. For a Codex plan, use a standalone `<proposed_plan>` block. For any plan without that block, including plain text in formal plan mode, put `<!-- peer-review:plan -->` on its own line outside a code fence so the hook can recognize it. Claude's `ExitPlanMode` review works without a marker.
+Before presenting an implementation plan or finishing edits in a Git project, use the automatic peer review result: Claude reviews Codex's work, and Codex reviews Claude's. A delegated reviewer works read-only and must not start another review. In formal plan mode, Claude submits a completed plan with `ExitPlanMode`, and Codex ends with a standalone `<proposed_plan>` block. After a Codex `Stop` hook asks for a peer review line or a revision, resend the complete plan in that block so the CLI can offer plan approval. Do not finish a plan-mode turn with only a prose plan or peer review line. For a plan outside formal plan mode without the block, put `<!-- peer-review:plan -->` on its own line outside a code fence. Claude's `ExitPlanMode` review works without a marker.
 
 This global review sends the plan or Git changes to the other provider. If project rules prohibit sharing code with both providers, disclose the conflict before transmitting it.
 
