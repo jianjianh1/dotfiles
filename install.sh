@@ -1862,15 +1862,6 @@ install_codex_mcp_bridge() {
     manifest_add_path "$HOME/.local/bin/codex-mcp-bridge"
 }
 
-install_peer_review_hook() {
-    local source="$DIR/scripts/peer-review-hook.mjs"
-    [ -f "$source" ] || return 1
-    chmod +x "$source" || return 1
-    mkdir -p "$HOME/.local/bin" || return 1
-    backup_and_link "$source" "$HOME/.local/bin/peer-review-hook" || return 1
-    manifest_add_path "$HOME/.local/bin/peer-review-hook"
-}
-
 install_codex_loop() {
     local source="$DIR/scripts/codex-loop.mjs"
     [ -f "$source" ] || return 1
@@ -1878,6 +1869,43 @@ install_codex_loop() {
     mkdir -p "$HOME/.local/bin" || return 1
     backup_and_link "$source" "$HOME/.local/bin/codex-loop" || return 1
     manifest_add_path "$HOME/.local/bin/codex-loop"
+}
+
+# Older installs linked the peer review lifecycle hook into ~/.local/bin.
+# Remove it only after the installed settings no longer call it. Comparing the
+# literal link target also works when the old source has already been deleted.
+unwire_peer_review_hook_legacy() {
+    local link="$HOME/.local/bin/peer-review-hook"
+    local state="$HOME/.local/state/dotfiles-peer-review"
+    local config
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[dry-run] Would remove the old peer review hook and state"
+        return 0
+    fi
+
+    for config in "$HOME/.claude/settings.json" "$HOME/.codex/config.toml"; do
+        if [ -f "$config" ] && grep -Fq '/peer-review-hook' "$config"; then
+            echo "  Cannot remove peer review hook: $config still calls it" >&2
+            return 1
+        fi
+    done
+
+    if [ -L "$link" ]; then
+        if [ "$(readlink "$link")" = "$DIR/scripts/peer-review-hook.mjs" ]; then
+            rm "$link" || return 1
+            echo "  Removed old peer review hook link"
+        else
+            echo "  Skipping user-owned peer review hook link"
+        fi
+    elif [ -e "$link" ]; then
+        echo "  Skipping user-owned peer review hook file"
+    fi
+
+    if [ -d "$state" ] && [ ! -L "$state" ]; then
+        rm -r "$state" || return 1
+        echo "  Removed old peer review state"
+    fi
 }
 
 # One-shot migration: older installs appended `Include $DIR/ssh/sshconfig`
@@ -2191,7 +2219,6 @@ setup_main() {
     run_step "claude"       install_claude
     run_step "codex"        install_codex
     run_step "codex MCP bridge" install_codex_mcp_bridge
-    run_step "peer review hook" install_peer_review_hook
     run_step "codex loop helper" install_codex_loop
     run_step "chpc-allocs"  install_chpc_allocs
     run_step "detect-theme" install_detect_theme
@@ -2200,6 +2227,7 @@ setup_main() {
 
     # Link remaining configs
     run_step "shell config links" link_generated_configs
+    run_step "old peer review hook cleanup" unwire_peer_review_hook_legacy
     run_step "agent writing guidance" link_agent_writing_guidance
     run_step "CHPC Codex guidance" link_chpc_codex_guidance
     run_step "claude skills"      link_claude_skills

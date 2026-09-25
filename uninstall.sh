@@ -107,11 +107,11 @@ remove_tracked_path() {
 remove_bin() {
     local bin="$1"
     if manifest_contains_path "$HOME/.local/bin/$bin"; then
-        if [ -e "$HOME/.local/bin/$bin" ]; then
+        if [ -e "$HOME/.local/bin/$bin" ] || [ -L "$HOME/.local/bin/$bin" ]; then
             rm "$HOME/.local/bin/$bin"
             echo "  Removed ~/.local/bin/$bin"
         fi
-    elif [ -e "$HOME/.local/bin/$bin" ]; then
+    elif [ -e "$HOME/.local/bin/$bin" ] || [ -L "$HOME/.local/bin/$bin" ]; then
         echo "  Skipped ~/.local/bin/$bin (not tracked by install.sh)"
     fi
 

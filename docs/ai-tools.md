@@ -1,6 +1,6 @@
 # AI Tool Configuration Reference
 
-Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`peer-review-hook.mjs`](../scripts/peer-review-hook.mjs), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
+Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
 > **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
 
@@ -26,94 +26,40 @@ restores the link when that content is unchanged. `CODEX_HOME` replaces
 refreshes managed sections. These instructions guide writing but cannot
 guarantee prose quality.
 
-### Automatic peer review
+### Agent-initiated peer review
 
-The shared guide also requires Codex and Claude to review each other's plans
-and Git changes. `install.sh` links `scripts/peer-review-hook.mjs` to
-`~/.local/bin/peer-review-hook`; user-level Claude and Codex hooks call it for
-each new prompt and before a turn ends. Claude also calls it before presenting
-an `ExitPlanMode` plan; both `PreToolUse` and `PermissionRequest` guard that
-step because some Claude Code versions ignore a `PreToolUse` denial for
-`ExitPlanMode`. In formal plan mode, Claude must call `ExitPlanMode` to show
-its approval prompt. Codex must finish with a standalone `<proposed_plan>`
-block; its terminal shows “Implement this plan?” only when the completed turn
-contains a native Plan item. After peer review continues a Codex turn, the
-agent must resend the complete block with its `Peer review:` line. A review
-line alone does not restore the approval prompt.
+The shared writing guide asks Claude and Codex to review each other's completed
+implementation plans and Git edits before presenting the result. The author
+starts the review through the existing delegation tools at that milestone.
+No prompt-submission, plan-approval, or stop hook runs cross-review. This is a
+best-effort instruction rather than an enforced gate.
 
-At `Stop`, the hook redirects a completed prose plan toward the native
-handoff. It recognizes an explicit “plan is ready” statement, an unclosed
-`<proposed_plan>` tag, or at least two action items following either “Here's
-what I'll do” or a plan heading and an implementation, test, summary, or
-validation section. It ignores fenced examples, short sketches, and ordinary
-progress replies. After two missed handoff retries, it reports that approval
-was not triggered instead of continuing indefinitely. A valid native plan
-resets that retry count. Outside formal plan mode, a plan without
-`<proposed_plan>` needs a standalone
-`<!-- peer-review:plan -->` marker outside a code fence. Git changes still
-receive their normal code review.
+The author sends the complete plan or only changes made during the task.
+Credential-like files and content stay out of the review material. If a
+project prohibits sharing with the other provider, the author discloses the
+conflict without sending it. If pre-existing edits cannot be separated, the
+author reports that a scoped review was unavailable.
 
-Codex can omit `last_assistant_message` in a `Stop` event. The hook reads the
-current turn's Plan item and final answer from the Codex transcript. In formal
-plan mode, the Plan item confirms the native handoff; the complete
-`<proposed_plan>` block in the final answer supplies the reviewed text. This
-keeps routine TODO updates out of plan review. The hook combines the final
-answer with any direct message for disclosure checks. It accepts transcripts
-up to 64 MiB whose filename identifies
-the session and skips an incomplete JSONL line. If the transcript cannot be
-read and the hook payload has no message text, the hook warns and lets the
-turn finish. It cannot verify a plan handoff or Git review disclosure in that
-case; if credential-like files changed, the warning also names their exclusion
-from review. This fallback depends on the `permission_mode`, `turn_id`, and
-`transcript_path` hook fields and the transcript event format. Approval smoke
-tests used Codex CLI 0.156.1 and Claude Code 2.1.274; revisit the fixture and
-these fields when upgrading either CLI or changing the pinned review models.
+For Codex-authored work, Claude receives the screened text through headless
+`claude -p` with tools disabled. For Claude-authored work, the user-scope
+`codex` MCP bridge runs Codex read-only from an empty temporary directory;
+`codex exec -s read-only` is the fallback. Both use the existing CLI sign-ins.
+The reviewer must not edit files or request another review. Codex's read-only
+mode prevents writes but does not strictly confine file reads, so its prompt
+also instructs it to use only the supplied material. The
+[`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) skill has the
+invocations.
 
-These hooks apply across projects. A Codex-authored plan or Git change goes to
-Claude's service for review, and a Claude-authored one goes to OpenAI's
-service. Use this configuration only for projects whose code may be shared
-with both providers. Disabling a hook in the CLI's user settings stops its
-automatic review for that CLI.
+The author addresses actionable findings and requests one review of the
+revision. The final `Peer review:` line names the result and scope, or says
+why review could not run. Formal plan handoff still uses Claude's
+`ExitPlanMode` or Codex's standalone `<proposed_plan>` block.
 
-At prompt submission, the hook records the Git diff and untracked text files
-in a private local state directory. At completion, it compares that snapshot
-with the current worktree so existing edits do not trigger a review by
-themselves. The peer gets both snapshots and may inspect repository files for
-context. Known credential filenames and common token patterns are excluded
-from the review input and their exclusion must be disclosed. This filter
-cannot detect every secret; keep credentials out of project changes. Code
-review applies only in Git repositories; plan review works in any directory.
-Review feedback and the final `Peer review:` line name their scope: `the proposed plan`
-or `Git changes since this prompt`. A pass does not assess existing code outside
-that scope.
-
-The delegated reviewer runs read-only through the existing CLI sign-ins:
-`codex exec -s read-only` with GPT-6 Sol when Claude is the author, and
-`claude -p` with only read tools and Sonnet when Codex is the author. If the
-reviewer hits a usage, quota, or rate limit, the hook retries the same review
-once with GPT-6 Luna or Claude Haiku, respectively. It names the fallback
-model in its feedback, and the author names it in the `Peer review:` line.
-If that model hits a usage limit too, the hook tries an independent reviewer
-from the author's provider: GPT-6 Luna for Codex-authored work, or Claude
-Haiku for Claude-authored work. The result is labeled `same provider` so it
-is not presented as a cross-provider review. Other failures do not trigger a
-retry, and all attempts share the 300-second review budget.
-
-The two Codex models are pinned together in `scripts/peer-review-hook.mjs`.
-Update both pins and this description deliberately when moving reviews to a
-newer GPT family. `CLAUDE_REVIEW_MODEL` still overrides the primary Claude
-model.
-
-An environment marker prevents recursive reviews. Actionable findings return
-to the author, who revises once and sends the revision for review. A shared
-account limit can block both models on one provider. If every reviewer fails,
-the author reports the unavailable review in a `Peer review:` line. Each
-fallback uses its existing CLI sign-in and adds no API credentials or billing.
-
-Codex requires a one-time `/hooks` trust action after installation or a hook
-definition change. These user-level hooks can be disabled, so they enforce the
-normal configured workflow rather than an immutable policy. The peer review
-uses each CLI's existing account; no API key is added by this setup.
+New installs copy hook-free Claude and Codex configuration templates. On
+upgrade, `install.sh` removes the old repo-owned review hook link and state
+after the active settings no longer call it. As with other copied settings,
+a full install backs up and replaces customized settings rather than merging
+them; edit local overrides again afterward if needed.
 
 ---
 
@@ -214,10 +160,7 @@ The shipped `claude_settings.json` denies the five OpenAlex account and author-p
 
 | Event | Action |
 |-------|--------|
-| `UserPromptSubmit` | Record the starting Git state |
-| `PreToolUse` (`ExitPlanMode`) | Have Codex review Claude's plan |
-| `PermissionRequest` (`ExitPlanMode`) | Deny an unreviewed or flawed plan before approval |
-| `Stop` | Have Codex review plans or Git edits; ring terminal bell (`\a`) |
+| `Stop` | Ring terminal bell (`\a`) |
 | `Notification` | Ring terminal bell (`\a`) |
 
 The bell handlers run `printf '\a' > /dev/tty` to produce an audible notification.

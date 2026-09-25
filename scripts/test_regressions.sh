@@ -243,10 +243,14 @@ test_backup_rotation_preserves_edited_bak() (
 )
 
 test_manifest_controls_uninstall() (
-    local tmp
+    local tmp stale_skills
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
 
+    stale_skills="$tmp/stale-agent-skills"
+    mkdir -p "$stale_skills"
+    ln -s "$DIR/ai/skills/agent-delegate" "$stale_skills/keep"
+    CODEX_AGENT_SKILLS_DIR="$stale_skills"
     export HOME="$tmp/home"
     mkdir -p "$HOME/.dotfiles-generated" "$HOME/.local/bin" "$HOME/.local/opt/nvim/bin" "$HOME/.codex"
     INSTALL_MANIFEST="$HOME/.dotfiles-generated/install-manifest.txt"
@@ -263,6 +267,11 @@ test_manifest_controls_uninstall() (
 
     # shellcheck source=uninstall.sh
     . "$DIR/uninstall.sh"
+    # common.sh was loaded before this test changed HOME. Keep every
+    # uninstall root inside the fixture so the real skill links survive.
+    CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+    CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
+    CODEX_HOME_SKILLS_DIR="$HOME/.codex/skills"
 
     manifest_add_path "$HOME/.local/bin/gh"
     manifest_add_path "$HOME/.local/bin/detect-theme"
@@ -279,6 +288,7 @@ test_manifest_controls_uninstall() (
 
     remove_symlinks >/dev/null
     [ ! -e "$HOME/.tmux-theme.conf" ] || fail "tmux-theme symlink was not removed"
+    [ -L "$stale_skills/keep" ] || fail "uninstall fixture removed skills outside its HOME"
 
     remove_tracked_path "$HOME/.codex/config.toml"
     [ ! -e "$HOME/.codex/config.toml" ] || fail "tracked config copy was not removed"
@@ -1772,8 +1782,57 @@ EOF
     [ "$install_count" -eq 6 ] || fail "curated plugins were not installed on both runs"
 )
 
-test_peer_review_hook() (
-    node "$DIR/scripts/test_peer_review_hook.mjs" || fail "peer review hook tests failed"
+test_legacy_peer_review_cleanup() (
+    local tmp link state
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home"
+    mkdir -p "$HOME/.local/bin" "$HOME/.claude" "$HOME/.codex"
+    link="$HOME/.local/bin/peer-review-hook"
+    state="$HOME/.local/state/dotfiles-peer-review"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    printf '{"hooks":{}}\n' > "$HOME/.claude/settings.json"
+    printf 'model_reasoning_effort = "high"\n' > "$HOME/.codex/config.toml"
+    ln -s "$DIR/scripts/peer-review-hook.mjs" "$link"
+    mkdir -p "$state"
+    printf 'old state\n' > "$state/session"
+
+    DRY_RUN=true
+    unwire_peer_review_hook_legacy >/dev/null || fail "dry-run cleanup failed"
+    [ -L "$link" ] && [ -e "$state/session" ] || fail "dry-run removed old review state"
+
+    DRY_RUN=false
+    printf '[[hooks.Stop]]\ncommand = "~/.local/bin/peer-review-hook codex"\n' >> "$HOME/.codex/config.toml"
+    if unwire_peer_review_hook_legacy >/dev/null 2>&1; then
+        fail "cleanup accepted an active peer review hook"
+    fi
+    [ -L "$link" ] && [ -e "$state/session" ] || fail "cleanup removed a still-active hook"
+
+    printf 'model_reasoning_effort = "high"\n' > "$HOME/.codex/config.toml"
+    unwire_peer_review_hook_legacy >/dev/null || fail "managed hook cleanup failed"
+    [ ! -L "$link" ] && [ ! -e "$state" ] || fail "managed hook or state survived cleanup"
+
+    ln -s "$tmp/user-hook" "$link"
+    unwire_peer_review_hook_legacy >/dev/null || fail "unowned hook cleanup failed"
+    [ -L "$link" ] || fail "cleanup removed a user-owned hook"
+)
+
+test_uninstall_removes_dangling_managed_hook() (
+    local tmp link
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home"
+    mkdir -p "$HOME/.local/bin" "$HOME/.dotfiles-generated"
+    link="$HOME/.local/bin/peer-review-hook"
+    ln -s "$tmp/missing-hook" "$link"
+    printf '%s\n' "$link" > "$HOME/.dotfiles-generated/install-manifest.txt"
+
+    # shellcheck source=uninstall.sh
+    . "$DIR/uninstall.sh"
+    remove_bin peer-review-hook >/dev/null
+    [ ! -L "$link" ] || fail "uninstall left a dangling managed review hook"
 )
 
 test_codex_loop() (
@@ -1838,7 +1897,8 @@ main() {
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     run_test test_claude_plugins_bootstrap_marketplace
-    run_test test_peer_review_hook
+    run_test test_legacy_peer_review_cleanup
+    run_test test_uninstall_removes_dangling_managed_hook
     run_test test_codex_loop
     echo "All regression tests passed."
 }

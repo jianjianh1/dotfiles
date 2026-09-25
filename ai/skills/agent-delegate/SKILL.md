@@ -9,12 +9,49 @@ Apply when Claude Code should hand a task to Codex CLI, or Codex should hand
 one to Claude Code. Both directions are one-shot: the other agent starts with
 no memory of this conversation, so the prompt must carry everything it needs.
 
-The installed user-level hooks automatically request read-only peer review of
-plans and Git changes. Treat that review as part of the task: revise actionable
-findings once, review the revision, and report the result. When the hook says
-the peer is unavailable, disclose that instead of claiming a review passed.
-The `DOTFILES_PEER_REVIEW=1` marker prevents delegated review sessions from
-calling each other recursively.
+The global writing rule asks the author to request cross-provider review when
+an implementation plan or Git edits are ready. The author makes that request
+directly; no lifecycle hook starts or enforces it. Review a revision once after
+addressing actionable findings, then report the result or unavailability.
+
+## Peer review procedure
+
+Send the complete plan or only Git changes you made in this task. Check the
+starting worktree state when edits already exist; if you cannot separate your
+changes, disclose that a scoped review was unavailable. Screen the material
+for credential-like filenames and contents, leave those files out, and name
+the exclusions. Check project instructions before sending code to the other
+provider. The opening of every review prompt must say: "Delegated read-only
+reviewer: do not edit files or request another review. Review only the supplied
+material." Ask for actionable findings with locations and fixes, or an
+explicit statement that none were found.
+
+For a Codex-authored plan or diff, pass the screened text to Claude through
+stdin and disable its tools:
+
+```bash
+claude -p --tools "" --strict-mcp-config --no-session-persistence \
+  --output-format text <<'REVIEW'
+Delegated read-only reviewer: do not edit files or request another review.
+Review only the supplied material. Report actionable findings with locations
+and fixes, or say "No actionable findings."
+
+<screened plan or diff>
+REVIEW
+```
+
+For Claude-authored work, create an empty temporary directory and call the
+`codex` MCP tool with `sandbox: "read-only"`, that directory as `cwd`, and the
+same review prompt plus screened material. Remove the directory afterward.
+If the MCP tool is unavailable, use
+`codex exec --skip-git-repo-check -s read-only -C "$review_dir" -`
+with the prompt on stdin. This keeps the reviewer
+outside the target repository, but Codex's read-only mode does not strictly
+confine file reads; the prompt's limit remains an instruction.
+
+If the other provider cannot run, disclose that no cross-provider review was
+completed. End the author's final response with a `Peer review:` line that
+names the result and the exact scope reviewed.
 
 ## When to delegate
 
@@ -33,8 +70,7 @@ calling each other recursively.
 - Both agents editing the same files at once. Give the delegate its own
   worktree ([[using-git-worktrees]]) or a disjoint file list.
 - Tasks that need more context than fits in one prompt.
-- Trivial *optional* delegation. The installed plan and change review hooks
-  still apply to small edits.
+- Trivial optional delegation outside the required plan and change review.
 
 ## From Claude Code → Codex (MCP tool `codex`)
 
@@ -47,7 +83,7 @@ subcommand. Two tools appear: `codex` (start a thread) and `codex-reply`
 | Parameter | Use |
 |---|---|
 | `prompt` | Self-contained task: goal, files, constraints, acceptance criteria, report format |
-| `cwd` | Absolute project root; Codex resolves relative paths against it |
+| `cwd` | Absolute working directory; use an empty temporary directory for the peer review procedure above |
 | `sandbox` | `read-only` for reviews and opinions; `workspace-write` for edits. Never `danger-full-access` from a delegate |
 | `approval-policy` | Optional compatibility field; the only accepted value is `"never"` |
 | `model` | Omit unless the user names one |
@@ -56,7 +92,7 @@ subcommand. Two tools appear: `codex` (start a thread) and `codex-reply`
 Example call:
 
 ```json
-{"prompt": "Review the uncommitted diff (git diff) in this repo for correctness bugs. Report file:line, the bug, and a one-line fix. Do not edit files.",
+{"prompt": "Inspect the locking in src/queue.c for a race. Report file:line and a one-line fix. Do not edit files.",
  "cwd": "/home/user/project", "sandbox": "read-only", "approval-policy": "never"}
 ```
 

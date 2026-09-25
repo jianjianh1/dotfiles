@@ -40,20 +40,8 @@ trust_level = "trusted"
 [[hooks.UserPromptSubmit]]
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = "~/.local/bin/peer-review-hook codex"
-timeout = 30
-
-[[hooks.UserPromptSubmit]]
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
 command = "~/.local/bin/codex-loop hook"
 timeout = 3
-
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = "~/.local/bin/peer-review-hook codex"
-timeout = 360
 
 [[hooks.Stop]]
 [[hooks.Stop.hooks]]
