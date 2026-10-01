@@ -154,7 +154,7 @@ Before cloning, `step_clone_setup` sanitizes the remote git env (`unset GIT_EXEC
 - Installs gh, Node.js, uv, btop, and Neovim via direct binary download, Codex from npm (`@openai/codex`), and Claude Code via its native installer / `claude update` (`~/.local/share/claude`, no longer an npm package) — same as non-CHPC
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
 - Generates agent settings even if the CLIs are not currently installed or loaded
-- Uses unrestricted defaults (`bypassPermissions` for Claude, `never`/`none` for Codex) — same as non-CHPC
+- Uses unrestricted defaults (`auto` mode for Claude, `never`/`none` for Codex) — same as non-CHPC
 - Symlinks `chpc/CLAUDE.md` → `~/CLAUDE.md` (the Notchpeak HPC agent guide every CHPC agent loads), via `link_chpc_agent_guide`. This is the only file deployed to `~/CLAUDE.md` on CHPC (on CloudLab, `cloudlab/CLAUDE.md` deploys there instead); edit `chpc/CLAUDE.md`, never `~/CLAUDE.md` directly. Skipped off-CHPC.
 
 **Module name candidates** (used with `--use-modules`) — verified on Notchpeak (2026-05). Re-verify after CHPC adds/removes/renames modules with `./install.sh --probe-modules`:

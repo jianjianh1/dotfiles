@@ -12,7 +12,7 @@
   },
   "includeGitInstructions": true,
   "permissions": {
-    "defaultMode": "bypassPermissions",
+    "defaultMode": "auto",
     "allow": [],
     "deny": [
       "mcp__openalex__get_my_account",

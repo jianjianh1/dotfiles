@@ -2,7 +2,7 @@
 
 Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
-> **Permissive by default.** The shipped configs (`bypassPermissions`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
+> **Permissive by default.** The shipped configs (`auto`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
 
 ---
 
@@ -72,7 +72,7 @@ Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not 
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `model` | `opus` | Default model |
-| `defaultMode` | `bypassPermissions` | Skip permission prompts (dangerous mode) |
+| `defaultMode` | `auto` | Auto mode: no permission prompts, work routed through Bash |
 | `effortLevel` | `high` | Reasoning effort level |
 | `alwaysThinkingEnabled` | `true` | Extended thinking always on |
 | `editorMode` | `vim` | Vim keybindings in the CLI |
