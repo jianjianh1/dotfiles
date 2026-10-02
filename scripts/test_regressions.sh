@@ -836,6 +836,7 @@ test_rclone_deploy_merges_only_gdrive() (
         chmod "$mode" "$resolved"
     }
 
+    # shellcheck disable=SC2034  # read by copy_gdrive_auth_to_remote in deploy.sh
     FORCE_COPY=0
     copy_gdrive_auth_to_remote "$config" >/dev/null || fail "gdrive deploy helper failed"
     grep -q '^\[remote-only\]$' "$destination" || fail "deploy removed a remote-only profile"
@@ -1532,8 +1533,11 @@ test_uninstall_removes_agent_skill_links() (
     # lib/common.sh was sourced at the top of this file with the real $HOME
     # and is guarded against re-sourcing, so re-point the roots at the
     # throwaway HOME (uninstall.sh reads them at call time).
+    # shellcheck disable=SC2034  # read by remove_symlinks in uninstall.sh
     CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+    # shellcheck disable=SC2034  # read by remove_symlinks in uninstall.sh
     CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
+    # shellcheck disable=SC2034  # read by remove_symlinks in uninstall.sh
     CODEX_HOME_SKILLS_DIR="$HOME/.codex/skills"
 
     remove_symlinks >/dev/null
@@ -1803,6 +1807,7 @@ test_legacy_peer_review_cleanup() (
     unwire_peer_review_hook_legacy >/dev/null || fail "dry-run cleanup failed"
     [ -L "$link" ] && [ -e "$state/session" ] || fail "dry-run removed old review state"
 
+    # shellcheck disable=SC2034  # read by unwire_peer_review_hook_legacy in install.sh
     DRY_RUN=false
     printf '[[hooks.Stop]]\ncommand = "~/.local/bin/peer-review-hook codex"\n' >> "$HOME/.codex/config.toml"
     if unwire_peer_review_hook_legacy >/dev/null 2>&1; then
