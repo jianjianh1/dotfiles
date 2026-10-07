@@ -66,7 +66,7 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ~/CLAUDE.md  (symlink → chpc/CLAUDE.md on CHPC, or cloudlab/CLAUDE.md on CloudLab;
              mutually exclusive, gated by is_chpc() / is_cloudlab())
 
-~/.claude/skills/<name>   (symlink → ai/skills/<name>, one per subdir)
+~/.claude/skills/<name>   (symlink → ai/skills/<name>, one per active subdir; reply-style excluded)
                           (also: symlink → ~/.local/share/claude-skills/<repo>/…/<name>
                                  for upstream skills cloned by
                                  scripts/install_claude_skills.sh)
@@ -75,7 +75,7 @@ Shared helpers (`run_step`, `retry`, `backup_and_link`, `backup_and_copy`) live 
 ~/.agents/skills/<name>   (symlink → the resolved ~/.claude/skills/<name> target;
                            Codex's user-skill dir, kept in sync by
                            scripts/sync_agent_skills.sh; removable via uninstall.sh)
-~/.local/share/claude-skills/   (clone cache for obra/superpowers, anthropics/skills,
+~/.local/share/claude-skills/   (clone cache for anthropics/skills,
                                  Master-cai/Research-Paper-Writing-Skills, and
                                  stephenturner/skill-deslop; refreshed on install
                                  --force; removable via uninstall.sh)
@@ -88,17 +88,22 @@ verbatim, like `editor/nvim` or `shell/bashrc_aliases`. Upstream skills
 follow the same symlink pattern, but their content lives in a clone cache
 at `~/.local/share/claude-skills/` rather than in this repo. See
 [`docs/ai-skills.md`](docs/ai-skills.md) for the bundled set, the upstream
-curated subset (7 obra + 4 anthropic-markdown + `pdf` + `research-paper-writing`
-+ `deslop`), the Codex skill sync, and authoring notes.
+curated specialist subset, the Codex skill sync, and authoring notes.
 The marketplace-plugin half of `scripts/install_claude_plugins.sh` installs
 `context7`, `commit-commands`, and `pr-review-toolkit`; the MCP half
-registers three servers (`fetch`, `time`, and `codex` — Codex CLI's own
-`codex mcp-server`, so Claude can delegate to Codex mid-session; the
+registers three servers (`fetch`, `time`, and `codex` — the repo's
+`codex-mcp-bridge`, so Claude can delegate to Codex mid-session; the
 `ai/skills/agent-delegate` skill says when and how). Codex reaches Claude the
 other way with headless `claude -p`, taught by the same skill, which
 `scripts/sync_agent_skills.sh` mirrors into `~/.agents/skills/`. There is no
 `[mcp_servers.claude-code]` in `ai/codex_config.toml` on purpose: `claude mcp
 serve` exposes Claude Code's tools, not the model.
+
+Skills are optional task references; select them when useful. The shared
+`ai/writing-guidance.md` now contains the optional-skills policy and required
+cross-review, without global prose rules. Superpowers and `reply-style` are
+excluded from the default setup. Installer, sync, and uninstall share cleanup
+for owned legacy links; real user skill directories and foreign links survive.
 
 Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 

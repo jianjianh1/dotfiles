@@ -1,6 +1,6 @@
 ---
 name: chpc-job
-description: Use when the user is launching work on a CHPC cluster (notchpeak, kingspeak, lonepeak, granite, ash) and needs the full path — find a runnable allocation, load the right modules, write the sbatch script, then submit and monitor it. Triggers on "what allocation can I use", "which partition/account/qos", "set up modules for", "write and run an sbatch job on CHPC", or "submit this on notchpeak". For generic SLURM mechanics off CHPC, use slurm-job instead.
+description: Optional guidance for finding CHPC allocations, loading modules, and submitting and monitoring batch jobs.
 ---
 
 # Running a job on CHPC, end to end

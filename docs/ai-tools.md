@@ -6,13 +6,14 @@ Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusli
 
 ---
 
-## Writing guidance shared by both agents
+## Optional skills and cross-review
 
-[`ai/writing-guidance.md`](../ai/writing-guidance.md) gives Claude and Codex
-the same default for human-facing prose: lead with the point, connect ideas in
-paragraphs, define unfamiliar terms, and keep the context a new reader needs.
-It covers documents, plans, PR text, explanations, and chat replies. Explicit
-user requests and established document styles take precedence.
+[`ai/writing-guidance.md`](../ai/writing-guidance.md) makes skills optional
+references for both agents. They may select a specialist skill when useful,
+or follow an explicitly requested workflow. Selecting a skill adds no general
+requirement for approvals, separate plans, worktrees, or test-first steps.
+Project, permission, and host operational rules still apply. Cross-review
+remains required; the old global writing rules are removed.
 
 `install.sh` links the guide to `~/.claude/rules/writing.md`, which Claude
 loads for every project without replacing an existing `~/.claude/CLAUDE.md`.
@@ -23,12 +24,12 @@ reads the override in preference to `AGENTS.md`. An existing external symlink
 is backed up and its instructions are copied into a merged file; uninstall
 restores the link when that content is unchanged. `CODEX_HOME` replaces
 `~/.codex` for these instruction files when set. Re-running the installer
-refreshes managed sections. These instructions guide writing but cannot
-guarantee prose quality.
+refreshes managed sections. The existing filenames and markers are retained
+for compatibility with installed hosts.
 
 ### Agent-initiated peer review
 
-The shared writing guide asks Claude and Codex to review each other's completed
+The shared guidance asks Claude and Codex to review each other's completed
 implementation plans and Git edits before presenting the result. The author
 starts the review through the existing delegation tools at that milestone.
 No prompt-submission, plan-approval, or stop hook runs cross-review. This is a

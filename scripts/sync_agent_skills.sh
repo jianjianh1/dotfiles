@@ -11,7 +11,7 @@ set -uo pipefail
 #      ~/.claude/skills/<name> -> that directory.
 #
 # Never replaces a real directory or a symlink that points elsewhere. Removes
-# only *broken* links whose target is under a root this repo manages. Uninstall
+# retired workflow links and broken links owned by this repo. Uninstall
 # is a root sweep (uninstall.sh::unlink_agent_skills), not the install
 # manifest, because this script also runs standalone.
 
@@ -56,7 +56,7 @@ BUNDLED_SKILLS_CANON=""
 EXTERNAL_SKILLS_CANON=""
 
 canon() {
-    portable_realpath "$1" 2>/dev/null || printf '%s' "$1"
+    resolve_skill_path "$1" 2>/dev/null || printf '%s' "$1"
 }
 
 # Canonical directory behind a skill entry (real dir or symlink). Fails for a
@@ -125,6 +125,7 @@ sync_claude_to_codex() {
         [ "$name" = synced ] && continue               # claude.ai synced-skills folder
         [ -f "$entry/SKILL.md" ] || continue
         target="$(resolve_skill_dir "$entry")" || continue
+        is_retired_skill_path "$target" && continue
         # Direction-B links resolve into ~/.codex/skills, which Codex already
         # loads natively; mirroring them would load each skill twice.
         under_codex_home_skills "$target" && continue
@@ -149,11 +150,12 @@ sync_codex_to_claude() {
         name="$(basename "$entry")"
         case "$name" in .*) continue ;; esac
         [ -f "$entry/SKILL.md" ] || continue
+        is_retired_skill_path "$entry" && continue
         run_step "claude/skills:$name" link_into "$(canon "$entry")" "$CLAUDE_SKILLS_DIR/$name"
     done
 }
 
-# Remove dangling links in $1 whose literal target satisfies predicate $2.
+# Remove dangling links in $1 whose resolved target satisfies predicate $2.
 # Broken links pointing anywhere else are not ours and survive.
 prune_broken_in() {
     local root="$1" predicate="$2" link target
@@ -161,7 +163,7 @@ prune_broken_in() {
     for link in "$root"/*; do
         [ -L "$link" ] || continue
         [ -e "$link" ] && continue                     # healthy
-        target="$(readlink "$link" 2>/dev/null || true)"
+        target="$(resolve_skill_path "$link")" || continue
         "$predicate" "$target" || continue
         if [ "$DRY_RUN" = true ]; then
             echo "[dry-run] Would remove broken link $(display_path "$link") -> $target"
@@ -193,6 +195,7 @@ main() {
     fi
     echo ""
 
+    prune_retired_skill_links || FAILURES+=("retired skill cleanup")
     prune_broken
     sync_claude_to_codex
     sync_codex_to_claude

@@ -5,7 +5,7 @@ set -uo pipefail
 # directory under ~/.local/share/claude-skills/ and symlinking individual
 # skills into ~/.claude/skills/ alongside the repo's custom skills.
 #
-# Upstream repos: obra/superpowers and anthropics/skills (multi-skill layout
+# Upstream repos: anthropics/skills (multi-skill layout
 # <clone>/skills/<name>/), Master-cai/Research-Paper-Writing-Skills (one skill
 # in a named subdir), stephenturner/skill-deslop (SKILL.md at the clone root),
 # mattpocock/skills and radarist/structured-analytic-skills (named subdirs).
@@ -31,7 +31,7 @@ Usage: install_claude_skills.sh [--force] [--dry-run] [--help|-h]
 
 Cache dir:   ~/.local/share/claude-skills/
 Symlink dir: ~/.claude/skills/
-Upstream:    obra/superpowers, anthropics/skills,
+Upstream:    anthropics/skills,
              Master-cai/Research-Paper-Writing-Skills, stephenturner/skill-deslop,
              mattpocock/skills, radarist/structured-analytic-skills
 EOF
@@ -55,18 +55,6 @@ SKILLS_DIR="$CLAUDE_SKILLS_DIR"      # from lib/common.sh
 CACHE_CANON=""                       # filled in main() after mkdir
 
 # --- Curated skill lists (canonical source of truth) -----------------------
-
-SUPERPOWERS_REPO="https://github.com/obra/superpowers.git"
-SUPERPOWERS_DIR="$CACHE_DIR/superpowers"
-SUPERPOWERS_SKILLS=(
-    systematic-debugging
-    test-driven-development
-    using-git-worktrees
-    writing-plans
-    executing-plans
-    verification-before-completion
-    brainstorming
-)
 
 ANTHROPIC_REPO="https://github.com/anthropics/skills.git"
 ANTHROPIC_DIR="$CACHE_DIR/anthropic-skills"
@@ -111,8 +99,7 @@ PREMORTEM_SKILL_SRC="$PREMORTEM_DIR/skills/premortem-analysis"
 # All upstream skill <name>s the curated lists own. Used by prune_orphans()
 # to decide whether a stray symlink in ~/.claude/skills/ should be removed.
 kept_skill_names() {
-    printf '%s\n' "${SUPERPOWERS_SKILLS[@]}" \
-                 "${ANTHROPIC_SKILLS_MARKDOWN[@]}" \
+    printf '%s\n' "${ANTHROPIC_SKILLS_MARKDOWN[@]}" \
                  "${ANTHROPIC_SKILLS_PYDEPS[@]}" \
                  "$RPW_SKILL_NAME" "$DESLOP_SKILL_NAME" \
                  "$GRILLING_SKILL_NAME" "$PREMORTEM_SKILL_NAME"
@@ -192,6 +179,8 @@ link_skill_path() {
     local src="$1" name="$2"
     local dst="$SKILLS_DIR/$name"
 
+    is_retired_skill_path "$src" && return 0
+
     if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would symlink $src -> $dst"
         return 0
@@ -230,7 +219,7 @@ link_skill_path() {
 }
 
 # Conventional multi-skill layout <clone>/skills/<name>/SKILL.md
-# (obra/superpowers, anthropics/skills).
+# (anthropics/skills).
 link_skill() {
     link_skill_path "$1/skills/$2" "$2"
 }
@@ -251,13 +240,8 @@ main() {
     echo "  Symlinks: $(display_path "$SKILLS_DIR")"
     echo ""
 
+    prune_retired_skill_links || FAILURES+=("retired skill cleanup")
     prune_orphans
-
-    # --- obra/superpowers ---
-    run_step "clone superpowers" clone_or_update "$SUPERPOWERS_REPO" "$SUPERPOWERS_DIR"
-    for name in "${SUPERPOWERS_SKILLS[@]}"; do
-        run_step "link superpowers:$name" link_skill "$SUPERPOWERS_DIR" "$name"
-    done
 
     # --- anthropics/skills (markdown-only) ---
     run_step "clone anthropic-skills" clone_or_update "$ANTHROPIC_REPO" "$ANTHROPIC_DIR"

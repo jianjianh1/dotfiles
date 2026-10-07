@@ -1,6 +1,6 @@
 ---
 name: slurm-job
-description: Use when the user is writing, submitting, monitoring, or debugging SLURM batch jobs — keywords include sbatch, srun, squeue, sacct, scontrol, salloc, job array, partition, QoS, or CHPC clusters (notchpeak, kingspeak, lonepeak, granite, ash).
+description: Optional guidance for writing, submitting, monitoring, and debugging SLURM jobs, arrays, partitions, and QoS.
 ---
 
 # SLURM job authoring

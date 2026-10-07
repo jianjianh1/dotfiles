@@ -1,6 +1,6 @@
 ---
 name: scientific-io
-description: Use when the user is reading/writing scientific data — HDF5 (.h5, .hdf5), NetCDF (.nc), Zarr (.zarr), parallel I/O (MPI-IO, collective vs independent), chunking, compression filters, Darshan profiling, or asking which format to use.
+description: Optional guidance for scientific data in HDF5, NetCDF, Zarr, MPI-IO, chunking, and compression.
 ---
 
 # Scientific data formats & parallel I/O

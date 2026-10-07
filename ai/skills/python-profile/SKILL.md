@@ -1,6 +1,6 @@
 ---
 name: python-profile
-description: Use when the user is profiling Python code — invoking cProfile, pyinstrument, py-spy, scalene, line_profiler, memray, tracemalloc, snakeviz, or interpreting .prof / .speedscope / .memray reports, call trees, flame graphs, or per-line CPU and memory breakdowns.
+description: Optional guidance for Python profiling with cProfile, py-spy, Scalene, Memray, or tracemalloc.
 ---
 
 # Python profiling (sampling first, then targeted)

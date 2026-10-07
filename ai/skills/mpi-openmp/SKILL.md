@@ -1,6 +1,6 @@
 ---
 name: mpi-openmp
-description: Use when the user is writing or debugging MPI, OpenMP, or hybrid MPI+OpenMP code — keywords include MPI_Init, MPI_Comm, MPI_Bcast/Reduce/Allreduce, MPI_Send/Recv, ranks, communicators, deadlock, pragma omp, OMP_NUM_THREADS, affinity, NUMA, srun/mpirun, hybrid programming.
+description: Optional guidance for MPI, OpenMP, hybrid parallelism, collectives, deadlocks, affinity, and NUMA placement.
 ---
 
 # MPI & OpenMP parallel programming

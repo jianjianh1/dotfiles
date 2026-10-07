@@ -1956,7 +1956,7 @@ link_generated_configs() {
 }
 
 # Run scripts/install_claude_skills.sh to clone upstream skill repos
-# (obra/superpowers, anthropics/skills, Master-cai/Research-Paper-Writing-Skills,
+# (anthropics/skills, Master-cai/Research-Paper-Writing-Skills,
 # stephenturner/skill-deslop) into ~/.local/share/claude-skills/ and symlink
 # the curated set into ~/.claude/skills/. Forwards --force and --dry-run so a
 # top-level `./install.sh --force` re-clones upstream too.
@@ -1977,7 +1977,7 @@ sync_agent_skills() {
     bash "$DIR/scripts/sync_agent_skills.sh" ${args[@]+"${args[@]}"}
 }
 
-# Symlink every directory under ai/skills/ into ~/.claude/skills/<name>.
+# Symlink active directories under ai/skills/ into ~/.claude/skills/<name>.
 # Skills are pure markdown so no CHPC gate is needed (unlike MCP servers,
 # which are still installed only by scripts/install_claude_plugins.sh).
 # Unlike claude_settings.json (per-host overrides → copy), skills are
@@ -1987,15 +1987,24 @@ link_claude_skills() {
     local skills_dst="$HOME/.claude/skills"
     local skill_dir name dst
 
+    prune_retired_skill_links || FAILURES+=("retired skill cleanup")
+
     if [ ! -d "$skills_src" ]; then
         return 0
     fi
 
-    mkdir -p "$skills_dst" || return 1
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$skills_dst" || return 1
+    fi
 
     for skill_dir in "$skills_src"/*/; do
         [ -d "$skill_dir" ] || continue
         [ -f "${skill_dir}SKILL.md" ] || continue
+        is_retired_skill_path "$skill_dir" && continue
+        if [ "$DRY_RUN" = true ]; then
+            echo "[dry-run] Would link skill ${skill_dir%/}"
+            continue
+        fi
         name="$(basename "$skill_dir")"
         dst="$skills_dst/$name"
         # Strip trailing slash so the symlink target is the directory itself,
@@ -2228,7 +2237,7 @@ setup_main() {
     # Link remaining configs
     run_step "shell config links" link_generated_configs
     run_step "old peer review hook cleanup" unwire_peer_review_hook_legacy
-    run_step "agent writing guidance" link_agent_writing_guidance
+    run_step "agent guidance" link_agent_writing_guidance
     run_step "CHPC Codex guidance" link_chpc_codex_guidance
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills

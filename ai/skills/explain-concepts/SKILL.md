@@ -1,6 +1,6 @@
 ---
 name: explain-concepts
-description: Use when the user asks Claude to explain a concept — phrasings include "explain X", "what is Y", "why does Z work", "intuition behind W", "I'm learning about V", "walk me through R", "how does Q work under the hood". Governs how Claude explains HPC, CS, and math concepts: punchline first, intuition before formalism, notation defined before use, abstractions anchored to hardware or geometry. Sibling to [[reply-style]] (overall reply tone) and [[technical-writing]] (prose the user is writing). Does not duplicate domain skills (slurm-job, cuda-kernels, mpi-openmp, scientific-io, gpu-profile, distributed-training).
+description: Optional guidance for explaining HPC, CS, and math concepts with intuition, defined notation, and concrete examples.
 ---
 
 # Explain concepts
@@ -11,10 +11,9 @@ is graduate-student level in scientific computing: calculus, basic linear
 algebra, and intro CS are assumed; advanced topics are built up from first
 principles.
 
-Sibling to [[reply-style]] (overall reply tone) and [[technical-writing]]
-(prose the user is editing). This skill governs the *structure* of an
-explanation. Brevity, AmE, and no-AI-tells carry over from those skills
-without restating.
+Related to [[technical-writing]] for prose the user is editing. Use this
+skill's explanation structure when it helps, and adapt its advice to the
+reader and the requested depth.
 
 ## Lead with the punchline
 
@@ -211,9 +210,8 @@ Low-dim case, then the picture, then the algebraic generalization.
 
 ## What this skill does not do
 
-- **Does not restate [[reply-style]] rules.** AmE, no AI-tells, brief
-  replies, no idioms, no phrasal verbs for prose — those still apply.
-  This skill adds explanation structure on top.
+- **Does not override the reader's requested depth or style.** Adapt the
+  explanation to the user.
 - **Does not dump domain knowledge.** When the question is "write an
   `sbatch` script", [[slurm-job]] loads; this skill governs how the
   surrounding explanation reads, not the script itself.
@@ -223,7 +221,6 @@ Low-dim case, then the picture, then the algebraic generalization.
 
 ## See also
 
-- [[reply-style]] — overall conversational tone; carries over verbatim.
 - [[technical-writing]] — prose the user is editing; full citation table
   for HPC/ML claims lives there.
 - [[paper-review]] — critiquing someone else's explanation in a draft.

@@ -1,6 +1,6 @@
 ---
 name: research-project
-description: Carry a computational research question through source review, hypothesis design, budgeted experiments, analysis, and a cited report. Use when the user wants new empirical results; use research-brief for literature-only investigations.
+description: Optional guidance for original computational research, budgeted experiments, reproducible analysis, and a cited report.
 ---
 
 # Computational research project

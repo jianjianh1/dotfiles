@@ -13,6 +13,12 @@ Configs are grouped by topic into subdirectories:
 
 Operational logic lives in three top-level scripts: `install.sh` (local install + symlinks + render compat configs), `deploy.sh` (remote SSH bootstrap), `uninstall.sh` (clean removal + backup restore). When adding a new config file, drop it into the matching topical subdir and wire it from `install.sh`.
 
+AI skills are optional task references. The shared guidance requires
+cross-review but no general skill workflow or prose rules. Superpowers and
+`reply-style` are retired from default installation; installer, sync, and
+uninstall remove only their owned links. Preserve real user skill directories
+and unrelated links when changing this cleanup.
+
 ## File Ownership & Editing Guide
 
 | File(s) | Safe to edit | Notes |

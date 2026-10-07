@@ -1,11 +1,11 @@
 ---
 name: technical-writing
-description: Use when the user is writing or editing prose — README, docs, paper sections, blog posts, talk abstracts, technical reports, markdown documents. Enforces American English (spelling, Oxford comma, em-dash use), strips AI-tells, and anchors HPC/ML claims to canonical papers. Cross-cuts academic writing (with [[latex-paper]]) and code documentation.
+description: Optional guidance for revising documentation, reports, paper sections, and other prose for clarity and useful detail.
 ---
 
 # Technical writing & markdown style
 
-Apply to any prose the user is generating, editing, or asking feedback on.
+Use this advice when it helps with prose the user is writing or reviewing.
 Cross-cuts academic writing (with [[latex-paper]]) and code documentation.
 
 ## Default to short, declarative, active voice
@@ -287,9 +287,6 @@ meets code.
 - [[doc-coauthoring]] — iterative drafting workflow for longer docs; use when
   the deliverable is a multi-section spec, proposal, or design doc rather
   than a single README or paragraph rewrite
-- [[writing-plans]] — pre-implementation planning docs; sibling to this skill
-  for engineering-process writing
-- [[brainstorming]] — ideation phase before drafting
 - [[brand-guidelines]] — Anthropic visual identity if the artifact is for
   Anthropic-branded surfaces
 - [[skill-creator]] — for editing skills (including this one)

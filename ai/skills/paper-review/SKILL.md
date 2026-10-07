@@ -1,6 +1,6 @@
 ---
 name: paper-review
-description: Use when the user is reviewing a research paper — drafting reviewer comments, scoring along NeurIPS/ICML/conference rubrics, critiquing a draft, identifying weaknesses in claims/experiments/related work, or checking reproducibility.
+description: Optional guidance for reviewing research papers, scoring conference rubrics, and checking claims and reproducibility.
 ---
 
 # Paper review

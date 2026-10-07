@@ -1,6 +1,6 @@
 ---
 name: research-brief
-description: Investigate an open-ended topic across current web sources and academic literature, compare evidence, and answer with traceable citations. Use for deep dives and literature overviews; use research-project when the user wants original experiments.
+description: Optional guidance for literature reviews and current-source research with evidence comparison and citations.
 ---
 
 # Research brief

@@ -1,6 +1,6 @@
 ---
 name: cpp-profile
-description: Use when the user is profiling C or C++ code on Linux — invoking perf (record/report/stat/top/annotate/c2c), callgrind / KCachegrind, heaptrack, valgrind massif, gprof, HPCToolkit, Score-P, Tracy, uftrace, or generating flame graphs with stackcollapse-perf / flamegraph.pl / inferno. Covers compile-flag setup (-O2 -g -fno-omit-frame-pointer), DWARF vs frame-pointer unwinding, perf_event_paranoid, and reading hardware-counter reports.
+description: Optional guidance for profiling C/C++ on Linux with perf, callgrind, heaptrack, or flame graphs.
 ---
 
 # C/C++ profiling on Linux (perf first, then targeted)

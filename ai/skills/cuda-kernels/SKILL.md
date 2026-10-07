@@ -1,6 +1,6 @@
 ---
 name: cuda-kernels
-description: Use when the user is writing, debugging, or reviewing CUDA kernels — files with .cu/.cuh extensions, __global__/__device__ functions, kernel launch syntax (<<<>>>), shared/global memory, warp behavior, nvcc compilation, or PTX/SASS output.
+description: Optional guidance for writing, debugging, and reviewing CUDA kernels, memory access, warp behavior, and nvcc output.
 ---
 
 # CUDA kernel development

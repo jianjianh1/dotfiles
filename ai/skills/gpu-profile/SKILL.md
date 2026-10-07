@@ -1,6 +1,6 @@
 ---
 name: gpu-profile
-description: Use when the user is profiling GPU code — invoking nsys (Nsight Systems), ncu (Nsight Compute), nvprof, or interpreting .nsys-rep / .ncu-rep reports, timelines, kernel metrics, occupancy, or roofline data.
+description: Optional guidance for GPU profiling with Nsight Systems, Nsight Compute, or GPU timelines and metrics.
 ---
 
 # GPU profiling (Nsight Systems & Compute)

@@ -1423,7 +1423,7 @@ test_install_claude_skills_dry_run() (
 
     # Every curated repo must be planned, including the single-skill repos
     # that go through link_skill_path rather than link_skill.
-    for step in "clone superpowers" "clone anthropic-skills" \
+    for step in "clone anthropic-skills" \
                 "clone research-paper-writing-skills" "link research-paper-writing" \
                 "clone skill-deslop" "link deslop" \
                 "clone mattpocock-skills" "link grilling" \
@@ -1431,6 +1431,10 @@ test_install_claude_skills_dry_run() (
         printf '%s\n' "$output" | grep -qF "Would run: $step" ||
             fail "install_claude_skills.sh --dry-run did not plan '$step'"
     done
+
+    if printf '%s\n' "$output" | grep -q 'clone superpowers\|link superpowers:'; then
+        fail "upstream installer still installs retired workflows"
+    fi
 
     if [ -d "$tmp/.local/share/claude-skills" ]; then
         fail "install_claude_skills.sh --dry-run created cache directory"
@@ -1514,8 +1518,247 @@ test_sync_agent_skills_links_both_ways() (
     [ ! -L "$HOME/.agents/skills/foo" ] || fail "broken Claude -> Codex link not pruned"
 )
 
-# uninstall.sh must remove the sync links (root sweep through unlink_config)
-# while leaving the real skill directories on both sides alone.
+_retired_skill_fixture() {
+    export HOME="$1/home" CODEX_HOME="$1/codex-profile"
+    CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+    CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
+    CODEX_HOME_SKILLS_DIR="$CODEX_HOME/skills"
+    EXTERNAL_SKILLS_CACHE="$HOME/.local/share/claude-skills"
+    local root cache="$EXTERNAL_SKILLS_CACHE/superpowers/skills"
+    mkdir -p "$cache/brainstorming" "$cache/writing-plans" "$1/foreign"
+    : > "$cache/brainstorming/SKILL.md"
+    : > "$cache/writing-plans/SKILL.md"
+    for root in "$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR"; do
+        mkdir -p "$root/test-driven-development"
+        : > "$root/test-driven-development/SKILL.md"
+        ln -s "$cache/brainstorming" "$root/brainstorming"
+        ln -s "$DIR/ai/skills/reply-style" "$root/reply-style"
+        ln -s "$1/foreign" "$root/systematic-debugging"
+    done
+    ln -s "$cache/writing-plans" "$CODEX_AGENT_SKILLS_DIR/writing-plans"
+    ln -s "$CODEX_AGENT_SKILLS_DIR/writing-plans" "$CLAUDE_SKILLS_DIR/writing-plans"
+    ln -s "$CLAUDE_SKILLS_DIR/writing-plans" "$CODEX_HOME_SKILLS_DIR/writing-plans"
+    ln -s ../../.local/share/claude-skills/superpowers/skills/gone "$CLAUDE_SKILLS_DIR/relative-gone"
+    ln -s "$cache" "$CODEX_AGENT_SKILLS_DIR/superpowers"
+    ln -s "$EXTERNAL_SKILLS_CACHE/superpowers" "$CODEX_HOME_SKILLS_DIR/whole-clone"
+    ln -s "$cache/brainstorming" "$CODEX_AGENT_SKILLS_DIR/superpowers:brainstorming"
+    ln -s "$DIR/ai/skills/research-brief" "$CLAUDE_SKILLS_DIR/research-brief"
+    ln -s "$DIR/ai/skills/agent-delegate" "$CLAUDE_SKILLS_DIR/agent-delegate"
+    ln -s cycle-b "$CODEX_AGENT_SKILLS_DIR/cycle-a"
+    ln -s cycle-a "$CODEX_AGENT_SKILLS_DIR/cycle-b"
+}
+
+_assert_retired_skills_removed() {
+    local root name
+    for root in "$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR"; do
+        for name in brainstorming reply-style writing-plans; do
+            [ ! -L "$root/$name" ] || fail "retired link survived: $root/$name"
+        done
+        [ -d "$root/test-driven-development" ] && [ ! -L "$root/test-driven-development" ] ||
+            fail "real user skill changed"
+        [ -L "$root/systematic-debugging" ] || fail "foreign skill link removed"
+    done
+    [ ! -L "$CLAUDE_SKILLS_DIR/relative-gone" ] || fail "relative dangling link survived"
+    [ ! -L "$CODEX_AGENT_SKILLS_DIR/superpowers" ] || fail "directory-level link survived"
+    [ ! -L "$CODEX_HOME_SKILLS_DIR/whole-clone" ] || fail "clone-root link survived"
+    [ ! -L "$CODEX_AGENT_SKILLS_DIR/superpowers:brainstorming" ] || fail "namespaced link survived"
+    [ -L "$CODEX_AGENT_SKILLS_DIR/cycle-a" ] && [ -L "$CODEX_AGENT_SKILLS_DIR/cycle-b" ] ||
+        fail "unresolved cycle removed"
+}
+
+test_skill_path_resolution() (
+    local tmp index result
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/space dir/base"
+    ln -s 'space dir/base' "$tmp/shortcut"
+    [ "$(resolve_skill_path "$tmp/shortcut/../missing")" = "$tmp/space dir/missing" ] ||
+        fail "resolver normalized .. before following its symlink"
+    for ((index = 0; index < 40; index++)); do
+        ln -s "$tmp/hop$((index + 1))" "$tmp/hop$index"
+    done
+    [ "$(resolve_skill_path "$tmp/hop0")" = "$tmp/hop40" ] || fail "40-hop chain failed"
+    ln -s "$tmp/hop0" "$tmp/too-long"
+    result=0
+    resolve_skill_path "$tmp/too-long" >/dev/null || result=$?
+    [ "$result" -eq 2 ] || fail "excessive chain was not rejected"
+    is_retired_skill_path "$EXTERNAL_SKILLS_CACHE/superpowers-other" &&
+        fail "retirement matched a sibling directory"
+    return 0
+)
+
+test_retired_skill_cleanup() (
+    local tmp order preview
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    for order in normal reverse; do
+        _retired_skill_fixture "$tmp/$order"
+        DRY_RUN=true
+        preview="$(prune_retired_skill_links 2>&1)" || fail "retirement preview failed"
+        printf '%s\n' "$preview" | grep -q 'Would remove retired skill' || fail "missing preview"
+        [ -L "$CLAUDE_SKILLS_DIR/brainstorming" ] || fail "preview removed a link"
+        DRY_RUN=false
+        if [ "$order" = normal ]; then
+            prune_retired_skill_links >/dev/null 2>&1 || fail "retirement failed"
+        else
+            prune_retired_skill_links "$CODEX_HOME_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CLAUDE_SKILLS_DIR" \
+                >/dev/null 2>&1 || fail "reverse retirement failed"
+        fi
+        _assert_retired_skills_removed
+        prune_retired_skill_links >/dev/null 2>&1 || fail "repeat retirement failed"
+        _assert_retired_skills_removed
+        [ -L "$CLAUDE_SKILLS_DIR/research-brief" ] || fail "specialist skill removed"
+        [ -L "$CLAUDE_SKILLS_DIR/agent-delegate" ] || fail "cross-review skill removed"
+    done
+)
+
+test_retired_skill_entrypoints() (
+    local tmp mode output
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    for mode in install upstream sync sync-install uninstall; do
+        (
+            _retired_skill_fixture "$tmp/$mode"
+            # shellcheck source=install.sh
+            if [ "$mode" != uninstall ]; then
+                . "$DIR/install.sh"
+            fi
+            if [ "$mode" = sync ] || [ "$mode" = sync-install ]; then
+                bash "$DIR/scripts/sync_agent_skills.sh" --dry-run > "$tmp/preview" 2>&1 || fail "sync preview failed"
+                [ -L "$CLAUDE_SKILLS_DIR/brainstorming" ] || fail "sync preview removed a link"
+                ! grep -q 'Would run: agents/skills:brainstorming' "$tmp/preview" || fail "preview mirrored a retired skill"
+                bash "$DIR/scripts/sync_agent_skills.sh" > "$tmp/output" 2>&1 || fail "sync failed"
+                bash "$DIR/scripts/sync_agent_skills.sh" >> "$tmp/output" 2>&1 || fail "repeat sync failed"
+            fi
+            if [ "$mode" = install ] || [ "$mode" = sync-install ]; then
+                DRY_RUN=true
+                link_claude_skills > "$tmp/preview" 2>&1 || fail "bundled preview failed"
+                ! grep -q 'Would link skill .*reply-style' "$tmp/preview" || fail "preview installed reply-style"
+                DRY_RUN=false
+                link_claude_skills > "$tmp/output" 2>&1 || fail "bundled install failed"
+                link_claude_skills >> "$tmp/output" 2>&1 || fail "repeat bundled install failed"
+            elif [ "$mode" = upstream ]; then
+                mkdir -p "$tmp/bin"
+                printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/git"
+                chmod +x "$tmp/bin/git"
+                output="$(PATH="$tmp/bin:$PATH" bash "$DIR/scripts/install_claude_skills.sh" 2>&1)" ||
+                    fail "upstream install failed"
+                ! printf '%s\n' "$output" | grep -q 'clone superpowers\|link superpowers:' || fail "upstream restored workflows"
+            elif [ "$mode" = uninstall ]; then
+                mkdir -p "$CLAUDE_SKILLS_DIR/reply-style.bak"
+                printf 'user skill\n' > "$CLAUDE_SKILLS_DIR/reply-style.bak/SKILL.md"
+                # shellcheck source=uninstall.sh
+                . "$DIR/uninstall.sh"
+                remove_symlinks > "$tmp/output" 2>&1 || fail "uninstall failed"
+                grep -q 'user skill' "$CLAUDE_SKILLS_DIR/reply-style/SKILL.md" ||
+                    fail "uninstall lost the original skill backup"
+            fi
+            _assert_retired_skills_removed
+            if [ "$mode" != uninstall ]; then
+                [ -L "$CLAUDE_SKILLS_DIR/research-brief" ] || fail "specialist skill missing"
+                [ -L "$CLAUDE_SKILLS_DIR/agent-delegate" ] || fail "cross-review skill missing"
+            fi
+        )
+    done
+)
+
+test_retired_skill_backup_restore() (
+    local tmp root preview
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    _retired_skill_fixture "$tmp"
+    for root in "$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR"; do
+        mkdir -p "$root/reply-style.bak"
+        printf 'original user skill\n' > "$root/reply-style.bak/SKILL.md"
+    done
+    DRY_RUN=true
+    preview="$(prune_retired_skill_links 2>&1)" || fail "backup preview failed"
+    printf '%s\n' "$preview" | grep -q 'Would restore .*reply-style.bak' || fail "backup restoration not previewed"
+    [ -L "$CLAUDE_SKILLS_DIR/reply-style" ] && [ -d "$CLAUDE_SKILLS_DIR/reply-style.bak" ] ||
+        fail "preview changed a backup"
+    DRY_RUN=false
+    prune_retired_skill_links >/dev/null 2>&1 || fail "backup restore failed"
+    _assert_retired_skills_removed
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    link_claude_skills >/dev/null 2>&1 || fail "install after restoration failed"
+    for root in "$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR"; do
+        grep -q 'original user skill' "$root/reply-style/SKILL.md" || fail "restored skill changed"
+        [ ! -e "$root/reply-style.bak" ] || fail "backup was not restored"
+    done
+    _retired_skill_fixture "$tmp/retired-backup"
+    ln -s "$CODEX_AGENT_SKILLS_DIR/reply-style" "$CLAUDE_SKILLS_DIR/reply-style.bak"
+    ln -s "$DIR/ai/skills/reply-style" "$CODEX_AGENT_SKILLS_DIR/reply-style.bak"
+    ln -s "$DIR/ai/skills/reply-style" "$CODEX_HOME_SKILLS_DIR/reply-style.bak"
+    prune_retired_skill_links >/dev/null 2>&1 || fail "retired backup cleanup failed"
+    _assert_retired_skills_removed
+    for root in "$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR"; do
+        [ ! -L "$root/reply-style.bak" ] || fail "retired backup link survived one run"
+    done
+)
+
+test_optional_skill_guidance() (
+    local guidance="$DIR/ai/writing-guidance.md" skill description reference
+    grep -q '^# Optional skills' "$guidance" || fail "optional policy missing"
+    grep -q '^# Peer review of plans and changes' "$guidance" || fail "cross-review missing"
+    ! grep -q '^# Write for the reader' "$guidance" || fail "global style rules remain"
+    for skill in "$DIR/ai/skills"/*; do
+        is_retired_skill_path "$skill" && continue
+        description="$(sed -n '3p' "$skill/SKILL.md")"
+        [ -n "${description#description: }" ] || fail "empty description"
+        ! printf '%s\n' "$description" | grep -Eiq 'MUST|REQUIRED|Enforces|whenever|every reply' ||
+            fail "mandatory skill description: $skill"
+        while IFS= read -r reference; do
+            reference="${reference#'[['}"
+            reference="${reference%']]'}"
+            if is_retired_skill_name "$reference"; then
+                fail "active skill refers to retired workflow: $skill"
+            fi
+        done < <(grep -oE '\[\[[^]]+\]\]' "$skill/SKILL.md")
+    done
+)
+
+test_retired_skill_cleanup_continues() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    _retired_skill_fixture "$tmp"
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    rm() {
+        [ "${2:-}" != "$CLAUDE_SKILLS_DIR/brainstorming" ] || return 1
+        command rm "$@"
+    }
+    run_step "claude skills" link_claude_skills > "$tmp/output" 2>&1 || fail "cleanup failure aborted bundled linking"
+    unset -f rm
+    [ "${#FAILURES[@]}" -eq 1 ] || fail "cleanup failure was not recorded"
+    [ -L "$CLAUDE_SKILLS_DIR/brainstorming" ] || fail "failed removal was not simulated"
+    [ ! -L "$CODEX_AGENT_SKILLS_DIR/brainstorming" ] || fail "failure aborted other removals"
+    [ -L "$CLAUDE_SKILLS_DIR/technical-writing" ] || fail "failure aborted optional linking"
+    prune_retired_skill_links >/dev/null 2>&1 || fail "cleanup did not recover"
+    _assert_retired_skills_removed
+)
+
+test_skill_sync_symlinked_home() (
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/physical"
+    ln -s "$tmp/physical" "$tmp/logical"
+    export HOME="$tmp/logical" CODEX_HOME="$tmp/logical/.codex"
+    mkdir -p "$HOME/.agents/skills" "$HOME/.claude/skills/foo" "$CODEX_HOME/skills/bar"
+    : > "$HOME/.claude/skills/foo/SKILL.md"
+    : > "$CODEX_HOME/skills/bar/SKILL.md"
+    ln -s "$HOME/.local/share/claude-skills/anthropic-skills/gone" "$HOME/.agents/skills/orphan"
+    ln -s "$HOME/.local/share/claude-skills-other/gone" "$HOME/.agents/skills/foreign"
+    bash "$DIR/scripts/sync_agent_skills.sh" > "$tmp/output" 2>&1 || fail "symlinked-home sync failed"
+    [ ! -L "$HOME/.agents/skills/orphan" ] || fail "canonical dangling cache link survived"
+    [ -L "$HOME/.agents/skills/foreign" ] || fail "cache sibling was treated as owned"
+    [ -L "$HOME/.agents/skills/foo" ] || fail "symlinked-home Claude skill missing"
+    [ -L "$HOME/.claude/skills/bar" ] || fail "symlinked-home Codex skill missing"
+)
+
+# uninstall.sh must remove sync links while leaving real skill directories alone.
 test_uninstall_removes_agent_skill_links() (
     local tmp
     tmp="$(mktemp -d)"
@@ -1895,6 +2138,13 @@ main() {
     run_test test_install_claude_skills_dry_run
     run_test test_sync_agent_skills_dry_run
     run_test test_sync_agent_skills_links_both_ways
+    run_test test_skill_path_resolution
+    run_test test_retired_skill_cleanup
+    run_test test_retired_skill_entrypoints
+    run_test test_retired_skill_backup_restore
+    run_test test_retired_skill_cleanup_continues
+    run_test test_skill_sync_symlinked_home
+    run_test test_optional_skill_guidance
     run_test test_uninstall_removes_agent_skill_links
     run_test test_agent_writing_guidance_preserves_global_instructions
     run_test test_agent_writing_guidance_restores_global_symlink

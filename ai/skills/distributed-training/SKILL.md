@@ -1,6 +1,6 @@
 ---
 name: distributed-training
-description: Use when the user is setting up multi-GPU or multi-node ML training — PyTorch DDP, FSDP, torchrun, accelerate, deepspeed, NCCL, torch.distributed, multi-node srun launchers, gradient accumulation, mixed precision, or checkpoint/resume on a SLURM cluster.
+description: Optional guidance for multi-GPU or multi-node training with DDP, FSDP, torchrun, NCCL, or DeepSpeed.
 ---
 
 # Distributed training (PyTorch + SLURM)

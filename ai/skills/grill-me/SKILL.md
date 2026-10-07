@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Interview the user about an unfinished idea, decision, or plan when they ask to be grilled or questioned. Resolve important choices one question at a time before planning or execution; use premortem-analysis to critique a concrete plan.
+description: Interview an unfinished idea when the user asks to be grilled; use premortem-analysis for a concrete plan.
 ---
 
 # Grill me

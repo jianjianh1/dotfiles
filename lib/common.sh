@@ -425,6 +425,15 @@ backup_and_copy() {
     echo "  Copied $src -> $dst"
 }
 
+# Call only after removing a verified managed link, leaving $dst vacant.
+restore_backup() {
+    local dst="$1"
+    if [ -e "${dst}.bak" ] || [ -L "${dst}.bak" ]; then
+        mv "${dst}.bak" "$dst" || return 1
+        echo "  Restored ${dst}.bak -> $dst"
+    fi
+}
+
 # Single source of truth for the upstream-skill clone cache. Consumed by
 # scripts/install_claude_skills.sh (writer) and uninstall.sh (cleaner).
 # shellcheck disable=SC2034  # used by sourcing scripts
@@ -440,6 +449,124 @@ CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 CODEX_AGENT_SKILLS_DIR="$HOME/.agents/skills"
 # shellcheck disable=SC2034
 CODEX_HOME_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
+
+# Resolve symlink components without requiring their final target to exist.
+# Return 2 for unreadable links or chains exceeding the usual 40-hop limit.
+resolve_skill_path() {
+    local path="$1" resolved="" component candidate target hops=0
+    local pending=() target_parts=()
+    case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+    IFS=/ read -r -a pending <<< "$path"
+    while [ "${#pending[@]}" -gt 0 ]; do
+        component="${pending[0]}"
+        pending=("${pending[@]:1}")
+        case "$component" in
+            ''|.) continue ;;
+            ..) resolved="${resolved%/*}"; continue ;;
+        esac
+        candidate="$resolved/$component"
+        if [ -L "$candidate" ]; then
+            hops=$((hops + 1))
+            [ "$hops" -le 40 ] || return 2
+            target="$(readlink "$candidate")" || return 2
+            case "$target" in /*) resolved="" ;; esac
+            IFS=/ read -r -a target_parts <<< "$target"
+            pending=("${target_parts[@]}" ${pending[@]+"${pending[@]}"})
+        else
+            resolved="$candidate"
+        fi
+    done
+    printf '%s\n' "${resolved:-/}"
+}
+
+# Retirement is based on owned sources, not names: real user-installed skills
+# and links into other checkouts survive, including skills with these names.
+is_retired_skill_path() {
+    local target reply_source superpowers_source
+    target="$(resolve_skill_path "$1")" || return 2
+    reply_source="$(resolve_skill_path "$DIR/ai/skills/reply-style")" || return 2
+    superpowers_source="$(resolve_skill_path "$EXTERNAL_SKILLS_CACHE/superpowers")" || return 2
+    case "$target" in
+        "$reply_source"|"$reply_source"/*|"$superpowers_source"|"$superpowers_source"/*) return 0 ;;
+    esac
+    return 1
+}
+
+is_retired_skill_name() {
+    case "$1" in
+        reply-style|superpowers|superpowers:*|using-superpowers|\
+        brainstorming|writing-plans|executing-plans|using-git-worktrees|\
+        test-driven-development|systematic-debugging|verification-before-completion|\
+        requesting-code-review|receiving-code-review|finishing-a-development-branch|\
+        subagent-driven-development|dispatching-parallel-agents|writing-skills) return 0 ;;
+    esac
+    return 1
+}
+
+prune_retired_skill_links() {
+    local roots=("$CLAUDE_SKILLS_DIR" "$CODEX_AGENT_SKILLS_DIR" "$CODEX_HOME_SKILLS_DIR")
+    local retired=() targets=() backups=() removed=()
+    local root entry literal result index backup failed=0
+    [ "$#" -eq 0 ] || roots=("$@")
+    # Classify all roots first so deleting one link cannot hide a chained target.
+    for root in "${roots[@]}"; do
+        [ -d "$root" ] || continue
+        for entry in "$root"/*; do
+            [ -L "$entry" ] || continue
+            if ! literal="$(readlink "$entry")"; then
+                echo "  Cannot read skill link $(display_path "$entry")" >&2
+                failed=1
+                continue
+            fi
+            if is_retired_skill_path "$entry"; then
+                retired+=("$entry")
+                targets+=("$literal")
+                backup=0
+                if { [ -e "${entry}.bak" ] || [ -L "${entry}.bak" ]; } &&
+                    ! is_retired_skill_path "${entry}.bak"; then
+                    backup=1
+                fi
+                backups+=("$backup")
+            else
+                result=$?
+                if [ "$result" -eq 2 ]; then
+                    echo "  Skipping unresolved skill link $(display_path "$entry")" >&2
+                elif is_retired_skill_name "${entry##*/}"; then
+                    echo "  Preserving user-owned skill $(display_path "$entry")"
+                fi
+            fi
+        done
+    done
+    for ((index = 0; index < ${#retired[@]}; index++)); do
+        entry="${retired[index]}"
+        if [ "${DRY_RUN:-false}" = true ]; then
+            echo "[dry-run] Would remove retired skill $(display_path "$entry")"
+            if [ "${backups[index]}" -eq 1 ]; then
+                echo "[dry-run] Would restore $(display_path "$entry").bak -> $(display_path "$entry")"
+            fi
+        elif [ -L "$entry" ] && [ "$(readlink "$entry")" = "${targets[index]}" ]; then
+            if ! rm -f "$entry"; then
+                echo "  Cannot remove retired skill $(display_path "$entry")" >&2
+                failed=1
+                continue
+            fi
+            echo "  Removed retired skill $(display_path "$entry")"
+            removed+=("$index")
+        fi
+    done
+    # Remove all retired links, including retired .bak links, before restoring
+    # original user entries. Otherwise restoration can reactivate a retired link.
+    for index in ${removed[@]+"${removed[@]}"}; do
+        entry="${retired[index]}"
+        if [ "${backups[index]}" -eq 1 ]; then
+            if ! restore_backup "$entry"; then
+                echo "  Cannot restore skill backup $(display_path "$entry").bak" >&2
+                failed=1
+            fi
+        fi
+    done
+    return "$failed"
+}
 
 # Collapse $HOME to a leading ~ for display. The ~ is a literal character
 # in the output, never a shell tilde-expansion.

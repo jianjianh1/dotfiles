@@ -6,6 +6,7 @@ GENERATED_DIR="$HOME/.dotfiles-generated"
 # shellcheck disable=SC2034  # consumed by manifest_contains_path from lib/common.sh
 INSTALL_MANIFEST="$GENERATED_DIR/install-manifest.txt"
 YES=false
+FAILURES=()
 
 # shellcheck source=lib/common.sh
 . "$DIR/lib/common.sh"
@@ -21,28 +22,18 @@ confirm() {
     [[ "$ans" =~ ^[Yy] ]]
 }
 
-# Remove a symlink only if it points into this repo, then restore .bak if present
-restore_backup() {
-    local dst="$1"
-    if [ -e "${dst}.bak" ]; then
-        mv "${dst}.bak" "$dst"
-        echo "  Restored ${dst}.bak -> $dst"
-    fi
-}
-
 unlink_config() {
     local dst="$1"
     local target="" dir_canon="" gen_canon="" ext_canon=""
     local claude_canon="" codex_canon=""
 
     if [ -L "$dst" ]; then
-        target="$(portable_realpath "$dst" 2>/dev/null || true)"
-        # Dangling links (clone cache or Codex skill dir removed by hand)
-        # defeat portable_realpath; fall back to the literal target so they
-        # are still classified and cleaned up.
-        [ -n "$target" ] || target="$(readlink "$dst" 2>/dev/null || true)"
+        if ! target="$(resolve_skill_path "$dst")"; then
+            echo "  Skipped $dst (unresolved symlink chain)"
+            return 0
+        fi
         # macOS resolves /var → /private/var (and similar /tmp → /private/tmp)
-        # via portable_realpath, but $DIR / $GENERATED_DIR are kept in their
+        # via resolve_skill_path, but $DIR / $GENERATED_DIR are kept in their
         # logical (pre-resolve) form. Match against both so the comparison
         # works whether or not the path crossed a symlinked prefix.
         dir_canon="$(portable_realpath "$DIR" 2>/dev/null || printf '%s' "$DIR")"
@@ -222,6 +213,7 @@ remove_agent_writing_guidance() {
 
 remove_symlinks() {
     echo "Removing config symlinks..."
+    prune_retired_skill_links || FAILURES+=("retired skill cleanup")
     unlink_config "$HOME/CLAUDE.md"
     unlink_config "$HOME/.vimrc"
     unlink_config "$HOME/.tmux.conf"
@@ -395,6 +387,11 @@ main() {
     remove_git_hooks_config
 
     echo ""
+    if [ "${#FAILURES[@]}" -gt 0 ]; then
+        echo "Uninstall completed with failures:"
+        printf '  - %s\n' "${FAILURES[@]}"
+        return 1
+    fi
     echo "Uninstall complete. Open a new shell to pick up changes."
 }
 

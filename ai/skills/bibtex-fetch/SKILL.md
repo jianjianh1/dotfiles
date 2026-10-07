@@ -1,6 +1,6 @@
 ---
 name: bibtex-fetch
-description: Use when the user needs a BibTeX entry — fetching from a DOI, arXiv ID, or paper title; appending to references.bib; deduplicating entries; or auditing citations in a paper (orphan citations, missing fields, self-citation ratio).
+description: Optional guidance for fetching BibTeX from a DOI, arXiv ID, or title, deduplicating entries, and auditing citations.
 allowed-tools: Bash(curl *) Bash(grep *) Bash(awk *)
 ---
 

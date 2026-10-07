@@ -1,6 +1,6 @@
 ---
 name: latex-paper
-description: Use when the user is editing .tex files, building a paper with latexmk/pdflatex/xelatex/lualatex, scaffolding a NeurIPS/ICML/IEEE/ACM template, fixing compile errors, managing figures or bibliographies, or asking about LaTeX best practices.
+description: Optional guidance for editing LaTeX papers, compiling .tex files, fixing errors, and managing figures and bibliographies.
 ---
 
 # LaTeX paper authoring

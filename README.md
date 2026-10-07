@@ -99,11 +99,17 @@ HOME="$(mktemp -d)" ./install.sh --dry-run
 | `ai/claude_settings.json` | `~/.claude/settings.json` | copy |
 | `ai/claude_statusline.sh` | `~/.claude/statusline.sh` | symlink |
 | `ai/codex_config.toml` | `~/.codex/config.toml` | copy |
-| `ai/skills/<name>/` | `~/.claude/skills/<name>` | symlink |
+| active `ai/skills/<name>/` | `~/.claude/skills/<name>` | symlink (`reply-style` excluded) |
 | _mirrored_ `~/.claude/skills/<name>` | `~/.agents/skills/<name>` | symlink (for Codex, by `scripts/sync_agent_skills.sh`) |
 | `scripts/detect-theme.sh` | `~/.local/bin/detect-theme` | symlink |
 | `scripts/codex-mcp-bridge.mjs` | `~/.local/bin/codex-mcp-bridge` | symlink |
 | `scripts/chpc-allocs.py` | `~/.local/bin/chpc-allocs` | symlink |
+
+Claude and Codex share optional specialist skills and required cross-review.
+Superpowers, the always-on reply style skill, and global writing rules are
+removed from the default setup. Reinstalling or running skill sync cleans up
+owned legacy links while preserving real user skill directories. See
+[AI skills](docs/ai-skills.md#retired-default-workflows) for manual opt-in.
 
 Both `shell/bashrc_exports` and `shell/bashrc_aliases` are sourced from `~/.bashrc` (lines appended by `install.sh` if not already present). Zsh wiring is parallel: `~/.zshrc_exports` and `~/.zshrc_aliases`.
 
