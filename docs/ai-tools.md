@@ -2,7 +2,7 @@
 
 Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusline.sh`](../ai/claude_statusline.sh), [`codex_config.toml`](../ai/codex_config.toml), [`writing-guidance.md`](../ai/writing-guidance.md), [`codex-mcp-bridge.mjs`](../scripts/codex-mcp-bridge.mjs), [`install_claude_plugins.sh`](../scripts/install_claude_plugins.sh), [`install.sh`](../install.sh)
 
-> **Permissive by default.** The shipped configs (`auto`, `sandbox.enabled = false`, `approval_policy = never`, `sandbox_mode = danger-full-access`) run Claude and Codex with **no per-action prompts and no sandbox** — intentional for a single-user dev machine. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations for shared hosts, not shipped rules. Before deploying to a shared host, consider adding those patterns and changing `defaultMode` to `default`.
+> **Permissive by default.** Claude starts in `bypassPermissions` mode and Codex uses `approval_policy = never` with `sandbox_mode = danger-full-access`. Claude skips ordinary permission prompts, and `sandbox.enabled = false` means it is not contained. Bypass mode is not Plan mode. Anthropic recommends using it only in isolated environments such as containers or VMs. This dotfiles default deliberately applies on every installed host, including shared hosts such as CHPC; there, Claude can run commands and edit files with your account's access. If that is not acceptable, change `defaultMode` to `default` before installing. The shipped Claude deny rules block OpenAlex account and author-profile tools. The file-path patterns below are recommendations, not shipped rules. See [Claude Code permission modes](https://code.claude.com/docs/en/permissions).
 
 ---
 
@@ -73,7 +73,7 @@ Copied to `~/.claude/settings.json` by `install.sh` (via `backup_and_copy`, not 
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `model` | `opus` | Default model |
-| `defaultMode` | `auto` | Auto mode: no permission prompts, work routed through Bash |
+| `defaultMode` | `bypassPermissions` | Skip ordinary permission prompts for edits and shell commands; switch to Plan mode manually for read-only planning |
 | `effortLevel` | `high` | Reasoning effort level |
 | `alwaysThinkingEnabled` | `true` | Extended thinking always on |
 | `editorMode` | `vim` | Vim keybindings in the CLI |

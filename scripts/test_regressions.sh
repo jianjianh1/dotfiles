@@ -939,8 +939,25 @@ test_chpc_config_rendering_uses_repo_files() (
     [ "$CODEX_CONFIG_SRC" = "$DIR/ai/codex_config.toml" ] ||
         fail "CHPC Codex config src should be the repo file (got '$CODEX_CONFIG_SRC')"
 
-    grep -q '"defaultMode": "auto"' "$DIR/ai/claude_settings.json" ||
-        fail "Repo Claude settings should use auto mode per no-restriction defaults"
+    grep -q '"defaultMode": "bypassPermissions"' "$DIR/ai/claude_settings.json" ||
+        fail "Repo Claude settings should use bypassPermissions mode per no-restriction defaults"
+    python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as settings_file:
+    denied_tools = set(json.load(settings_file)["permissions"]["deny"])
+
+required = {
+    "mcp__openalex__get_my_account",
+    "mcp__openalex__claim_author_profile",
+    "mcp__openalex__find_candidate_works",
+    "mcp__openalex__submit_curations",
+    "mcp__openalex__list_my_curations",
+}
+sys.exit(0 if required.issubset(denied_tools) else 1)
+' "$DIR/ai/claude_settings.json" ||
+        fail "Repo Claude settings should retain the OpenAlex deny rules in permissions.deny"
     grep -q '"enabled": false' "$DIR/ai/claude_settings.json" ||
         fail "Repo Claude settings should disable sandboxing per no-restriction defaults"
 
