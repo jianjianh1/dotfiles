@@ -2083,8 +2083,46 @@ test_uninstall_removes_dangling_managed_hook() (
     [ ! -L "$link" ] || fail "uninstall left a dangling managed review hook"
 )
 
-test_codex_loop() (
-    node --test "$DIR/scripts/test_codex_loop.mjs" || fail "Codex loop tests failed"
+test_legacy_codex_loop_cleanup() (
+    local tmp helper skill state
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home"
+    mkdir -p "$HOME/.local/bin" "$HOME/.agents/skills" "$HOME/.codex"
+    helper="$HOME/.local/bin/codex-loop"
+    skill="$HOME/.agents/skills/loop"
+    state="$HOME/.local/state/dotfiles-codex-loop"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    printf 'model_reasoning_effort = "high"\n' > "$HOME/.codex/config.toml"
+    ln -s "$DIR/scripts/codex-loop.mjs" "$helper"
+    ln -s "$DIR/ai/codex-skills/loop" "$skill"
+    mkdir -p "$state"
+    printf '{}\n' > "$state/thread.json"
+
+    DRY_RUN=true
+    unwire_codex_loop_legacy >/dev/null || fail "dry-run cleanup failed"
+    [ -L "$helper" ] && [ -L "$skill" ] && [ -e "$state/thread.json" ] ||
+        fail "dry-run removed old Codex loop files"
+
+    # shellcheck disable=SC2034  # read by unwire_codex_loop_legacy in install.sh
+    DRY_RUN=false
+    printf '[[hooks.Stop]]\ncommand = "~/.local/bin/codex-loop hook"\n' >> "$HOME/.codex/config.toml"
+    if unwire_codex_loop_legacy >/dev/null 2>&1; then
+        fail "cleanup accepted an active Codex loop hook"
+    fi
+    [ -L "$helper" ] && [ -e "$state/thread.json" ] || fail "cleanup removed a still-active helper"
+
+    printf 'model_reasoning_effort = "high"\n' > "$HOME/.codex/config.toml"
+    unwire_codex_loop_legacy >/dev/null || fail "managed Codex loop cleanup failed"
+    [ ! -L "$helper" ] && [ ! -L "$skill" ] && [ ! -e "$state" ] ||
+        fail "managed Codex loop helper, skill, or state survived cleanup"
+
+    ln -s "$tmp/user-helper" "$helper"
+    ln -s "$tmp/user-skill" "$skill"
+    unwire_codex_loop_legacy >/dev/null || fail "unowned Codex loop cleanup failed"
+    [ -L "$helper" ] && [ -L "$skill" ] || fail "cleanup removed user-owned Codex loop links"
 )
 
 run_test() {
@@ -2154,7 +2192,7 @@ main() {
     run_test test_claude_plugins_bootstrap_marketplace
     run_test test_legacy_peer_review_cleanup
     run_test test_uninstall_removes_dangling_managed_hook
-    run_test test_codex_loop
+    run_test test_legacy_codex_loop_cleanup
     echo "All regression tests passed."
 }
 

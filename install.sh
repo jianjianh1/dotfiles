@@ -1862,15 +1862,6 @@ install_codex_mcp_bridge() {
     manifest_add_path "$HOME/.local/bin/codex-mcp-bridge"
 }
 
-install_codex_loop() {
-    local source="$DIR/scripts/codex-loop.mjs"
-    [ -f "$source" ] || return 1
-    chmod +x "$source" || return 1
-    mkdir -p "$HOME/.local/bin" || return 1
-    backup_and_link "$source" "$HOME/.local/bin/codex-loop" || return 1
-    manifest_add_path "$HOME/.local/bin/codex-loop"
-}
-
 # Older installs linked the peer review lifecycle hook into ~/.local/bin.
 # Remove it only after the installed settings no longer call it. Comparing the
 # literal link target also works when the old source has already been deleted.
@@ -1905,6 +1896,51 @@ unwire_peer_review_hook_legacy() {
     if [ -d "$state" ] && [ ! -L "$state" ]; then
         rm -r "$state" || return 1
         echo "  Removed old peer review state"
+    fi
+}
+
+# Older installs linked the Codex $loop helper and skill and kept job state.
+# Remove them only after ~/.codex/config.toml no longer runs the helper's hooks.
+unwire_codex_loop_legacy() {
+    local helper="$HOME/.local/bin/codex-loop"
+    local skill="$HOME/.agents/skills/loop"
+    local state="$HOME/.local/state/dotfiles-codex-loop"
+    local config="$HOME/.codex/config.toml"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[dry-run] Would remove the old Codex loop helper, skill, and state"
+        return 0
+    fi
+
+    if [ -f "$config" ] && grep -Fq '/codex-loop' "$config"; then
+        echo "  Cannot remove Codex loop helper: $config still calls it" >&2
+        return 1
+    fi
+
+    if [ -L "$helper" ]; then
+        if [ "$(readlink "$helper")" = "$DIR/scripts/codex-loop.mjs" ]; then
+            rm "$helper" || return 1
+            echo "  Removed old Codex loop helper link"
+        else
+            echo "  Skipping user-owned Codex loop helper link"
+        fi
+    elif [ -e "$helper" ]; then
+        echo "  Skipping user-owned Codex loop helper file"
+    fi
+
+    if [ -L "$skill" ]; then
+        if [ "$(readlink "$skill")" = "$DIR/ai/codex-skills/loop" ]; then
+            rm "$skill" || return 1
+            echo "  Removed old Codex loop skill link"
+        else
+            echo "  Skipping user-owned Codex loop skill link"
+        fi
+    fi
+
+    # Running workers exit once their thread state disappears.
+    if [ -d "$state" ] && [ ! -L "$state" ]; then
+        rm -r "$state" || return 1
+        echo "  Removed old Codex loop state"
     fi
 }
 
@@ -2012,29 +2048,6 @@ link_claude_skills() {
         backup_and_link "${skill_dir%/}" "$dst" || return 1
         manifest_add_path "$dst" || return 1
     done
-}
-
-# This skill must stay Codex-only: installing it in ~/.claude/skills would
-# override Claude Code's bundled /loop command. Preserve user-owned entries.
-link_codex_loop_skill() {
-    local source="$DIR/ai/codex-skills/loop"
-    local dst="$CODEX_AGENT_SKILLS_DIR/loop"
-    local current=""
-    [ -f "$source/SKILL.md" ] || return 1
-    mkdir -p "$CODEX_AGENT_SKILLS_DIR" || return 1
-    if [ -L "$dst" ]; then
-        current="$(portable_realpath "$dst" 2>/dev/null || true)"
-        if [ "$current" = "$(portable_realpath "$source")" ]; then
-            manifest_add_path "$dst"
-            return 0
-        fi
-    fi
-    if [ -e "$dst" ] || [ -L "$dst" ]; then
-        echo "  Skipping Codex loop skill: $dst already belongs to the user" >&2
-        return 1
-    fi
-    ln -s "$source" "$dst" || return 1
-    manifest_add_path "$dst"
 }
 
 # User-level rules are loaded in every Claude session. Codex reads its global
@@ -2228,7 +2241,6 @@ setup_main() {
     run_step "claude"       install_claude
     run_step "codex"        install_codex
     run_step "codex MCP bridge" install_codex_mcp_bridge
-    run_step "codex loop helper" install_codex_loop
     run_step "chpc-allocs"  install_chpc_allocs
     run_step "detect-theme" install_detect_theme
 
@@ -2237,11 +2249,11 @@ setup_main() {
     # Link remaining configs
     run_step "shell config links" link_generated_configs
     run_step "old peer review hook cleanup" unwire_peer_review_hook_legacy
+    run_step "old codex loop cleanup" unwire_codex_loop_legacy
     run_step "agent guidance" link_agent_writing_guidance
     run_step "CHPC Codex guidance" link_chpc_codex_guidance
     run_step "claude skills"      link_claude_skills
     run_step "external skills"    install_external_claude_skills
-    run_step "codex loop skill"   link_codex_loop_skill
     run_step "agent skills sync"  sync_agent_skills
     run_step "chpc agent guide"   link_chpc_agent_guide
     run_step "cloudlab agent guide" link_cloudlab_agent_guide

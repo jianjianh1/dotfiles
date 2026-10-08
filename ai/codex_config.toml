@@ -36,27 +36,3 @@ status_line = ["model-with-reasoning", "status", "context-remaining", "used-toke
 
 [projects."/uufs/chpc.utah.edu/common/home/u1446071/.dotfiles"]
 trust_level = "trusted"
-
-[[hooks.UserPromptSubmit]]
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "~/.local/bin/codex-loop hook"
-timeout = 3
-
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = "~/.local/bin/codex-loop hook"
-timeout = 3
-
-[[hooks.SessionStart]]
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = "~/.local/bin/codex-loop hook"
-timeout = 3
-
-[[hooks.SessionEnd]]
-[[hooks.SessionEnd.hooks]]
-type = "command"
-command = "~/.local/bin/codex-loop hook"
-timeout = 3

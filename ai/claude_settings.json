@@ -13,7 +13,10 @@
   "includeGitInstructions": true,
   "permissions": {
     "defaultMode": "auto",
-    "allow": [],
+    "allow": [
+      "mcp__codex__codex",
+      "mcp__codex__codex-reply"
+    ],
     "deny": [
       "mcp__openalex__get_my_account",
       "mcp__openalex__claim_author_profile",
