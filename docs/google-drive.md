@@ -1,8 +1,9 @@
 # Google Drive with rclone
 
 `install.sh` installs and updates `rclone`. Linux uses the official amd64 or
-arm64 release under `~/.local/bin`; macOS uses Homebrew. Authentication is
-private user state and is never stored in this repository.
+arm64 release under `~/.local/bin`; macOS uses MacPorts, or Homebrew when
+MacPorts is not installed. Authentication is private user state and is never
+stored in this repository.
 
 ## One-time local setup
 

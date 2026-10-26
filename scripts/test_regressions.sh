@@ -886,6 +886,8 @@ test_rclone_install_uses_managed_local_bin() (
 
     # shellcheck source=install.sh
     . "$DIR/install.sh"
+    # The managed ~/.local/bin install is the non-macOS path.
+    is_macos() { return 1; }
     rclone_latest() { printf '9.9.9\n'; }
     machine_arch() { printf '%s\n' "$TEST_RCLONE_ARCH"; }
     report_rclone_gdrive_config() { :; }
@@ -1585,7 +1587,8 @@ _assert_retired_skills_removed() {
 
 test_skill_path_resolution() (
     local tmp index result
-    tmp="$(mktemp -d)"
+    # Physical path: macOS mktemp lives under /var, a symlink the resolver follows.
+    tmp="$(cd "$(mktemp -d)" && pwd -P)"
     trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/space dir/base"
     ln -s 'space dir/base' "$tmp/shortcut"
@@ -2156,6 +2159,145 @@ test_update_guard_decisions() (
     update_guard ftool ftool 99.0.0 >/dev/null || fail "update_guard did not honor --no-update"
 )
 
+test_macos_install_prefers_macports() (
+    local tmp calls
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOME="$tmp/home"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    mkdir -p "$HOME"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    # shellcheck disable=SC2034 # consumed by port_install
+    FORCE=false
+    # shellcheck disable=SC2034 # consumed by port_install
+    NO_UPDATE=false
+
+    is_macos() { return 0; }
+    calls="$tmp/calls"
+    # Shell functions stand in for sudo and both package managers (command -v
+    # resolves them). Installing a port makes fakecmd resolvable.
+    sudo() { "$@"; }
+    brew() {
+        printf 'brew %s\n' "$*" >> "$calls"
+        [ "$1" != list ]
+    }
+    port() {
+        printf 'port %s\n' "$*" >> "$calls"
+        case "$1 $2" in
+            "-q installed")
+                [ -e "$tmp/active-$3" ] && printf '  %s @1.0_0 (active)\n' "$3" ;;
+            "-q outdated")
+                [ -e "$tmp/outdated" ] && printf '%s  1.0_0 < 2.0_0\n' "$3"
+                [ ! -e "$tmp/outdated-fails" ] || return 1 ;;
+            "-b -N")
+                [ ! -e "$tmp/upgrade-fails" ] || return 1 ;;
+            "-N install")
+                shift 2
+                touch "${@/#/$tmp/active-}"
+                fakecmd() { echo "fakecmd 1.0"; } ;;
+        esac
+        return 0
+    }
+
+    # Missing command: install every listed port, never through Homebrew.
+    macos_install fakepkg fakecmd fakeport-a fakeport-b >/dev/null ||
+        fail "macos_install did not install a missing tool with MacPorts"
+    grep -qx 'port -N install fakeport-a fakeport-b' "$calls" ||
+        fail "macos_install did not pass every port name to port install"
+    if grep -q '^brew' "$calls"; then
+        fail "macos_install called Homebrew while MacPorts is present"
+    fi
+
+    # Present and current: selfupdate before the outdated check, no upgrade.
+    : > "$calls"
+    macos_install fakepkg fakecmd fakeport-a fakeport-b >/dev/null ||
+        fail "port_install failed on a current tool"
+    grep -qx 'port -q selfupdate' "$calls" ||
+        fail "port_install did not selfupdate before checking outdated ports"
+    grep -qx 'port -q outdated fakeport-a fakeport-b' "$calls" ||
+        fail "port_install did not check the active ports for updates"
+    if grep -q 'upgrade' "$calls"; then
+        fail "port_install upgraded a current port"
+    fi
+
+    # Partial set: the command works but a companion port is missing.
+    : > "$calls"
+    macos_install fakepkg fakecmd fakeport-a fakeport-c >/dev/null ||
+        fail "port_install failed on a partial port set"
+    grep -qx 'port -N install fakeport-c' "$calls" ||
+        fail "port_install did not install a missing companion port"
+
+    # A failed outdated lookup leaves the ports alone, even with output.
+    : > "$calls"
+    touch "$tmp/outdated" "$tmp/outdated-fails"
+    macos_install fakepkg fakecmd fakeport-a fakeport-b >/dev/null ||
+        fail "port_install failed when the outdated lookup failed"
+    if grep -q 'upgrade' "$calls"; then
+        fail "port_install upgraded after a failed outdated lookup"
+    fi
+    rm -f "$tmp/outdated-fails"
+
+    # Outdated: upgrade the active ports without a second selfupdate.
+    : > "$calls"
+    macos_install fakepkg fakecmd fakeport-a fakeport-b >/dev/null ||
+        fail "port_install failed on an outdated tool"
+    grep -qx 'port -b -N upgrade fakeport-a fakeport-b' "$calls" ||
+        fail "port_install did not upgrade outdated ports from prebuilt archives"
+    if grep -q 'selfupdate' "$calls"; then
+        fail "port_install ran selfupdate twice in one run"
+    fi
+
+    # No prebuilt upgrade yet: keep the installed version, never compile.
+    : > "$calls"
+    touch "$tmp/upgrade-fails"
+    macos_install fakepkg fakecmd fakeport-a fakeport-b >/dev/null ||
+        fail "port_install failed when no prebuilt upgrade exists"
+    grep -qx 'port -b -N upgrade fakeport-a fakeport-b' "$calls" ||
+        fail "port_install did not try a binary-only upgrade"
+    if grep -E ' (install|upgrade)( |$)' "$calls" |
+        grep -vqx 'port -b -N upgrade fakeport-a fakeport-b'; then
+        fail "port_install fell back to a source build without a prebuilt upgrade"
+    fi
+    rm -f "$tmp/upgrade-fails"
+
+    # --no-update: no MacPorts queries at all.
+    : > "$calls"
+    # shellcheck disable=SC2034
+    NO_UPDATE=true
+    macos_install fakepkg fakecmd fakeport-a >/dev/null ||
+        fail "port_install failed under --no-update"
+    [ ! -s "$calls" ] || fail "port_install queried MacPorts despite --no-update"
+    # shellcheck disable=SC2034
+    NO_UPDATE=false
+
+    # Present from elsewhere: the port name defaults to the formula, and an
+    # inactive port is never installed or upgraded over the existing copy.
+    : > "$calls"
+    othercmd() { echo "othercmd 1.0"; }
+    macos_install otherpkg othercmd >/dev/null ||
+        fail "port_install failed on a tool MacPorts does not manage"
+    grep -qx 'port -q installed otherpkg' "$calls" ||
+        fail "macos_install did not default the port name to the formula"
+    if grep -q -E 'selfupdate|-N ' "$calls"; then
+        fail "port_install touched a tool MacPorts does not manage"
+    fi
+
+    # No MacPorts: fall back to Homebrew.
+    : > "$calls"
+    unset -f port
+    macos_install fakepkg2 fakecmd2 >/dev/null 2>&1
+    grep -qx 'brew install fakepkg2' "$calls" ||
+        fail "macos_install did not fall back to Homebrew without MacPorts"
+
+    # Node maps to MacPorts' versioned node and npm ports.
+    macos_install() { printf '%s\n' "$*" > "$tmp/node-args"; }
+    install_node >/dev/null
+    [ "$(cat "$tmp/node-args")" = "node node nodejs24 npm11" ] ||
+        fail "install_node did not request the nodejs24 and npm11 ports"
+)
+
 test_install_accepts_no_update_flag() (
     local out
     # --no-update is parsed (sets the flag) before --help short-circuits, so this
@@ -2375,6 +2517,7 @@ main() {
     run_test test_chpc_codex_no_update_preserves_config
     run_test test_chpc_codex_failed_fallback_preserves_config
     run_test test_update_guard_decisions
+    run_test test_macos_install_prefers_macports
     run_test test_install_accepts_no_update_flag
     run_test test_claude_plugins_bootstrap_marketplace
     run_test test_legacy_peer_review_cleanup

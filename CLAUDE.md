@@ -119,7 +119,7 @@ Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc
 Re-running is version-aware: each present tool is compared against its latest release
 (`gh_latest` for GitHub binaries, `npm view` for the `claude`/`codex` version signal
 (Claude then updates via its native `claude update`; codex reinstalls from npm), the Node LTS index,
-`brew outdated` on macOS) via the shared `update_guard`/`tool_version` helpers and
+`port outdated` or `brew outdated` on macOS) via the shared `update_guard`/`tool_version` helpers and
 upgraded only when outdated. A failed version lookup leaves the tool untouched.
 
 ## Remote deploy

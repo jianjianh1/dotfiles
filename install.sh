@@ -125,6 +125,97 @@ brew_install() {
     command -v "$cmd" &>/dev/null
 }
 
+# "", ok, or failed: one selfupdate per run, so `port outdated` sees a fresh tree.
+PORT_SYNC_STATE=""
+
+port_selfupdate_once() {
+    if [ -z "$PORT_SYNC_STATE" ]; then
+        echo "Updating MacPorts ports tree..."
+        if sudo port -q selfupdate; then
+            PORT_SYNC_STATE=ok
+        else
+            PORT_SYNC_STATE=failed
+        fi
+    fi
+    [ "$PORT_SYNC_STATE" = ok ]
+}
+
+port_install() {
+    local cmd="$1" port_name outdated
+    shift
+    local ports=("$@") active=() missing=()
+
+    is_macos || return 1
+    if ! command -v port &>/dev/null; then
+        echo "  Skipping ${ports[*]}: MacPorts is not installed."
+        return 1
+    fi
+    if command -v "$cmd" &>/dev/null && ! $FORCE; then
+        if $NO_UPDATE; then
+            echo "$cmd present (update check skipped)"
+            return 0
+        fi
+        # Capture before matching: grep -q exiting early could SIGPIPE port under pipefail.
+        for port_name in "${ports[@]}"; do
+            case "$(port -q installed "$port_name" 2>/dev/null)" in
+                *"(active)"*) active+=("$port_name") ;;
+                *) missing+=("$port_name") ;;
+            esac
+        done
+        # Only upgrade ports MacPorts manages; a copy from elsewhere stays as is.
+        if [ ${#active[@]} -eq 0 ]; then
+            echo "$cmd present (not from MacPorts): $("$cmd" --version 2>&1 | head -1)"
+            return 0
+        fi
+        # A companion port (npm11 beside nodejs24) can be missing while $cmd works.
+        if [ ${#missing[@]} -gt 0 ]; then
+            echo "Installing ${missing[*]} with MacPorts..."
+            sudo port -N install "${missing[@]}" || return 1
+            hash -r
+        fi
+        if ! port_selfupdate_once; then
+            echo "  MacPorts selfupdate failed; leaving $cmd as is."
+            return 0
+        fi
+        if ! outdated="$(port -q outdated "${active[@]}" 2>/dev/null)"; then
+            echo "  port outdated failed; leaving $cmd as is."
+            return 0
+        fi
+        if [ -n "$outdated" ]; then
+            echo "Updating ${active[*]} with MacPorts..."
+            # Binary-only: an upgrade waits for a prebuilt archive rather than compiling.
+            if ! sudo port -b -N upgrade "${active[@]}"; then
+                echo "  No prebuilt upgrade for ${active[*]} yet (or it failed); leaving $cmd as is."
+            fi
+            hash -r
+            return 0
+        fi
+        echo "$cmd up to date: $("$cmd" --version 2>&1 | head -1)"
+        return 0
+    fi
+    echo "Installing ${ports[*]} with MacPorts..."
+    sudo port -N install "${ports[@]}" || return 1
+    hash -r
+    command -v "$cmd" &>/dev/null
+}
+
+# macOS packages come from MacPorts when it is installed (Homebrew no longer
+# builds Intel bottles), else Homebrew. Ports default to the formula name.
+macos_install() {
+    local formula="$1" cmd="$2"
+    shift 2
+
+    if command -v port &>/dev/null; then
+        if [ $# -gt 0 ]; then
+            port_install "$cmd" "$@"
+        else
+            port_install "$cmd" "$formula"
+        fi
+    else
+        brew_install "$formula" "$cmd"
+    fi
+}
+
 record_node_manifest() {
     local path
 
@@ -892,7 +983,7 @@ install_gh_bare_binary() {
 
 install_gh_cli() {
     if is_macos; then
-        brew_install gh gh
+        macos_install gh gh
         return $?
     fi
     if is_chpc && $CHPC_USE_MODULES; then
@@ -951,7 +1042,7 @@ install_gh_cli() {
 
 install_glow() {
     if is_macos; then
-        brew_install glow glow
+        macos_install glow glow
         return $?
     fi
     local GLOW_VERSION
@@ -987,7 +1078,7 @@ install_glow() {
 
 install_gum() {
     if is_macos; then
-        brew_install gum gum
+        macos_install gum gum
         return $?
     fi
     local GUM_VERSION
@@ -1027,7 +1118,7 @@ install_gum() {
 
 install_jq() {
     if is_macos; then
-        brew_install jq jq
+        macos_install jq jq
         return $?
     fi
     if command -v jq &>/dev/null && ! $FORCE; then
@@ -1072,7 +1163,7 @@ report_rclone_gdrive_config() {
 
 install_rclone() {
     if is_macos; then
-        brew_install rclone rclone || return 1
+        macos_install rclone rclone || return 1
         report_rclone_gdrive_config
         return 0
     fi
@@ -1168,7 +1259,7 @@ node_latest_lts() {
 install_node() {
     local MIN_NODE_MAJOR=18
     if is_macos; then
-        brew_install node node
+        macos_install node node nodejs24 npm11
         return $?
     fi
     if is_chpc && $CHPC_USE_MODULES; then
@@ -1256,7 +1347,7 @@ npm_global_install() {
 
 install_uv() {
     if is_macos; then
-        brew_install uv uv
+        macos_install uv uv
         return $?
     fi
     if is_chpc && $CHPC_USE_MODULES; then
@@ -1452,7 +1543,7 @@ install_nvim_appimage() {
 
 install_nvim() {
     if is_macos; then
-        brew_install neovim nvim
+        macos_install neovim nvim
         return $?
     fi
     if is_chpc && $CHPC_USE_MODULES; then
@@ -1564,7 +1655,7 @@ install_tree_sitter_cargo() {
 
 install_tree_sitter() {
     if is_macos; then
-        brew_install tree-sitter-cli tree-sitter
+        macos_install tree-sitter-cli tree-sitter
         return $?
     fi
     # Only short-circuit on successful module load; if no module exists on
@@ -1657,16 +1748,16 @@ install_gh_tools() {
     fi
 
     if is_macos; then
-        run_step "fzf"      brew_install fzf fzf
-        run_step "ripgrep"  brew_install ripgrep rg
-        run_step "fd"       brew_install fd fd
-        run_step "bat"      brew_install bat bat
-        run_step "delta"    brew_install git-delta delta
-        run_step "zoxide"   brew_install zoxide zoxide
-        run_step "lazygit"  brew_install lazygit lazygit
-        run_step "btop"     brew_install btop btop
-        run_step "starship" brew_install starship starship
-        run_step "atuin"    brew_install atuin atuin
+        run_step "fzf"      macos_install fzf fzf
+        run_step "ripgrep"  macos_install ripgrep rg
+        run_step "fd"       macos_install fd fd
+        run_step "bat"      macos_install bat bat
+        run_step "delta"    macos_install git-delta delta
+        run_step "zoxide"   macos_install zoxide zoxide
+        run_step "lazygit"  macos_install lazygit lazygit
+        run_step "btop"     macos_install btop btop
+        run_step "starship" macos_install starship starship
+        run_step "atuin"    macos_install atuin atuin
         return 0
     fi
 

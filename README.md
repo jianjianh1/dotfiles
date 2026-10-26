@@ -15,9 +15,9 @@ cd ~/.dotfiles
 ./install.sh --dry-run     # show planned steps without changing files
 ```
 
-Re-running `install.sh` keeps every managed CLI tool current: each present tool's version is compared against the latest release (GitHub releases, `npm view` version signal for `claude`/`codex`, the Node LTS index, or `brew outdated` on macOS) and upgraded only when outdated — Claude Code updates via its native `claude update`, codex reinstalls from npm. A failed version lookup (offline, rate-limited) leaves the installed tool untouched. Use `--no-update` (or `NO_UPDATE=1`) to skip the checks entirely.
+Re-running `install.sh` keeps every managed CLI tool current: each present tool's version is compared against the latest release (GitHub releases, `npm view` version signal for `claude`/`codex`, the Node LTS index, or `port outdated` / `brew outdated` on macOS) and upgraded only when outdated — Claude Code updates via its native `claude update`, codex reinstalls from npm. A failed version lookup (offline, rate-limited) leaves the installed tool untouched. Use `--no-update` (or `NO_UPDATE=1`) to skip the checks entirely.
 
-On macOS, `install.sh` uses Homebrew for managed CLI tools when `brew` is already installed. It does not install Homebrew automatically.
+On macOS, `install.sh` installs managed CLI tools with MacPorts (`sudo port install`) when `port` is on PATH, and otherwise with Homebrew when `brew` is. Ports already present are upgraded only when `port outdated` lists them, after one `port selfupdate` per run, and only from prebuilt archives (`port -b`); a newer version without one is left for a later run. It does not install MacPorts or Homebrew itself.
 
 Neovim's Tree-sitter syntax parsers need a C compiler available as `cc`.
 `install.sh` reports a warning if it is missing; install or load a compiler,
