@@ -173,11 +173,12 @@ The bell handlers run `printf '\a' > /dev/tty` to produce an audible notificatio
 
 Copied to `~/.codex/config.toml` by `install.sh` (mode `600`).
 
-### Reasoning
+### Model and reasoning
 
 | Setting | Value | Purpose |
 |---------|-------|---------|
-| `model_reasoning_effort` | `high` | Default reasoning effort |
+| `model` | `gpt-6-luna` | Default Codex model |
+| `model_reasoning_effort` | `xhigh` | Extra-high default reasoning effort |
 | `plan_mode_reasoning_effort` | `xhigh` | Extra-high reasoning when planning |
 
 ### Approvals & Sandbox
@@ -235,7 +236,7 @@ There is deliberately **no** `[mcp_servers.claude-code]` entry: `claude mcp serv
 
 ### CHPC behavior
 
-`install.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The `~/.dotfiles-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
+`install.sh` uses the same repo `claude_settings.json` and `codex_config.toml` on CHPC as elsewhere — no separate generated overrides. The Codex template selects GPT-6 Luna with `xhigh` reasoning and requires Codex CLI 0.155.0 or newer. The config is copied only after a compatible CLI is verified; if none is available, the existing config is left untouched. With `--use-modules`, an older `codex` module (the currently documented default is 0.114.0) falls back to a user-local npm install of `@openai/codex`. If `--no-update` prevents that upgrade, or the fallback fails, Codex installation is recorded as failed and the config is not replaced. The `~/.dotfiles-generated/` directory is still used for version-adaptive compat files (tmux, vim, gitconfig, bashrc) but no longer holds AI-tool config.
 
 On CHPC, installation also adds a managed allocation-discovery rule to Codex's
 global `AGENTS.md` and, when present, `AGENTS.override.md`. It directs Codex to

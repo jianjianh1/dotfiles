@@ -1934,6 +1934,172 @@ test_chpc_codex_guidance_lifecycle() (
     [ ! -e "$codex_dir/AGENTS.md" ] || fail "fresh Codex guidance survived uninstall"
 )
 
+test_chpc_codex_old_module_falls_back_to_npm() (
+    local tmp module_bin local_codex
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    module_bin="$tmp/modules/codex/bin"
+    mkdir -p "$HOME" "$module_bin"
+    export CODEX_TEST_MODULE_BIN="$module_bin"
+    printf '#!/bin/sh\necho codex-cli 0.114.0\n' > "$module_bin/codex"
+    chmod +x "$module_bin/codex"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    is_chpc() { return 0; }
+    module() {
+        case "$1" in
+            load)
+                PATH="$CODEX_TEST_MODULE_BIN:$PATH"
+                export PATH
+                ;;
+            unload)
+                case "$PATH" in
+                    "$CODEX_TEST_MODULE_BIN:"*) PATH="${PATH#"$CODEX_TEST_MODULE_BIN:"}" ;;
+                esac
+                export PATH
+                ;;
+        esac
+    }
+    npm_global_install() {
+        [ "$1" = "@openai/codex" ] && [ "$2" = codex ] || return 1
+        mkdir -p "$HOME/.local/bin" || return 1
+        printf '#!/bin/sh\necho codex-cli 0.162.1\n' > "$HOME/.local/bin/codex" || return 1
+        chmod +x "$HOME/.local/bin/codex" || return 1
+    }
+    FORCE=false
+    NO_UPDATE=false
+    CHPC_USE_MODULES=true
+
+    install_codex >/dev/null || fail "old CHPC Codex module did not fall back to npm"
+    local_codex="$HOME/.local/bin/codex"
+    [ "$CODEX_CONFIG_COMPATIBLE" = true ] || fail "new local Codex was not marked config-compatible"
+    [ -z "$CODEX_MODULE" ] || fail "old Codex module remained selected after fallback"
+    [ "$(command -v codex)" = "$local_codex" ] || fail "old module binary shadowed the local Codex install"
+    [ "$(tool_version codex)" = "0.162.1" ] || fail "local Codex version was not selected"
+)
+
+test_chpc_codex_supported_module_is_kept() (
+    local tmp module_bin
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    module_bin="$tmp/modules/codex/bin"
+    mkdir -p "$HOME" "$module_bin"
+    export CODEX_TEST_MODULE_BIN="$module_bin"
+    printf '#!/bin/sh\necho codex-cli 0.155.0\n' > "$module_bin/codex"
+    chmod +x "$module_bin/codex"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    is_chpc() { return 0; }
+    module() {
+        if [ "$1" = load ]; then
+            PATH="$CODEX_TEST_MODULE_BIN:$PATH"
+            export PATH
+        fi
+    }
+    npm_global_install() { fail "supported Codex module unexpectedly fell back to npm"; }
+    FORCE=false
+    NO_UPDATE=false
+    CHPC_USE_MODULES=true
+
+    install_codex >/dev/null || fail "supported CHPC Codex module was rejected"
+    [ "$CODEX_CONFIG_COMPATIBLE" = true ] || fail "supported Codex module was not marked config-compatible"
+    [ "$CODEX_MODULE" = codex ] || fail "supported Codex module was not retained"
+    [ "$(command -v codex)" = "$module_bin/codex" ] || fail "supported Codex module binary was not selected"
+)
+
+test_chpc_codex_no_update_preserves_config() (
+    local tmp module_bin config_path
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    module_bin="$tmp/modules/codex/bin"
+    mkdir -p "$HOME/.codex" "$module_bin"
+    export CODEX_TEST_MODULE_BIN="$module_bin"
+    printf '#!/bin/sh\necho codex-cli 0.114.0\n' > "$module_bin/codex"
+    chmod +x "$module_bin/codex"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    config_path="$HOME/.codex/config.toml"
+    printf '# User config to preserve\n' > "$config_path"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    is_chpc() { return 0; }
+    module() {
+        if [ "$1" = load ]; then
+            PATH="$CODEX_TEST_MODULE_BIN:$PATH"
+            export PATH
+        fi
+    }
+    npm_global_install() { fail "--no-update attempted a Codex install"; }
+    FORCE=false
+    NO_UPDATE=true
+    CHPC_USE_MODULES=true
+
+    if install_codex >/dev/null 2>&1; then
+        fail "--no-update accepted an unsupported CHPC Codex module"
+    fi
+    [ "$CODEX_CONFIG_COMPATIBLE" = false ] || fail "unsupported Codex was marked config-compatible"
+    CODEX_CONFIG_SRC="$DIR/ai/codex_config.toml"
+    link_codex_config >/dev/null || fail "incompatible Codex config skip failed"
+    [ "$(< "$config_path")" = '# User config to preserve' ] || fail "--no-update overwrote the existing Codex config"
+    [ ! -e "$INSTALL_MANIFEST" ] || fail "skipped Codex config was added to the install manifest"
+)
+
+test_chpc_codex_failed_fallback_preserves_config() (
+    local tmp module_bin config_path
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    export HOME="$tmp/home" CODEX_HOME="$tmp/home/.codex"
+    module_bin="$tmp/modules/codex/bin"
+    mkdir -p "$HOME/.codex" "$module_bin"
+    export CODEX_TEST_MODULE_BIN="$module_bin"
+    printf '#!/bin/sh\necho codex-cli 0.114.0\n' > "$module_bin/codex"
+    chmod +x "$module_bin/codex"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    config_path="$HOME/.codex/config.toml"
+    printf '# User config to preserve after failed upgrade\n' > "$config_path"
+
+    # shellcheck source=install.sh
+    . "$DIR/install.sh"
+    is_chpc() { return 0; }
+    module() {
+        case "$1" in
+            load)
+                PATH="$CODEX_TEST_MODULE_BIN:$PATH"
+                export PATH
+                ;;
+            unload)
+                case "$PATH" in
+                    "$CODEX_TEST_MODULE_BIN:"*) PATH="${PATH#"$CODEX_TEST_MODULE_BIN:"}" ;;
+                esac
+                export PATH
+                ;;
+        esac
+    }
+    npm_global_install() { return 1; }
+    FORCE=false
+    NO_UPDATE=false
+    CHPC_USE_MODULES=true
+
+    if install_codex >/dev/null 2>&1; then
+        fail "Codex install unexpectedly succeeded despite npm failure"
+    fi
+    [ "$CODEX_CONFIG_COMPATIBLE" = false ] || fail "failed Codex upgrade was marked config-compatible"
+    CODEX_CONFIG_SRC="$DIR/ai/codex_config.toml"
+    link_codex_config >/dev/null || fail "incompatible Codex config skip failed after npm failure"
+    [ "$(< "$config_path")" = '# User config to preserve after failed upgrade' ] || fail "failed Codex upgrade overwrote the existing config"
+)
+
 test_update_guard_decisions() (
     local tmp
     tmp="$(mktemp -d)"
@@ -2204,6 +2370,10 @@ main() {
     run_test test_agent_writing_guidance_preserves_global_instructions
     run_test test_agent_writing_guidance_restores_global_symlink
     run_test test_chpc_codex_guidance_lifecycle
+    run_test test_chpc_codex_old_module_falls_back_to_npm
+    run_test test_chpc_codex_supported_module_is_kept
+    run_test test_chpc_codex_no_update_preserves_config
+    run_test test_chpc_codex_failed_fallback_preserves_config
     run_test test_update_guard_decisions
     run_test test_install_accepts_no_update_flag
     run_test test_claude_plugins_bootstrap_marketplace

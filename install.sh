@@ -11,6 +11,9 @@ CLAUDE_SETTINGS_SRC=""
 CLAUDE_SETTINGS_MODE="repo"
 CODEX_CONFIG_SRC=""
 CODEX_CONFIG_MODE="repo"
+CODEX_CONFIG_COMPATIBLE=false
+# GPT-6 Luna's Codex model catalog entry requires this minimum CLI version.
+CODEX_MIN_LUNA_VERSION="0.155.0"
 DOTFILES_MODULE_VARS=(NVIM_MODULE CLAUDE_MODULE CODEX_MODULE GH_MODULE NODE_MODULE UV_MODULE BTOP_MODULE CODE_CLI_MODULE)
 
 reset_module_vars() {
@@ -1781,22 +1784,74 @@ install_claude() {
 }
 
 install_codex() {
+    local CODEX_LATEST="" CODEX_VERSION=""
+    CODEX_CONFIG_COMPATIBLE=false
+
     if is_chpc && $CHPC_USE_MODULES; then
-        try_chpc_module_load codex "Codex" CODEX_MODULE "${CODEX_MODULE_CANDIDATES[@]}"
-        return
+        if try_chpc_module_load codex "Codex" CODEX_MODULE "${CODEX_MODULE_CANDIDATES[@]}"; then
+            CODEX_VERSION="$(tool_version codex)"
+            if [ -n "$CODEX_VERSION" ] && version_at_least "$CODEX_VERSION" "$CODEX_MIN_LUNA_VERSION"; then
+                CODEX_CONFIG_COMPATIBLE=true
+                record_command_if_managed codex || true
+                return 0
+            fi
+
+            echo "  Codex ${CODEX_VERSION:-unknown} is older than the GPT-6 Luna minimum ($CODEX_MIN_LUNA_VERSION)."
+            if $NO_UPDATE && ! $FORCE; then
+                echo "  --no-update is set; keeping the existing Codex config unchanged."
+                return 1
+            fi
+
+            if [ -n "${CODEX_MODULE:-}" ]; then
+                module unload "$CODEX_MODULE" >/dev/null 2>&1 || true
+                CODEX_MODULE=""
+                hash -r
+            fi
+            echo "  Falling back to a user-local npm install of Codex."
+        fi
     fi
 
-    local CODEX_LATEST
-    CODEX_LATEST="$(retry npm view @openai/codex version 2>/dev/null)" || CODEX_LATEST=""
-    if update_guard "Codex CLI" codex "$CODEX_LATEST"; then
-        record_command_if_managed codex || true
-        return 0
+    if command -v codex &>/dev/null; then
+        CODEX_VERSION="$(tool_version codex)"
+        if [ -z "$CODEX_VERSION" ] || ! version_at_least "$CODEX_VERSION" "$CODEX_MIN_LUNA_VERSION"; then
+            echo "  Codex ${CODEX_VERSION:-unknown} is older than the GPT-6 Luna minimum ($CODEX_MIN_LUNA_VERSION)."
+            if $NO_UPDATE && ! $FORCE; then
+                echo "  --no-update is set; keeping the existing Codex config unchanged."
+                return 1
+            fi
+        else
+            CODEX_LATEST="$(retry npm view @openai/codex version 2>/dev/null)" || CODEX_LATEST=""
+            if update_guard "Codex CLI" codex "$CODEX_LATEST"; then
+                CODEX_CONFIG_COMPATIBLE=true
+                record_command_if_managed codex || true
+                return 0
+            fi
+        fi
     fi
+
+    # Keep a CHPC module's older executable from shadowing the npm-managed
+    # Codex binary installed in ~/.local/bin.
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+    hash -r
     echo "Installing Codex CLI via npm (@openai/codex)..."
     if ! npm_global_install "@openai/codex" codex; then
         echo "  Codex CLI install failed"
         return 1
     fi
+
+    if [ ! -x "$HOME/.local/bin/codex" ]; then
+        echo "  Codex CLI install failed — user-local binary not found at ~/.local/bin/codex"
+        return 1
+    fi
+    CODEX_VERSION="$(tool_version "$HOME/.local/bin/codex")"
+    if [ -z "$CODEX_VERSION" ] || ! version_at_least "$CODEX_VERSION" "$CODEX_MIN_LUNA_VERSION"; then
+        echo "  Codex CLI install failed — installed version ${CODEX_VERSION:-unknown} is below $CODEX_MIN_LUNA_VERSION"
+        return 1
+    fi
+
+    CODEX_CONFIG_COMPATIBLE=true
+    hash -r
     record_command_if_managed codex || true
     manifest_add_path "$HOME/.local/lib/node_modules/@openai/codex"
     echo "  Codex CLI $(codex --version 2>&1 | head -1) installed. Run 'codex' to authenticate."
@@ -1976,6 +2031,15 @@ link_core_configs() {
     backup_and_link "$DIR/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf" || return 1
 }
 
+link_codex_config() {
+    if [ "$CODEX_CONFIG_COMPATIBLE" != true ]; then
+        echo "Skipping Codex config: Codex CLI compatibility was not verified (requires >= $CODEX_MIN_LUNA_VERSION)."
+        return 0
+    fi
+    backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml" || return 1
+    manifest_add_path "$HOME/.codex/config.toml" || return 1
+}
+
 link_generated_configs() {
     backup_and_link "$GENERATED_DIR/tmux-theme.conf" "$HOME/.tmux-theme.conf" || return 1
     backup_and_link "$DIR/shell/bashrc_exports" "$HOME/.bashrc_exports" || return 1
@@ -1984,8 +2048,7 @@ link_generated_configs() {
     manifest_add_path "$HOME/.claude/settings.json" || return 1
     backup_and_link "$DIR/ai/claude_statusline.sh" "$HOME/.claude/statusline.sh" || return 1
     manifest_add_path "$HOME/.claude/statusline.sh" || return 1
-    backup_and_copy "$CODEX_CONFIG_SRC" "$HOME/.codex/config.toml" || return 1
-    manifest_add_path "$HOME/.codex/config.toml" || return 1
+    link_codex_config || return 1
     append_line_if_missing 'source ~/.bashrc_exports' "$HOME/.bashrc" || return 1
     append_line_if_missing 'source ~/.bashrc_aliases' "$HOME/.bashrc" || return 1
     link_zsh_configs || return 1

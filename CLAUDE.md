@@ -158,7 +158,7 @@ Before cloning, `step_clone_setup` sanitizes the remote git env (`unset GIT_EXEC
 
 - Installs gh, Node.js, uv, btop, and Neovim via direct binary download, Codex from npm (`@openai/codex`), and Claude Code via its native installer / `claude update` (`~/.local/share/claude`, no longer an npm package) — same as non-CHPC
 - Pass `--use-modules` (or `CHPC_USE_MODULES=true`) to prefer `module load` instead
-- Generates agent settings even if the CLIs are not currently installed or loaded
+- Generates Claude settings even if Claude Code is unavailable; copies the Codex config only after verifying Codex CLI 0.155.0 or newer (GPT-6 Luna)
 - Uses unrestricted defaults (`bypassPermissions` mode for Claude, `never`/`none` for Codex) — same as non-CHPC
 - Symlinks `chpc/CLAUDE.md` → `~/CLAUDE.md` (the Notchpeak HPC agent guide every CHPC agent loads), via `link_chpc_agent_guide`. This is the only file deployed to `~/CLAUDE.md` on CHPC (on CloudLab, `cloudlab/CLAUDE.md` deploys there instead); edit `chpc/CLAUDE.md`, never `~/CLAUDE.md` directly. Skipped off-CHPC.
 
@@ -166,7 +166,7 @@ Before cloning, `step_clone_setup` sanitizes the remote git env (`unset GIT_EXEC
 
 ```bash
 CLAUDE_MODULE_CANDIDATES=("claude")             # claude/2.1.83
-CODEX_MODULE_CANDIDATES=("codex")               # codex/0.114.0
+CODEX_MODULE_CANDIDATES=("codex")               # codex/0.114.0; falls back to npm Codex >= 0.155.0 for GPT-6 Luna
 GH_MODULE_CANDIDATES=("gh")                      # gh/2.0.0
 NODE_MODULE_CANDIDATES=("nodejs")                 # nodejs/22.4.0 (also: node-js/22.4.0)
 UV_MODULE_CANDIDATES=("uv")                       # uv/0.10.9
