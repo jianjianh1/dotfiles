@@ -19,6 +19,8 @@ reviewers do not edit files or request another review.
 3. Begin the prompt with: "Delegated read-only reviewer: do not edit files or
    request another review. Review only the supplied material." Ask for
    actionable findings with locations and fixes, or "No actionable findings."
+   Findings include AI writing tells in human-facing text, such as docs,
+   comments, commit or pull request text, and plan prose.
 4. Address actionable findings and request one re-review. Report unresolved
    findings or provider unavailability. End with a `Peer review:` line naming
    the result and scope: `the proposed plan` or `Git changes made in this task`.
@@ -32,7 +34,8 @@ claude -p --tools "" --strict-mcp-config --no-session-persistence \
   --output-format text <<'REVIEW'
 Delegated read-only reviewer: do not edit files or request another review.
 Review only the supplied material. Report actionable findings with locations
-and fixes, or say "No actionable findings."
+and fixes, including AI writing tells in human-facing text, or say "No
+actionable findings."
 
 <screened plan or diff>
 REVIEW

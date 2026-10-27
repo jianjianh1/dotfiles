@@ -90,11 +90,13 @@ use `premortem-analysis` below.
 
 | Skill | Triggers on |
 |---|---|
-| [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) | Required cross-review for completed plans and Git changes; requested delegation and second opinions through the Codex MCP bridge and headless `claude -p` |
+| [`agent-delegate`](../ai/skills/agent-delegate/SKILL.md) | Required cross-review for completed plans and Git changes, including AI writing tells in human-facing text; requested delegation and second opinions through the Codex MCP bridge and headless `claude -p` |
 
 Skills are optional task references. The agent may select them when useful,
 and explicit `/skill` (Claude) or `$skill` (Codex) invocation remains available.
-The shared policy requires only cross-review as a general workflow. Specialist
+The shared policy requires two general workflows: cross-review and an unslop
+pass on human-facing text that runs `deslop` on substantial prose. When that
+skill is missing, agents apply the guidance checklist and say so. Specialist
 advice does not impose extra approvals or a development process by itself.
 
 ## How skills are discovered
@@ -163,7 +165,7 @@ One skill, MIT licensed, synthesizing [hardikpandya/stop-slop](https://github.co
 
 | Skill | What it covers |
 |---|---|
-| `deslop` | Final editing pass that strips AI-writing tells from a draft: filler openers, formulaic contrasts, vague declaratives, "delve" / "quietly" / invented labels, bold-bullet formatting, plus a 5-dimension score (revise below 35/50). Tuned for scientific prose — passive voice is allowed in methods, domain terms are not slop, "we" for own work. It bans em dashes, which `technical-writing` permits; `deslop` wins when the user asks to deslop. |
+| `deslop` | Final editing pass that strips AI-writing tells from a draft: filler openers, formulaic contrasts, vague declaratives, "delve" / "quietly" / invented labels, bold-bullet formatting, plus a 5-dimension score (revise below 35/50). Tuned for scientific prose: passive voice is allowed in methods, domain terms are not slop, "we" for own work. The shared guidance requires it as the final pass on substantial prose, and `technical-writing` follows its em-dash ban. |
 
 ### From [mattpocock/skills](https://github.com/mattpocock/skills)
 

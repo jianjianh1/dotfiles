@@ -29,7 +29,7 @@ Lines that almost always cost more than they earn:
 
 - "It is important to note that …" → start with the note
 - "As mentioned previously …" → trust the reader's memory or restructure
-- "very", "really", "actually", "quite", "rather" — most can go
+- "very", "really", "actually", "quite", "rather": most can go
 - "in order to" → "to"
 - "due to the fact that" → "because"
 - "a number of" → "several" or the actual number
@@ -78,30 +78,29 @@ starting fresh, use AmE.
 
 Other conventions:
 
-- **Oxford (serial) comma** in lists of 3+: "MPI, OpenMP, and CUDA" — not
+- **Oxford (serial) comma** in lists of 3+: "MPI, OpenMP, and CUDA", not
   "MPI, OpenMP and CUDA". Disambiguation matters in technical prose where
   the last item is often the operative one.
 - **Straight quotes** (`"` `'`) in code, identifiers, paths, and shell snippets.
   Smart quotes ("…") only in body prose, and only if the rendering target supports them.
-- **Em-dash** with no surrounding spaces: `word—word`. Not `word — word` (that's
-  a journalistic convention) and not `word -- word` (LaTeX raw; render it).
+- **No em dashes** in prose, including LaTeX `---`. Rewrite with a comma,
+  colon, parentheses, or a separate sentence.
 - **En-dash** for ranges: `pp. 41–58`, `2019–2024`, `Algorithm 3–5`.
 - **Dates as ISO-8601** when machine-readable (`2026-05-26`); spelled-out month
-  for prose ("May 26, 2026" — AmE order, not "26 May 2026").
+  for prose ("May 26, 2026" in AmE order, not "26 May 2026").
 - **Times in 24h** for logs, schedules, and SLURM walltime; 12h with `a.m./p.m.`
   (lowercase, periods) in body prose.
 - **Number style**: spell out zero through nine in prose; use digits for ten and
   above, and always for measurements (`8 GPUs`, `3 ns`, `1.5 GiB`). Hard rule:
-  never start a sentence with a digit — rewrite or spell out.
+  never start a sentence with a digit; rewrite or spell out.
 - **Units with non-breaking space** in LaTeX (`8\,GB`) or a regular space in
   markdown (`8 GB`). Use SI/binary correctly: `GB` = 10⁹ bytes, `GiB` = 2³⁰.
 
 ## Removing AI-tells
 
-LLM-generated prose has a signature. The 2025-26 tells are not the same as
-the 2023 tells — strip both.
+The patterns below mark prose as machine-generated. Strip them.
 
-**Diction tells** — statistically over-represented words that flag generated prose:
+**Diction tells** are statistically over-represented words that flag generated prose:
 
 - `delve`, `delve into`, `delve deeper`
 - `leverage` (as a verb), `harness`, `unlock`, `elevate`, `empower`
@@ -114,10 +113,11 @@ the 2023 tells — strip both.
 - `at its core`, `in essence`, `fundamentally speaking`
 - `in today's fast-paced world`, `in this digital age`
 
-None are wrong in isolation — banned because their frequency in LLM output is
-~10× human baseline. If you reach for one, pause and pick a domain-specific verb.
+None are wrong in isolation. They are banned because their frequency in LLM
+output is ~10× human baseline. If you reach for one, pause and pick a
+domain-specific verb.
 
-**Structural tells** — sentence shapes that read as generated:
+**Structural tells** are sentence shapes that read as generated:
 
 - **Preambles**: "It's important to note that…" / "It's worth mentioning…" /
   "One key consideration is…" → delete the preamble, keep the noun.
@@ -127,20 +127,20 @@ None are wrong in isolation — banned because their frequency in LLM output is
   "simple, flexible, and powerful". Pick one and prove it.
 - **"Whether you're A or B, X has you covered."** Banned outright in docs.
 - **Cheerful closing paragraphs**: "In conclusion, by combining these
-  techniques…" / "Ultimately, this approach…" — end on the last substantive
+  techniques…" / "Ultimately, this approach…". End on the last substantive
   sentence and stop.
 - **Hedge stacks**: "may potentially be able to" → "can". "It is possible that
   this might" → "this might".
 - **Transition word peppering**: `Moreover`, `Furthermore`, `Additionally`,
   `Notably` opening every other paragraph. Use at most one per page, only
   when the logical link is actually adversative or additive.
-- **"Let's dive in" / "Let's explore" / "Let's take a closer look"** — drop.
-- **"I hope this helps!" / "Feel free to…" / "Certainly!" / "Absolutely!"** —
+- **"Let's dive in" / "Let's explore" / "Let's take a closer look"**: drop.
+- **"I hope this helps!" / "Feel free to…" / "Certainly!" / "Absolutely!"**:
   chat-assistant residue; never appears in shipped docs.
-- **Em-dash overuse** — one or two per page is fine; one per paragraph is not.
-- **Bold-bulleting everything** — bold the term being defined, then plain prose.
+- **Em dashes**: none. Use a comma, colon, parentheses, or a new sentence.
+- **Bold-bulleting everything**: bold the term being defined, then plain prose.
   Bullet lists where every item starts with `**Bold thing**: …` look generated.
-- **Emoji in technical prose** — none unless the user explicitly asked.
+- **Emoji in technical prose**: none unless the user explicitly asked.
 
 **The "would a human in this field write this?" test**: read the sentence
 aloud. If it sounds like a Wikipedia lede but the content is technical, or
@@ -158,12 +158,12 @@ like a LinkedIn post but the content is research, rewrite.
 ## Markdown conventions
 
 ````markdown
-# H1 — only once per doc (the title)
-## H2 — major sections
-### H3 — subsections; avoid going deeper
+# H1: only once per doc (the title)
+## H2: major sections
+### H3: subsections; avoid going deeper
 
 **bold** for the first appearance of a defined term.
-*italic* for emphasis; use sparingly — overused italic loses force.
+*italic* for emphasis; use sparingly, since overused italic loses force.
 `code` for identifiers, paths, flags, commands.
 
 `code blocks` for anything ≥1 line OR with shell prompts:
@@ -179,7 +179,7 @@ echo "hi"
 ```
 
 > Blockquote for cited material or important asides. Don't use it for
-> general emphasis — that's what bold/italic are for.
+> general emphasis; that's what bold/italic are for.
 ````
 
 Tables for genuinely tabular data (≥2 dimensions). For a 1-D list, use a
@@ -193,7 +193,7 @@ bullet list.
   `$` only when output is shown interleaved, to distinguish input from output.
 - **Show the output** when behavior is the point; **omit it** when the
   command itself is the point.
-- **Don't paste 200-line files** — show the diff, the changed function, or
+- **Don't paste 200-line files**. Show the diff, the changed function, or
   link to the source. Long code blocks lose readers.
 
 ## Hyperlinks
@@ -216,7 +216,7 @@ BibTeX is `[[bibtex-fetch]]`'s job; *deciding what to cite* is this section's.
 |---|---|
 | Roofline performance model | Williams, Waterman & Patterson, *Roofline: An Insightful Visual Performance Model*, CACM 2009 |
 | Strong vs weak scaling | Amdahl 1967 (strong); Gustafson 1988 (weak) |
-| MPI semantics, collectives | MPI Standard 4.1 (2023) — cite the standard, not a tutorial |
+| MPI semantics, collectives | MPI Standard 4.1 (2023); cite the standard, not a tutorial |
 | OpenMP semantics, pragmas | OpenMP API Specification 5.2 (2021) |
 | NCCL collectives over NVLink/IB | Jeaugey, *Optimized Inter-GPU Collective Operations with NCCL*, GTC 2017 (no peer-reviewed paper; cite NVIDIA tech report) |
 | Megatron-LM tensor/pipeline parallelism | Shoeybi et al., *Megatron-LM*, arXiv:1909.08053 (2019); Narayanan et al., SC '21 for the pipeline schedule |
@@ -225,7 +225,7 @@ BibTeX is `[[bibtex-fetch]]`'s job; *deciding what to cite* is this section's.
 | FlashAttention / FlashAttention-2 | Dao et al., NeurIPS '22; Dao, ICLR '24 |
 | Mixed-precision / bf16 training | Micikevicius et al., ICLR '18; Kalamkar et al., arXiv:1905.12322 (bf16) |
 | Transformer architecture | Vaswani et al., *Attention Is All You Need*, NeurIPS '17 |
-| GPU architecture details | NVIDIA H100/Hopper, A100/Ampere whitepapers — cite the whitepaper, not a blog post |
+| GPU architecture details | NVIDIA H100/Hopper, A100/Ampere whitepapers; cite the whitepaper, not a blog post |
 | Parallel I/O patterns | Lofstead et al. on ADIOS; HDF5 / NetCDF user guides; Carns et al., *Darshan*, SC '11 |
 | LINPACK / Top500 / Green500 | Dongarra et al.; the current list URL with an access date |
 | SLURM scheduling | Yoo, Jette & Grondona, *SLURM: Simple Linux Utility for Resource Management*, JSSPP '03 |
@@ -264,7 +264,7 @@ For docs and READMEs:
 ## Comments in code
 
 A standing rule: **default to no comment**. Add one when the *why* is
-non-obvious — a constraint not visible in the code, a workaround for a
+non-obvious: a constraint not visible in the code, a workaround for a
 specific bug, behavior that would surprise a reader. Don't narrate the
 *what*; good names already do that.
 
@@ -278,42 +278,41 @@ meets code.
 
 **Sibling skills in this repo**
 
-- [[latex-paper]] — LaTeX syntax, conference templates, math, figures
-- [[bibtex-fetch]] — fetching BibTeX from DOI/arXiv/title, deduping references
-- [[paper-review]] — reviewing prose in someone else's draft
+- [[latex-paper]]: LaTeX syntax, conference templates, math, figures
+- [[bibtex-fetch]]: fetching BibTeX from DOI/arXiv/title, deduping references
+- [[paper-review]]: reviewing prose in someone else's draft
 
 **Upstream Claude skills** (installed via `scripts/install_claude_skills.sh`)
 
-- [[doc-coauthoring]] — iterative drafting workflow for longer docs; use when
+- [[doc-coauthoring]]: iterative drafting workflow for longer docs; use when
   the deliverable is a multi-section spec, proposal, or design doc rather
   than a single README or paragraph rewrite
-- [[brand-guidelines]] — Anthropic visual identity if the artifact is for
+- [[brand-guidelines]]: Anthropic visual identity if the artifact is for
   Anthropic-branded surfaces
-- [[skill-creator]] — for editing skills (including this one)
-- [[deslop]] — final editing pass that strips AI tells from a finished draft;
-  a broader catalog than the inline list in "Removing AI-tells" above. It
-  bans em dashes outright where this skill allows them; it wins when the user
-  asks to deslop
-- [[research-paper-writing]] — section-by-section structure for ML/CV/NLP
+- [[skill-creator]]: for editing skills (including this one)
+- [[deslop]]: the full catalog behind the shared unslop rule, and the final
+  pass on substantial prose; broader than the inline list in "Removing
+  AI-tells" above
+- [[research-paper-writing]]: section-by-section structure for ML/CV/NLP
   papers (abstract, intro, related work, method, experiments), claim–evidence
   alignment, pre-submission self-review; pairs with [[latex-paper]]
 
-**Style canon** — reach for these when the model needs a tiebreaker on a
+**Style canon**: reach for these when the model needs a tiebreaker on a
 style judgment call:
 
-- Strunk & White, *The Elements of Style* (4th ed.) — concision, omit
+- Strunk & White, *The Elements of Style* (4th ed.): concision, omit
   needless words, active voice. Dated on some points; still the baseline.
-- Joseph M. Williams, *Style: Lessons in Clarity and Grace* — the best
+- Joseph M. Williams, *Style: Lessons in Clarity and Grace*: the best
   single source on subject-verb-object discipline and "characters as
   subjects."
-- William Zinsser, *On Writing Well* — nonfiction prose; the chapter on
+- William Zinsser, *On Writing Well*: nonfiction prose; the chapter on
   clutter is a useful reference for editing by deletion.
 - *The Chicago Manual of Style* (17th ed.) for hyphenation, capitalization,
   and serial-comma edge cases. For STEM, the IEEE Style Manual and
   ACM Style Guide override CMOS where they differ.
 
-**Venue style guides** — when writing for a specific venue, the venue's
-guide overrides everything above:
+**Venue style guides**: when writing for a specific venue, the venue's
+guide overrides everything above except the em-dash ban:
 
 - ACM (SIGCOMM, SC, SIGCSE, PPoPP, HPDC, ICS): ACM Master Article Template;
   ACM Style Guide; use `acmart` document class.
@@ -322,6 +321,6 @@ guide overrides everything above:
 - USENIX (OSDI, ATC, NSDI): USENIX submission style (single column);
   `usenix-conf` class.
 - NeurIPS, ICML, ICLR, AAAI: per-year style file; check that year's
-  CFP — formatting rules change.
+  CFP, because formatting rules change.
 
 See [[latex-paper]] for the LaTeX-side template scaffolding.

@@ -100,10 +100,12 @@ other way with headless `claude -p`, taught by the same skill, which
 serve` exposes Claude Code's tools, not the model.
 
 Skills are optional task references; select them when useful. The shared
-`ai/writing-guidance.md` now contains the optional-skills policy and required
-cross-review, without global prose rules. Superpowers and `reply-style` are
-excluded from the default setup. Installer, sync, and uninstall share cleanup
-for owned legacy links; real user skill directories and foreign links survive.
+`ai/writing-guidance.md` contains the optional-skills policy, an unslop rule
+for all human-facing text (a short checklist that bans em dashes, plus the
+upstream `deslop` skill as a final pass on substantial prose), and required
+cross-review. Superpowers and `reply-style` are excluded from the default
+setup. Installer, sync, and uninstall share cleanup for owned legacy links;
+real user skill directories and foreign links survive.
 
 Bash and zsh have **parallel rc files** under `shell/` (`bashrc_exports`/`bashrc_aliases` ↔ `zshrc_exports`/`zshrc_aliases`). Keep behavior in sync when editing either side — the aliases are nearly identical, the exports diverge on prompt, hooks (`PROMPT_COMMAND` ↔ `precmd`), shell options (`shopt` ↔ `setopt`), and tool init flags (`init bash` ↔ `init zsh`). The generated `bashrc_compat` file is POSIX-clean and sourced unchanged by both shells. Zsh wiring runs on macOS unconditionally (default login shell) and on Linux hosts only when `zsh` is installed.
 

@@ -106,9 +106,12 @@ HOME="$(mktemp -d)" ./install.sh --dry-run
 | `scripts/chpc-allocs.py` | `~/.local/bin/chpc-allocs` | symlink |
 
 Claude and Codex share optional specialist skills and required cross-review.
-Superpowers, the always-on reply style skill, and global writing rules are
-removed from the default setup. Reinstalling or running skill sync cleans up
-owned legacy links while preserving real user skill directories. See
+Both must unslop text written for people: a short checklist applies to all of
+it, and substantial prose also gets a final `deslop` pass (the checklist alone,
+reported as such, when that skill is missing). Superpowers and the always-on
+reply style skill are removed from the default setup. Reinstalling
+or running skill sync cleans up owned legacy links while preserving real user
+skill directories. See
 [AI skills](docs/ai-skills.md#retired-default-workflows) for manual opt-in.
 
 Both `shell/bashrc_exports` and `shell/bashrc_aliases` are sourced from `~/.bashrc` (lines appended by `install.sh` if not already present). Zsh wiring is parallel: `~/.zshrc_exports` and `~/.zshrc_aliases`.

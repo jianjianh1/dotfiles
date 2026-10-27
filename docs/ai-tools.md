@@ -6,14 +6,23 @@ Sources: [`claude_settings.json`](../ai/claude_settings.json), [`claude_statusli
 
 ---
 
-## Optional skills and cross-review
+## Optional skills, unslop rule, and cross-review
 
 [`ai/writing-guidance.md`](../ai/writing-guidance.md) makes skills optional
 references for both agents. They may select a specialist skill when useful,
 or follow an explicitly requested workflow. Selecting a skill adds no general
 requirement for approvals, separate plans, worktrees, or test-first steps.
 Project, permission, and host operational rules still apply. Cross-review
-remains required; the old global writing rules are removed.
+remains required.
+
+The guide also requires both agents to unslop text written for people:
+chat replies, plans, commit and pull request text, code comments, and docs.
+A short checklist covers filler openers and closings, stock vocabulary,
+formulaic sentence shapes, bold-first bullets, emoji, and Unicode arrows,
+and it bans em dashes. Substantial prose (several paragraphs or more) also
+gets a final pass through the upstream `deslop` skill. When that skill is
+missing, the agent applies the checklist and says so. An explicit user
+request overrides these rules.
 
 `install.sh` links the guide to `~/.claude/rules/writing.md`, which Claude
 loads for every project without replacing an existing `~/.claude/CLAUDE.md`.
@@ -30,8 +39,10 @@ for compatibility with installed hosts.
 ### Agent-initiated peer review
 
 The shared guidance asks Claude and Codex to review each other's completed
-implementation plans and Git edits before presenting the result. The author
-starts the review through the existing delegation tools at that milestone.
+implementation plans and Git edits before presenting the result. Reviewers
+also report AI writing tells in human-facing text, such as docs, comments,
+and commit or plan prose. The author starts the review through the existing
+delegation tools at that milestone.
 No prompt-submission, plan-approval, or stop hook runs cross-review. This is a
 best-effort instruction rather than an enforced gate.
 

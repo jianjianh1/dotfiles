@@ -1718,10 +1718,18 @@ test_retired_skill_backup_restore() (
 )
 
 test_optional_skill_guidance() (
-    local guidance="$DIR/ai/writing-guidance.md" skill description reference
+    local guidance="$DIR/ai/writing-guidance.md" skill description reference em_dash
+    local technical="$DIR/ai/skills/technical-writing/SKILL.md"
+    em_dash="$(printf '\342\200\224')"
     grep -q '^# Optional skills' "$guidance" || fail "optional policy missing"
     grep -q '^# Peer review of plans and changes' "$guidance" || fail "cross-review missing"
-    ! grep -q '^# Write for the reader' "$guidance" || fail "global style rules remain"
+    grep -q '^# Unslop human-facing writing' "$guidance" || fail "unslop rule missing"
+    grep -Fq 'run the `deslop` skill as a final pass' "$guidance" || fail "deslop pass not required"
+    ! grep -Fq "$em_dash" "$guidance" || fail "shared guidance uses an em dash"
+    ! grep -Fq 'Em-dash** with no surrounding spaces' "$technical" ||
+        fail "technical-writing still allows em dashes"
+    ! grep -Fq 'one or two per page' "$technical" || fail "technical-writing still allows em dashes"
+    grep -Fq '**No em dashes** in prose' "$technical" || fail "technical-writing lacks the em-dash ban"
     for skill in "$DIR/ai/skills"/*; do
         is_retired_skill_path "$skill" && continue
         description="$(sed -n '3p' "$skill/SKILL.md")"
