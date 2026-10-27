@@ -2092,6 +2092,7 @@ test_chpc_codex_failed_fallback_preserves_config() (
     npm_global_install() { return 1; }
     FORCE=false
     NO_UPDATE=false
+    # shellcheck disable=SC2034 # read by install_codex in install.sh
     CHPC_USE_MODULES=true
 
     if install_codex >/dev/null 2>&1; then
